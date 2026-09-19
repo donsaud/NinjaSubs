@@ -1,0 +1,39 @@
+﻿# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+
+# Persistent cache directories and subtitle payloads
+subs_cache/
+*.srt
+*.vtt
+*.ass
+*.ssa
+
+# Python bytecode and compiler caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Test, linting, and type checking caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# System, IDE, and editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+*.log
+Score

@@ -1,0 +1,34 @@
+name: ninjasubs
+
+services:
+  stremio-arabic-subs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stremio-arabic-subs
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+    volumes:
+      # Persistent LRU disk cache
+      - ./subs_cache:/app/cache
+    environment:
+      - SUBDL_API_KEY=${SUBDL_API_KEY:-}
+      - SUBSOURCE_API_KEY=${SUBSOURCE_API_KEY:-}
+      - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:-}
+      - BASE_URL=${BASE_URL:-}
+      - ADDON_BASE_URL=${ADDON_BASE_URL:-}
+      - LAN_IP=${LAN_IP:-}
+      - HOST_IP=${HOST_IP:-}
+      # LRU Cache bounds (Max 1GB / 500 files)
+      - CACHE_DIR=/app/cache
+      - CACHE_MAX_BYTES=1073741824
+      - CACHE_MAX_FILES=500
+    # Strict resource bounds: runs smoothly under 100MB RAM
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 150M
+        reservations:
+          memory: 50M

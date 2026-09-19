@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NinjaSubs</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="alternate icon" type="image/png" href="/static/favicon.png">
+    <link rel="apple-touch-icon" href="/static/icon.png">
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+                    },
+                    colors: {
+                        mono: {
+                            bg: '#0c0d0e',
+                            card: '#141619',
+                            border: '#22262b',
+                            muted: '#8b929a',
+                            subtle: '#1a1d21',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Google Fonts Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <!-- Tom Select CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/css/tom-select.css">
+    <style>
+        @font-face {
+            font-family: 'Hoshiko Satsuki';
+            src: url('/static/fonts/Hoshiko-Satsuki.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+            font-display: swap;
+        }
+
+        /* Title specific style */
+        .brand-title {
+            font-family: 'Hoshiko Satsuki', -apple-system, sans-serif;
+            font-size: 2.8rem;
+            font-weight: normal;
+            letter-spacing: 0.04em;
+            color: #ffffff;
+            text-align: center;
+            margin: 4px 0 8px 0;
+            text-shadow: 0 4px 18px rgba(0, 0, 0, 0.6);
+        }
+
+        body {
+            background-color: #0c0d0e;
+            color: #ffffff;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+
+        /* Minimal Monochrome Card (24px radius, #141619 background, #22262b border) */
+        .mono-card {
+            background-color: #141619;
+            border: 1px solid #22262b;
+            border-radius: 24px;
+            transition: border-color 0.2s ease;
+        }
+        .mono-card:hover {
+            border-color: #2e343b;
+        }
+
+        /* Clean Monochrome Input Fields */
+        .mono-input {
+            background-color: #0c0d0e !important;
+            border: 1px solid #22262b !important;
+            border-radius: 14px !important;
+            color: #ffffff !important;
+            padding: 10px 14px !important;
+            font-size: 0.875rem !important;
+            transition: border-color 0.15s ease, box-shadow 0.15s ease !important;
+            outline: none !important;
+        }
+        .mono-input:focus {
+            border-color: #ffffff !important;
+            box-shadow: 0 0 0 1px #ffffff !important;
+        }
+        .mono-input::placeholder {
+            color: #454c55 !important;
+        }
+
+        /* Tom Select Monochrome Dark Overrides */
+        .ts-wrapper {
+            position: relative;
+            width: 100%;
+        }
+        .ts-wrapper.multi .ts-control {
+            background-color: #0c0d0e !important;
+            border: 1px solid #22262b !important;
+            border-radius: 14px !important;
+            color: #ffffff !important;
+            padding: 6px 12px !important;
+            min-height: 46px !important;
+            display: flex !important;
+            flex-wrap: wrap !important;
+            align-items: center !important;
+            gap: 6px !important;
+            box-shadow: none !important;
+            transition: border-color 0.15s ease, box-shadow 0.15s ease !important;
+        }
+        .ts-wrapper.focus .ts-control {
+            border-color: #ffffff !important;
+            box-shadow: 0 0 0 1px #ffffff !important;
+        }
+        .ts-control input {
+            color: #ffffff !important;
+            background: transparent !important;
+            border: none !important;
+            outline: none !important;
+            box-shadow: none !important;
+            font-size: 0.875rem !important;
+            padding: 2px 0 !important;
+            margin: 0 !important;
+        }
+        .ts-control input::placeholder {
+            color: #454c55 !important;
+        }
+        .ts-wrapper.multi .ts-control > div.item {
+            background: #1e2227 !important;
+            color: #ffffff !important;
+            border: 1px solid #2d333b !important;
+            border-radius: 8px !important;
+            padding: 3px 8px 3px 10px !important;
+            font-size: 0.8125rem !important;
+            font-weight: 500 !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            gap: 6px !important;
+        }
+        .ts-wrapper.plugin-remove_button .item .remove {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            color: #8b929a !important;
+            font-size: 1rem !important;
+            line-height: 1 !important;
+            margin-left: 4px !important;
+            padding: 0 4px !important;
+            border-left: 1px solid #2d333b !important;
+            opacity: 0.8 !important;
+            text-decoration: none !important;
+            transition: all 0.15s ease !important;
+        }
+        .ts-wrapper.plugin-remove_button .item .remove:hover {
+            opacity: 1 !important;
+            color: #ffffff !important;
+            background: #383e47 !important;
+            border-radius: 0 6px 6px 0 !important;
+        }
+        .ts-dropdown {
+            background: #141619 !important;
+            border: 1px solid #22262b !important;
+            border-radius: 14px !important;
+            box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.9) !important;
+            margin-top: 6px !important;
+            color: #ffffff !important;
+            z-index: 9999 !important;
+            overflow: hidden !important;
+        }
+        .ts-dropdown .ts-dropdown-content {
+            max-height: 220px !important;
+            overflow-y: auto !important;
+            padding: 6px !important;
+        }
+        .ts-dropdown .option {
+            padding: 8px 12px !important;
+            border-radius: 8px !important;
+            color: #8b929a !important;
+            font-size: 0.8125rem !important;
+            cursor: pointer !important;
+            transition: all 0.15s ease !important;
+        }
+        .ts-dropdown .option:hover,
+        .ts-dropdown .option.active {
+            background: #1f2328 !important;
+            color: #ffffff !important;
+        }
+        .ts-dropdown .option.selected {
+            color: #434952 !important;
+            background: transparent !important;
+        }
+        select[multiple]#languageSelect {
+            width: 100%;
+            background: #0c0d0e;
+            border: 1px solid #22262b;
+            border-radius: 14px;
+            color: #ffffff;
+            padding: 8px 12px;
+            min-height: 100px;
+            font-size: 0.875rem;
+            outline: none;
+        }
+        select[multiple]#languageSelect option:checked {
+            background: #1e2227;
+            color: #ffffff;
+        }
+    </style>
+</head>
+<body class="bg-[#0c0d0e] text-white font-sans min-h-screen flex items-center justify-center p-4 sm:p-6 antialiased selection:bg-white selection:text-[#0c0d0e] relative overflow-x-hidden">
+
+    <!-- Main Container (24px radius, #141619 background, #22262b border) -->
+    <div class="relative z-10 w-full max-w-xl mono-card p-6 sm:p-8 shadow-2xl shadow-black/80 space-y-6 my-8">
+
+        <!-- Header & Branding -->
+        <div class="text-center pt-1">
+            <h1 class="brand-title">NinjaSubs</h1>
+            <p class="text-sm text-[#8b929a] max-w-md mx-auto leading-relaxed">
+                Smart, high-accuracy subtitle aggregator from SubDL, SubSource, and OpenSubtitles for Stremio.
+            </p>
+        </div>
+
+        {{env_banner_html}}
+
+        <!-- Card 1: Credentials -->
+        <div class="mono-card p-5 sm:p-6 space-y-4">
+            <div>
+                <div class="flex items-center justify-between mb-1.5">
+                    <label for="subdl-key" class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">Subdl API Key</label>
+                    <a href="https://subdl.com/panel/api" target="_blank" class="text-xs text-white hover:text-[#8b929a] transition-colors inline-flex items-center gap-1 font-medium underline underline-offset-4 decoration-[#22262b] hover:decoration-white">Get API Key <span class="text-[10px]">&#8599;</span></a>
+                </div>
+                <div class="flex items-center gap-3">
+                    <input type="text" id="subdl-key" value="{{initial_subdl}}" placeholder="Paste your Subdl API Key (Required for Subdl)" class="mono-input flex-1 min-w-0" autocomplete="off">
+                    <div id="subdl-status" class="shrink-0"></div>
+                </div>
+            </div>
+
+            <div>
+                <div class="flex items-center justify-between mb-1.5">
+                    <label for="subsource-key" class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">
+                        Subsource API Key <span class="text-xs font-normal normal-case text-[#454c55]">(Optional)</span>
+                    </label>
+                    <a href="https://subsource.net/dashboard/profile" target="_blank" class="text-xs text-white hover:text-[#8b929a] transition-colors inline-flex items-center gap-1 font-medium underline underline-offset-4 decoration-[#22262b] hover:decoration-white">Get API Key <span class="text-[10px]">&#8599;</span></a>
+                </div>
+                <div class="flex items-center gap-3">
+                    <input type="text" id="subsource-key" value="{{initial_subsource}}" placeholder="Paste your Subsource API Key (Optional)" class="mono-input flex-1 min-w-0" autocomplete="off">
+                    <div id="subsource-status" class="shrink-0"></div>
+                </div>
+                <p class="text-[11px] text-[#454c55] mt-1">Leave empty to use Subdl only.</p>
+            </div>
+
+            <div>
+                <div class="flex items-center justify-between mb-1.5">
+                    <label for="opensubtitles-key" class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">
+                        OpenSubtitles API Key <span class="text-xs font-normal normal-case text-[#454c55]">(Optional)</span>
+                    </label>
+                    <a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="text-xs text-white hover:text-[#8b929a] transition-colors inline-flex items-center gap-1 font-medium underline underline-offset-4 decoration-[#22262b] hover:decoration-white">Get API Key <span class="text-[10px]">&#8599;</span></a>
+                </div>
+                <div class="flex items-center gap-3">
+                    <input type="text" id="opensubtitles-key" value="{{initial_opensubtitles}}" placeholder="Paste your OpenSubtitles API Key (Optional)" class="mono-input flex-1 min-w-0" autocomplete="off">
+                    <div id="opensubtitles-status" class="shrink-0"></div>
+                </div>
+                <p class="text-[11px] text-[#454c55] mt-1">Leave empty to use Subdl/Subsource only.</p>
+            </div>
+        </div>
+
+        <!-- Card 2: Configuration Settings -->
+        <div class="mono-card p-5 sm:p-6 space-y-4">
+            <div>
+                <label for="languageSelect" class="block text-xs font-semibold uppercase tracking-wider text-[#8b929a] mb-1.5">Preferred Languages</label>
+                <select id="languageSelect" name="languages" multiple placeholder="Select languages you like" autocomplete="off">
+                    {{language_options_html}}
+                </select>
+            </div>
+
+            <!-- Simple, elegant toggle switch for Exclude HI -->
+            <div class="flex items-center justify-between pt-4 border-t border-[#22262b]">
+                <div>
+                    <label for="excludeHi" class="text-sm font-medium text-white block cursor-pointer">
+                        Exclude HI (Hearing Impaired)
+                    </label>
+                    <p class="text-xs text-[#8b929a] mt-0.5">Filter out subtitles with sound effects and audio descriptions.</p>
+                </div>
+                <label class="relative inline-flex items-center cursor-pointer select-none">
+                    <input type="checkbox" id="excludeHi" {{initial_exclude_hi}} class="sr-only peer">
+                    <div class="w-11 h-6 bg-[#0c0d0e] border border-[#22262b] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#8b929a] peer-checked:after:bg-[#0c0d0e] after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-white peer-checked:border-white"></div>
+                </label>
+            </div>
+        </div>
+
+        <!-- Card 3: Network & Host -->
+        <div class="mono-card p-5 sm:p-6">
+            <div class="flex items-center justify-between mb-1.5">
+                <label for="hostUrl" class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">Addon Host / LAN Base URL</label>
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-[#1e2227] text-white border border-[#2d333b]">
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span id="hostBadgeText">Auto-detected: {{lan_ip}}</span>
+                </span>
+            </div>
+            <input type="text" id="hostUrl" placeholder="http://192.168.1.xxx:7000" value="{{base_url}}" class="mono-input w-full font-mono text-xs" autocomplete="off">
+        </div>
+
+        <!-- Stremio Installation Card -->
+        <div class="mono-card p-5 sm:p-6 space-y-4">
+            <!-- Card Header -->
+            <div class="flex items-start gap-3.5">
+                <div class="w-10 h-10 rounded-xl bg-[#6A38EB]/15 border border-[#6A38EB]/30 flex items-center justify-center shrink-0 shadow-sm">
+                    <svg class="w-5 h-5 text-[#8A5CFF]" viewBox="0 0 24 24" fill="none">
+                        <path d="M12 2L21 12L12 22L3 12L12 2Z" fill="#6A38EB" fill-opacity="0.3" stroke="#6A38EB" stroke-width="1.5" stroke-linejoin="round"/>
+                        <path d="M10 8.5L16 12L10 15.5V8.5Z" fill="#8A5CFF"/>
+                    </svg>
+                </div>
+                <div>
+                    <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                        Stremio
+                    </h3>
+                    <p class="text-xs text-[#8b929a] mt-0.5 leading-relaxed">
+                        Install to Stremio or other Stremio addon compatible clients using the Manifest URL.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Action Buttons: Solid White Primary CTA + Dark Secondary Copy Link -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <!-- Primary CTA: Solid white button with black text (#0c0d0e), rounded corners, high visibility -->
+                <button id="installStremioApp" type="button" class="inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm text-[#0c0d0e] bg-white hover:bg-[#e4e7eb] active:scale-[0.98] transition-all duration-150 cursor-pointer shadow-sm">
+                    <svg class="w-4 h-4 text-[#0c0d0e]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                    <span>Install to Stremio</span>
+                </button>
+                <!-- Secondary CTA: Dark surface matching monochrome theme -->
+                <button id="btnCopy" type="button" onclick="copyManifestLink()" class="inline-flex items-center justify-center gap-2 px-5 py-3.5 rounded-xl font-semibold text-sm text-white bg-[#1e2227] hover:bg-[#282d34] border border-[#2f353d] active:scale-[0.98] transition-all duration-150 cursor-pointer">
+                    <svg class="w-4 h-4 text-[#8b929a]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    <span id="btnCopyText">Copy Link</span>
+                </button>
+            </div>
+
+            <!-- Secondary Stremio Web Option -->
+            <div class="pt-1 text-center">
+                <button id="installStremioWeb" type="button" class="inline-flex items-center gap-1.5 text-xs text-[#8b929a] hover:text-white transition-colors py-1 cursor-pointer">
+                    <svg class="w-3.5 h-3.5 text-[#454c55]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                    <span>Install to Stremio Web</span>
+                    <span class="text-[10px]">&#8599;</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Manifest URL & Details -->
+        <div class="space-y-2 pt-1">
+            <div class="flex items-center justify-between">
+                <span class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">Generated Manifest URL</span>
+            </div>
+
+            <div class="font-mono text-xs text-[#8b929a] bg-[#0c0d0e] border border-[#22262b] p-3.5 rounded-xl break-all select-all shadow-inner leading-relaxed" id="manifestPreview">
+                {{base_url}}/manifest.json
+            </div>
+
+            <p class="text-center text-[11px] text-[#454c55] pt-1">
+                Stateless configuration: all API keys and preferences are serialized into the manifest URL. No personal data is stored on this server.
+            </p>
+        </div>
+    </div>
+
+    <!-- Minimal Toast Notification -->
+    <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 hidden z-50 items-center gap-2 px-5 py-2.5 rounded-full bg-white text-[#0c0d0e] font-bold text-xs shadow-2xl transition-all duration-300">
+        <svg class="w-4 h-4 text-[#0c0d0e]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        <span>Copied to Clipboard!</span>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/js/tom-select.complete.min.js"></script>
+    <script>
+        const serverLanIp = "{{lan_ip}}";
+        const serverPort = "{{port}}" || "7000";
+        const serverLanUrl = "{{lan_url}}";
+
+        const hostInput = document.getElementById("hostUrl");
+        if (hostInput) {
+            const curHostname = window.location.hostname || "";
+            const curPort = window.location.port || serverPort;
+            const curProto = window.location.protocol || "http:";
+
+            if (curHostname && curHostname !== "localhost" && curHostname !== "127.0.0.1") {
+                // If the browser accesses via a local IP (e.g. 192.168.x.x) or domain, prefer window.location.origin
+                hostInput.value = window.location.origin || `${curProto}//${curHostname}:${curPort}`;
+            } else if (serverLanIp && serverLanIp !== "127.0.0.1" && serverLanIp !== "localhost") {
+                // If user opens via localhost or 127.0.0.1, use server-detected LAN URL
+                hostInput.value = `http://${serverLanIp}:${curPort}`;
+            } else if (!hostInput.value || hostInput.value.includes("localhost") || hostInput.value.includes("127.0.0.1")) {
+                if (serverLanUrl) {
+                    hostInput.value = serverLanUrl;
+                }
+            }
+
+            // Update badge text dynamically
+            const badgeEl = document.getElementById("hostBadgeText");
+            if (badgeEl) {
+                const detectedHost = (curHostname && curHostname !== "localhost" && curHostname !== "127.0.0.1") ? curHostname : (serverLanIp || "Active");
+                badgeEl.textContent = `Auto-detected: ${detectedHost}`;
+            }
+        }
+        if (hostInput) {
+            hostInput.addEventListener("input", updateUrls);
+        }
+
+        let selectControl = null;
+        try {
+            if (window.TomSelect) {
+                selectControl = new TomSelect("#languageSelect", {
+                    plugins: ['remove_button'],
+                    placeholder: "Select languages you like",
+                    maxOptions: 100,
+                    persist: false,
+                    create: false,
+                    closeAfterSelect: false,
+                    hidePlaceholder: true,
+                    searchField: ['text', 'value'],
+                    onChange: function() {
+                        updateUrls();
+                    }
+                });
+            }
+        } catch (e) {
+            console.warn("TomSelect initialization error:", e);
+        }
+
+        const nativeLangSelect = document.getElementById("languageSelect");
+        if (nativeLangSelect) {
+            nativeLangSelect.addEventListener("change", updateUrls);
+        }
+
+        function getSelectedLanguages() {
+            if (selectControl) {
+                const val = selectControl.getValue();
+                if (Array.isArray(val)) return val.filter(Boolean);
+                if (typeof val === "string" && val.trim()) return val.split(",").map(s => s.trim()).filter(Boolean);
+                return [];
+            }
+            const el = document.getElementById("languageSelect");
+            if (el) {
+                return Array.from(el.selectedOptions).map(opt => opt.value).filter(Boolean);
+            }
+            return ["ara"];
+        }
+
+        function getEffectiveBaseUrl() {
+            const val = hostInput ? hostInput.value.trim().replace(/[/]+$/, "") : "";
+            return val || (window.location.origin || serverLanUrl || "{{base_url}}").replace(/[/]+$/, "");
+        }
+
+        const checkIconSvg = `<svg class="w-4 h-4 text-emerald-400 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg>`;
+        const crossIconSvg = `<svg class="w-4 h-4 text-rose-400 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" /></svg>`;
+        const spinIconSvg = `<svg class="animate-spin h-3.5 w-3.5 text-[#8b929a] shrink-0" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>`;
+
+        function getSubdlInput() {
+            return document.getElementById("subdl-key") || document.getElementById("subdlKey");
+        }
+
+        function getSubsourceInput() {
+            return document.getElementById("subsource-key") || document.getElementById("subsourceKey");
+        }
+
+        function getOpenSubtitlesInput() {
+            return document.getElementById("opensubtitles-key") || document.getElementById("opensubtitlesKey");
+        }
+
+        function getSubdlStatus() {
+            return document.getElementById("subdl-status") || document.getElementById("subdlStatus");
+        }
+
+        function getSubsourceStatus() {
+            return document.getElementById("subsource-status") || document.getElementById("subsourceStatus");
+        }
+
+        function getOpenSubtitlesStatus() {
+            return document.getElementById("opensubtitles-status") || document.getElementById("opensubtitlesStatus");
+        }
+
+        function serializeConfig() {
+            const subdlEl = getSubdlInput();
+            const subsourceEl = getSubsourceInput();
+            const opensubtitlesEl = getOpenSubtitlesInput();
+            const subdl = subdlEl ? subdlEl.value.trim() : "";
+            const subsource = subsourceEl ? subsourceEl.value.trim() : "";
+            const opensubtitles = opensubtitlesEl ? opensubtitlesEl.value.trim() : "";
+            const excludeHi = document.getElementById("excludeHi").checked;
+
+            const langs = getSelectedLanguages();
+
+            const configObj = {};
+            if (subdl) configObj.subdl_key = subdl;
+            if (subsource) configObj.subsource_key = subsource;
+            if (opensubtitles) configObj.opensubtitles_key = opensubtitles;
+            if (langs.length > 0) configObj.languages = langs;
+            if (excludeHi) configObj.exclude_hi = true;
+
+            if (Object.keys(configObj).length === 0) {
+                return null;
+            }
+
+            const jsonStr = JSON.stringify(configObj);
+            return btoa(unescape(encodeURIComponent(jsonStr)))
+                .replace(/[+]/g, '-')
+                .replace(/[/]/g, '_')
+                .replace(/=+$/, '');
+        }
+
+        function getManifestUrl() {
+            const currentBase = getEffectiveBaseUrl();
+            const encodedConfig = serializeConfig();
+            if (encodedConfig) {
+                return currentBase + "/" + encodedConfig + "/manifest.json";
+            }
+            return currentBase + "/manifest.json";
+        }
+
+        function updateUrls() {
+            const manifestHttp = getManifestUrl();
+            const stremioUrl = manifestHttp.replace(/^https?:[/][/]/, "stremio://");
+
+            const btnInstall = document.getElementById("btnInstall");
+            if (btnInstall) btnInstall.href = stremioUrl;
+
+            const preview = document.getElementById("manifestPreview");
+            if (preview) preview.textContent = manifestHttp;
+        }
+
+        const updateInstallUrls = updateUrls;
+
+        // 1. Install to Desktop / Mobile App (Converts to stremio:// and copies HTTP URL to clipboard)
+        const installAppBtn = document.getElementById("installStremioApp");
+        if (installAppBtn) {
+            installAppBtn.addEventListener("click", (e) => {
+                e.preventDefault();
+                const currentUrl = getManifestUrl();
+                const stremioUri = currentUrl.replace(/^https?:[/][/]/i, "stremio://");
+
+                // Copy manifest HTTP URL to clipboard
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(currentUrl).catch(() => {});
+                }
+
+                // Show toast
+                const toast = document.getElementById("toast");
+                if (toast) {
+                    toast.classList.remove("hidden");
+                    toast.classList.add("flex");
+                    setTimeout(() => {
+                        toast.classList.add("hidden");
+                        toast.classList.remove("flex");
+                    }, 2000);
+                }
+
+                window.location.href = stremioUri;
+            });
+        }
+
+        // 2. Install to Stremio Web
+        const installWebBtn = document.getElementById("installStremioWeb");
+        if (installWebBtn) {
+            installWebBtn.addEventListener("click", (e) => {
+                e.preventDefault();
+                const currentUrl = getManifestUrl();
+                const webUri = `https://web.stremio.com/#/addons?addon=${encodeURIComponent(currentUrl)}`;
+                window.open(webUri, "_blank");
+            });
+        }
+
+        function copyManifestLink() {
+            const text = document.getElementById("manifestPreview").textContent.trim();
+            navigator.clipboard.writeText(text).then(() => {
+                const toast = document.getElementById("toast");
+                toast.classList.remove("hidden");
+                toast.classList.add("flex");
+                setTimeout(() => {
+                    toast.classList.add("hidden");
+                    toast.classList.remove("flex");
+                }, 2000);
+            }).catch(() => {
+                prompt("Copy this URL:", text);
+            });
+        }
+
+        let subdlDebounceTimer;
+        const subdlInput = getSubdlInput();
+        const subdlStatus = getSubdlStatus();
+
+        async function verifySubdlKey(key) {
+            const statusEl = getSubdlStatus();
+            if (!key) {
+                if (statusEl) statusEl.innerHTML = "";
+                return;
+            }
+            if (statusEl) {
+                statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
+            }
+            try {
+                const res = await fetch(`/api/verify/subdl?api_key=${encodeURIComponent(key)}`);
+                const data = await res.json();
+                const curStatus = getSubdlStatus();
+                if (!curStatus) return;
+                if (data.valid) {
+                    curStatus.innerHTML = `
+                        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
+                            ${checkIconSvg}
+                            <span class="text-xs font-semibold text-white tracking-wide">Valid API</span>
+                        </span>`;
+                    updateInstallUrls();
+                } else {
+                    curStatus.innerHTML = `
+                        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
+                            ${crossIconSvg}
+                            <span class="text-xs font-semibold text-white tracking-wide">Invalid API</span>
+                        </span>`;
+                }
+            } catch (err) {
+                const curStatus = getSubdlStatus();
+                if (curStatus) {
+                    curStatus.innerHTML = `<span class="text-xs text-rose-400">Connection Error</span>`;
+                }
+            }
+        }
+
+        if (subdlInput) {
+            subdlInput.addEventListener("input", (e) => {
+                clearTimeout(subdlDebounceTimer);
+                updateUrls();
+                const key = e.target.value.trim();
+                const statusEl = getSubdlStatus();
+                if (!key) {
+                    if (statusEl) statusEl.innerHTML = "";
+                    return;
+                }
+                if (statusEl) {
+                    statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
+                }
+                subdlDebounceTimer = setTimeout(() => {
+                    verifySubdlKey(key);
+                }, 600);
+            });
+        }
+
+        let subsourceDebounceTimer;
+        const subsourceInput = getSubsourceInput();
+        const subsourceStatus = getSubsourceStatus();
+
+        async function verifySubsourceKey(key) {
+            const statusEl = getSubsourceStatus();
+            if (!key) {
+                if (statusEl) statusEl.innerHTML = "";
+                return;
+            }
+            if (statusEl) {
+                statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
+            }
+            try {
+                const res = await fetch(`/api/verify/subsource?api_key=${encodeURIComponent(key)}`);
+                const data = await res.json();
+                const curStatus = getSubsourceStatus();
+                if (!curStatus) return;
+                if (data.valid) {
+                    curStatus.innerHTML = `
+                        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
+                            ${checkIconSvg}
+                            <span class="text-xs font-semibold text-white tracking-wide">Valid API</span>
+                        </span>`;
+                    updateInstallUrls();
+                } else {
+                    curStatus.innerHTML = `
+                        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
+                            ${crossIconSvg}
+                            <span class="text-xs font-semibold text-white tracking-wide">Invalid API</span>
+                        </span>`;
+                }
+            } catch (err) {
+                const curStatus = getSubsourceStatus();
+                if (curStatus) {
+                    curStatus.innerHTML = `<span class="text-xs text-rose-400">Connection Error</span>`;
+                }
+            }
+        }
+
+        if (subsourceInput) {
+            subsourceInput.addEventListener("input", (e) => {
+                clearTimeout(subsourceDebounceTimer);
+                updateUrls();
+                const key = e.target.value.trim();
+                const statusEl = getSubsourceStatus();
+                if (!key) {
+                    if (statusEl) statusEl.innerHTML = "";
+                    return;
+                }
+                if (statusEl) {
+                    statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
+                }
+                subsourceDebounceTimer = setTimeout(() => {
+                    verifySubsourceKey(key);
+                }, 600);
+            });
+        }
+
+        let opensubtitlesDebounceTimer;
+        const opensubtitlesInput = getOpenSubtitlesInput();
+        const opensubtitlesStatus = getOpenSubtitlesStatus();
+
+        async function verifyOpenSubtitlesKey(key) {
+            const statusEl = getOpenSubtitlesStatus();
+            const trimmedKey = (key || "").trim();
+            if (!trimmedKey) {
+                if (statusEl) statusEl.innerHTML = "";
+                return;
+            }
+            if (statusEl) {
+                statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
+            }
+            try {
+                const res = await fetch(`/api/verify/opensubtitles?api_key=${encodeURIComponent(trimmedKey)}`);
+                const data = await res.json();
+                const curStatus = getOpenSubtitlesStatus();
+                if (!curStatus) return;
+                if (data.valid) {
+                    curStatus.innerHTML = `
+                        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
+                            ${checkIconSvg}
+                            <span class="text-xs font-semibold text-white tracking-wide">Valid API</span>
+                        </span>`;
+                    updateInstallUrls();
+                } else {
+                    curStatus.innerHTML = `
+                        <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
+                            ${crossIconSvg}
+                            <span class="text-xs font-semibold text-white tracking-wide">Invalid API</span>
+                        </span>`;
+                }
+            } catch (err) {
+                const curStatus = getOpenSubtitlesStatus();
+                if (curStatus) {
+                    curStatus.innerHTML = `<span class="text-xs text-rose-400">Connection Error</span>`;
+                }
+            }
+        }
+
+        if (opensubtitlesInput) {
+            opensubtitlesInput.addEventListener("input", (e) => {
+                clearTimeout(opensubtitlesDebounceTimer);
+                const key = (e.target.value || "").trim();
+                updateUrls();
+                const statusEl = getOpenSubtitlesStatus();
+                if (!key) {
+                    if (statusEl) statusEl.innerHTML = "";
+                    return;
+                }
+                if (statusEl) {
+                    statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
+                }
+                opensubtitlesDebounceTimer = setTimeout(() => {
+                    verifyOpenSubtitlesKey(key);
+                }, 600);
+            });
+            opensubtitlesInput.addEventListener("change", (e) => {
+                e.target.value = (e.target.value || "").trim();
+                updateUrls();
+            });
+        }
+
+        document.getElementById("excludeHi").addEventListener("change", updateUrls);
+
+        updateUrls();
+
+        // Validate initial keys on page load if present
+        if (subdlInput && subdlInput.value.trim()) {
+            verifySubdlKey(subdlInput.value.trim());
+        }
+        if (subsourceInput && subsourceInput.value.trim()) {
+            verifySubsourceKey(subsourceInput.value.trim());
+        }
+        if (opensubtitlesInput && opensubtitlesInput.value.trim()) {
+            verifyOpenSubtitlesKey(opensubtitlesInput.value.trim());
+        }
+    </script>
+</body>
+</html>
