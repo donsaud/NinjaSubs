@@ -16,6 +16,17 @@ for k, v in list(os.environ.items()):
 
 
 @pytest.fixture(autouse=True)
+def disable_keyless_scraper_providers(monkeypatch):
+    """Disable keyless scraper providers (YIFYSubtitles/SubtitleCat) during tests
+    so the suite never makes real outbound HTTP requests to them."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ENABLE_YIFYSUBTITLES", False, raising=False)
+    monkeypatch.setattr(settings, "ENABLE_SUBTITLECAT", False, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_in_memory_cache():
     """Reset in-memory subtitle aggregation cache between tests."""
     try:

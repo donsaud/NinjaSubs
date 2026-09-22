@@ -8,6 +8,7 @@ from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
 from app.utils.language import get_subdl_lang_code, normalize_to_iso639_2
+from app.utils.uploader import extract_uploader
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -226,6 +227,8 @@ class SubdlProvider(BaseSubtitleProvider):
                 raw_lang, default=target_langs[0] if target_langs else "ara"
             )
 
+            uploader = extract_uploader(item)
+
             results.append(
                 SubtitleRelease(
                     release_name=clean_release_name,
@@ -234,6 +237,7 @@ class SubdlProvider(BaseSubtitleProvider):
                     format=sub_fmt,
                     hearing_impaired=is_hi,
                     lang=item_lang,
+                    uploader=uploader,
                 )
             )
 

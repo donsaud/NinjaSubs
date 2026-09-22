@@ -556,7 +556,8 @@ async def test_real_stremio_exact_hash_ranks_first(client):
             ),
         ):
             extra = f"filename={target_video}&videoHash=aabbccdd11223344"
-            resp = client.get(f"/subtitles/movie/tt3333333/{extra}.json?nocache=1")
+            cfg_hash = encode_user_config(enable_opensubtitles=True)
+            resp = client.get(f"/{cfg_hash}/subtitles/movie/tt3333333/{extra}.json?nocache=1")
             assert resp.status_code == 200
             subtitles = resp.json()["subtitles"]
             assert len(subtitles) == 2

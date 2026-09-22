@@ -144,6 +144,60 @@ async def test_subsource_search_movie_v1():
 
 
 @pytest.mark.asyncio
+async def test_subsource_uploader_from_contributors_displayname():
+    """SubSource exposes the uploader via contributors[].displayname (not uploaderId)."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+
+    def side_effect(url, params=None, headers=None, timeout=None):
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        if "movies/search" in url:
+            resp.json.return_value = {
+                "status": True,
+                "data": [{"movieId": 777, "title": "Movie"}],
+            }
+        else:
+            resp.json.return_value = {
+                "status": True,
+                "data": [
+                    {
+                        "subtitleId": "sub_with_uploader",
+                        "releaseInfo": ["Movie.2024.1080p.BluRay.srt"],
+                        "language": "Arabic",
+                        "hearingImpaired": False,
+                        "uploaderId": 4242,
+                        "contributors": [{"id": 4242, "displayname": "subsmaster"}],
+                    },
+                    {
+                        "subtitleId": "sub_id_only",
+                        "releaseInfo": ["Movie.2024.720p.WEB-DL.srt"],
+                        "language": "Arabic",
+                        "hearingImpaired": False,
+                        "uploaderId": 9999,
+                    },
+                ],
+            }
+        return resp
+
+    mock_client.get.side_effect = side_effect
+
+    provider = SubsourceProvider(mock_client)
+    subs = await provider.search_subtitles(
+        imdb_id="tt0111161",
+        api_key="test_api_key_xyz",
+        languages=["ara"],
+    )
+
+    assert len(subs) == 2
+    with_uploader = next(s for s in subs if "sub_with_uploader" in s.download_url)
+    id_only = next(s for s in subs if "sub_id_only" in s.download_url)
+
+    assert with_uploader.uploader == "subsmaster"
+    # Numeric uploaderId alone is not a username.
+    assert id_only.uploader == ""
+
+
+@pytest.mark.asyncio
 async def test_subsource_search_series_v1_filters_episodes():
     """Verify series query fetches subtitles via movieId and filters episode locally."""
     mock_client = AsyncMock(spec=httpx.AsyncClient)

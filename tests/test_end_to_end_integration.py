@@ -436,7 +436,8 @@ async def test_e2e_exact_hash_priority_over_filename_match(client):
             ),
         ):
             extra = f"filename={target_video}&videoHash=0123456789abcdef"
-            resp = client.get(f"/subtitles/movie/tt9999999/{extra}.json?nocache=1")
+            cfg_hash = encode_user_config(enable_opensubtitles=True)
+            resp = client.get(f"/{cfg_hash}/subtitles/movie/tt9999999/{extra}.json?nocache=1")
             assert resp.status_code == 200
 
             subtitles = resp.json()["subtitles"]

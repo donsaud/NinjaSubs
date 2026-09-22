@@ -31,7 +31,7 @@ def test_manifest_schema_and_cors(client):
     assert data["id"] == "org.ninjasubs.addon"
     assert data["name"] == "NinjaSubs"
     assert data["description"] == (
-        "A fast pass-through proxy that fetches, extracts, and streams native subtitles directly to Stremio."
+        "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
     )
     assert data["version"] == "1.0.0"
     assert data["resources"] == ["subtitles"]
@@ -40,7 +40,7 @@ def test_manifest_schema_and_cors(client):
     assert "anime" in data["types"]
     assert "tt" in data["idPrefixes"]
     assert "kitsu" in data["idPrefixes"]
-    assert "logo" in data and data["logo"].endswith("/static/icon.png")
+    assert "logo" in data and data["logo"].endswith("/static/logo.png")
     assert "icon" in data and data["icon"].endswith("/static/icon.png")
 
     # Test HEAD request (Nuvio ping compatibility)
@@ -466,9 +466,9 @@ def test_configured_manifest_endpoint(client):
     assert data["id"] == "org.ninjasubs.addon"
     assert data["name"] == "NinjaSubs"
     assert data["description"] == (
-        "A fast pass-through proxy that fetches, extracts, and streams native subtitles directly to Stremio."
+        "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
     )
-    assert "logo" in data and data["logo"].endswith("/static/icon.png")
+    assert "logo" in data and data["logo"].endswith("/static/logo.png")
     assert "icon" in data and data["icon"].endswith("/static/icon.png")
 
 
@@ -481,9 +481,9 @@ def test_parameterized_dummy_token_manifest_endpoint(client):
     assert data["id"] == "org.ninjasubs.addon"
     assert data["name"] == "NinjaSubs"
     assert data["description"] == (
-        "A fast pass-through proxy that fetches, extracts, and streams native subtitles directly to Stremio."
+        "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
     )
-    assert "logo" in data and data["logo"].endswith("/static/icon.png")
+    assert "logo" in data and data["logo"].endswith("/static/logo.png")
     assert "icon" in data and data["icon"].endswith("/static/icon.png")
 
     # Test HEAD request on parameterized route
@@ -506,8 +506,9 @@ async def test_configure_page_rendering(client):
     resp = client.get("/configure")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
-    assert "Subdl API Key" in resp.text
-    assert "Subsource API Key" in resp.text
+    assert "Subtitle Providers" in resp.text
+    assert "SubDL" in resp.text
+    assert "SubSource" in resp.text
     assert "Exclude HI (Hearing Impaired)" in resp.text
     assert "Install to Stremio" in resp.text
     assert "Ninja" in resp.text and "Subs" in resp.text
@@ -518,7 +519,8 @@ async def test_configure_page_rendering(client):
     assert "tom-select.complete.min.js" in resp.text
     assert 'id="languageSelect"' in resp.text
     assert 'placeholder="Select languages you like"' in resp.text
-    assert '<option value="ara" selected>Arabic (ara)</option>' in resp.text
+    # Fresh page: no pre-selected language — the user chooses (empty by default).
+    assert '<option value="ara" >Arabic (ara)</option>' in resp.text
     assert (
         '<option value="eng" >English (eng)</option>' in resp.text
         or '<option value="eng">English (eng)</option>' in resp.text

@@ -1985,6 +1985,19 @@ def deduplicate_subtitles(subtitles: list[SubtitleRelease]) -> list[SubtitleRele
     return result
 
 
+def _is_hearing_impaired(sub: Any) -> bool:
+    """Safely detect hearing-impaired/SDH subtitles from a release or dict."""
+    if isinstance(sub, dict):
+        if sub.get("hearing_impaired"):
+            return True
+        name = sub.get("release_name", "") or ""
+    else:
+        if getattr(sub, "hearing_impaired", False):
+            return True
+        name = getattr(sub, "release_name", "") or ""
+    return bool(_SDH_REGEX.search(name))
+
+
 def rank_subtitles(
     video_filename: str | None,
     subtitles: list[SubtitleRelease],
@@ -1995,6 +2008,7 @@ def rank_subtitles(
     episode: int | None = None,
     title: str | None = None,
     year: int | None = None,
+    hi_preference: str = "neutral",
 ) -> list[SubtitleRelease]:
     """
     Ranks subtitle releases against a playback stream/video filename.
@@ -2009,21 +2023,14 @@ def rank_subtitles(
     if not subtitles:
         return []
 
+    # HI preference: "exclude" behaves like exclude_sdh; "prefer" boosts HI in sorting
+    if hi_preference == "exclude":
+        exclude_sdh = True
+    prefer_hi = hi_preference == "prefer"
+
     # Optional SDH exclusion
     if exclude_sdh:
-        subtitles = [
-            s
-            for s in subtitles
-            if not getattr(s, "hearing_impaired", False)
-            and not (isinstance(s, dict) and s.get("hearing_impaired"))
-            and not bool(
-                _SDH_REGEX.search(
-                    getattr(s, "release_name", None)
-                    or (s.get("release_name") if isinstance(s, dict) else "")
-                    or ""
-                )
-            )
-        ]
+        subtitles = [s for s in subtitles if not _is_hearing_impaired(s)]
 
     # Deduplicate candidates across upstream providers
     deduped_subs = deduplicate_subtitles(subtitles)
@@ -2146,6 +2153,13 @@ def rank_subtitles(
         sc = getattr(s, "score", None) if not isinstance(s, dict) else s.get("score", 0)
         sc_val = sc if sc is not None else 0
 
+        r_name = (
+            getattr(s, "release_name", "") if not isinstance(s, dict) else s.get("release_name", "")
+        )
+
+        # HI preference: prefer hearing-impaired tracks when requested
+        hi_rank = 0 if (prefer_hi and _is_hearing_impaired(s)) else 1
+
         conf = getattr(compat, "confidence", 0.5) if compat else 0.5
         if conf == "deterministic":
             conf_val = 1.0
@@ -2157,11 +2171,15 @@ def rank_subtitles(
             except (ValueError, TypeError):
                 conf_val = 0.5
 
-        r_name = (
-            getattr(s, "release_name", "") if not isinstance(s, dict) else s.get("release_name", "")
+        return (
+            l_idx,
+            acc_idx,
+            is_h,
+            -sc_val,
+            hi_rank,
+            -conf_val,
+            r_name,
         )
-
-        return (l_idx, acc_idx, is_h, -sc_val, -conf_val, r_name)
 
     ranked = sorted(scored_subs, key=_sort_key)
 

@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     SUBSOURCE_API_KEY: str = ""
     OPENSUBTITLES_API_KEY: str = ""
 
+    # Keyless scraper providers (no API key required)
+    ENABLE_YIFYSUBTITLES: bool = True
+    ENABLE_SUBTITLECAT: bool = True
+
     # Disk Cache limits
     CACHE_DIR: str = os.getenv("CACHE_DIR", str(Path.cwd() / "subs_cache"))
     CACHE_MAX_BYTES: int = 1 * 1024 * 1024 * 1024  # 1 GB

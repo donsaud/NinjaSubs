@@ -7,7 +7,12 @@ import urllib.parse
 from typing import Any
 
 from app.config import settings
-from app.models import UserPreferences
+from app.models import (
+    DEFAULT_BADGE_PARTS,
+    UserPreferences,
+    badge_format_to_parts,
+    normalize_badge_parts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +25,27 @@ def encode_user_config(
     nuvio_mode: bool = False,
     opensubtitles_key: str | None = None,
     opensubtitles_api_key: str | None = None,
+    hi_preference: str | None = None,
+    badge_parts: list[str] | None = None,
+    badge_format: str | None = None,
+    enable_subdl: bool = True,
+    enable_subsource: bool = True,
+    enable_opensubtitles: bool = False,
+    enable_yifysubtitles: bool = False,
+    enable_subtitlecat: bool = False,
+    enable_rtl_fix: bool = True,
+    enable_ad_removal: bool = True,
+    keep_translator_credits: bool = True,
+    fix_encoding: bool = True,
+    clean_tags: bool = True,
+    strip_colors: bool = False,
+    clean_spacing: bool = True,
+    clean_symbols: bool = True,
+    clean_commas: bool = True,
+    clean_timing: bool = True,
+    strip_hi: bool = False,
+    eastern_arabic_numerals: bool = False,
+    strip_diacritics: bool = False,
 ) -> str:
     """
     Encode user configuration into a URL-safe base64 string matching community addons.
@@ -43,6 +69,55 @@ def encode_user_config(
     if nuvio_mode:
         payload["nuvio_mode"] = True
 
+    if hi_preference in ("prefer", "exclude"):
+        payload["hi_preference"] = hi_preference
+
+    if enable_subdl is False:
+        payload["enable_subdl"] = False
+    if enable_subsource is False:
+        payload["enable_subsource"] = False
+    if enable_opensubtitles:
+        payload["enable_opensubtitles"] = True
+    if enable_yifysubtitles:
+        payload["enable_yifysubtitles"] = True
+    if enable_subtitlecat:
+        payload["enable_subtitlecat"] = True
+    if enable_rtl_fix is False:
+        payload["enable_rtl_fix"] = False
+    if enable_ad_removal is False:
+        payload["enable_ad_removal"] = False
+    if keep_translator_credits is False:
+        payload["keep_translator_credits"] = False
+    # fix_encoding is baked into the core engine (always active) — never serialized.
+    if clean_tags is False:
+        payload["clean_tags"] = False
+    if strip_colors:
+        payload["strip_colors"] = True
+    if clean_spacing is False:
+        payload["clean_spacing"] = False
+    if clean_symbols is False:
+        payload["clean_symbols"] = False
+    if clean_commas is False:
+        payload["clean_commas"] = False
+    if clean_timing is False:
+        payload["clean_timing"] = False
+    if strip_hi:
+        payload["strip_hi"] = True
+    if eastern_arabic_numerals:
+        payload["eastern_arabic_numerals"] = True
+    if strip_diacritics:
+        payload["strip_diacritics"] = True
+
+    if badge_parts is not None:
+        resolved_parts = normalize_badge_parts(badge_parts)
+    elif badge_format is not None:
+        resolved_parts = badge_format_to_parts(badge_format)
+    else:
+        resolved_parts = list(DEFAULT_BADGE_PARTS)
+
+    if resolved_parts != DEFAULT_BADGE_PARTS:
+        payload["badge_parts"] = resolved_parts
+
     json_bytes = json.dumps(payload).encode("utf-8")
     return base64.urlsafe_b64encode(json_bytes).decode("utf-8").rstrip("=")
 
@@ -64,6 +139,32 @@ def parse_user_config(
     languages: list[str] = []
     exclude_hi: bool = False
     nuvio_mode: bool = False
+    hi_preference: str = "neutral"
+    badge_parts: list[str] | None = None
+    enable_subdl: bool = True
+    enable_subsource: bool = True
+    enable_opensubtitles: bool = False
+    enable_yifysubtitles: bool = False
+    enable_subtitlecat: bool = False
+    enable_rtl_fix: bool = True
+    enable_ad_removal: bool = True
+    keep_translator_credits: bool = True
+    clean_tags: bool = True
+    strip_colors: bool = False
+    clean_spacing: bool = True
+    clean_symbols: bool = True
+    clean_commas: bool = True
+    clean_timing: bool = True
+    strip_hi: bool = False
+    eastern_arabic_numerals: bool = False
+    strip_diacritics: bool = False
+
+    def _as_bool(value: Any, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() not in ("0", "false", "no", "off", "")
 
     if config_str:
         clean_config = config_str.strip()
@@ -111,6 +212,90 @@ def parse_user_config(
                     nuvio_mode = bool(data["nuvio_mode"])
                 elif "stremio_mode" in data:
                     nuvio_mode = not bool(data["stremio_mode"])
+
+                raw_hi = str(data.get("hi_preference") or "").strip().lower()
+                if raw_hi in ("prefer", "exclude"):
+                    hi_preference = raw_hi
+
+                if "badge_parts" in data:
+                    badge_parts = normalize_badge_parts(data.get("badge_parts"))
+                else:
+                    raw_badge = str(
+                        data.get("badge_format") or data.get("badge_style") or ""
+                    ).strip().lower()
+                    if raw_badge:
+                        badge_parts = badge_format_to_parts(raw_badge)
+
+                if "enable_subdl" in data:
+                    enable_subdl = _as_bool(data.get("enable_subdl"), True)
+                if "enable_subsource" in data:
+                    enable_subsource = _as_bool(data.get("enable_subsource"), True)
+                if "enable_opensubtitles" in data:
+                    enable_opensubtitles = _as_bool(data.get("enable_opensubtitles"), False)
+                if "enable_yifysubtitles" in data or "yifysubtitles" in data:
+                    enable_yifysubtitles = _as_bool(
+                        data.get("enable_yifysubtitles", data.get("yifysubtitles")), False
+                    )
+                if "enable_subtitlecat" in data or "subtitlecat" in data:
+                    enable_subtitlecat = _as_bool(
+                        data.get("enable_subtitlecat", data.get("subtitlecat")), False
+                    )
+                if "enable_rtl_fix" in data or "rtl_fix" in data:
+                    enable_rtl_fix = _as_bool(
+                        data.get("enable_rtl_fix", data.get("rtl_fix")), True
+                    )
+                if "enable_ad_removal" in data or "ad_removal" in data or "remove_ads" in data:
+                    enable_ad_removal = _as_bool(
+                        data.get(
+                            "enable_ad_removal",
+                            data.get("ad_removal", data.get("remove_ads")),
+                        ),
+                        True,
+                    )
+                if "keep_translator_credits" in data or "keep_credits" in data:
+                    keep_translator_credits = _as_bool(
+                        data.get("keep_translator_credits", data.get("keep_credits")), True
+                    )
+                # fix_encoding is baked into the core engine (always active) — legacy
+                # payload values are intentionally ignored.
+                if "clean_tags" in data:
+                    clean_tags = _as_bool(data.get("clean_tags"), True)
+                if "strip_colors" in data:
+                    strip_colors = _as_bool(data.get("strip_colors"), False)
+                if "clean_spacing" in data:
+                    clean_spacing = _as_bool(data.get("clean_spacing"), True)
+                if "clean_symbols" in data:
+                    clean_symbols = _as_bool(data.get("clean_symbols"), True)
+                if "clean_commas" in data:
+                    clean_commas = _as_bool(data.get("clean_commas"), True)
+                if "clean_timing" in data:
+                    clean_timing = _as_bool(data.get("clean_timing"), True)
+                # Legacy pre-flattening key: apply to every text-cleaning toggle.
+                if "clean_syntax" in data or "clean_formatting" in data:
+                    legacy = _as_bool(
+                        data.get("clean_syntax", data.get("clean_formatting")), True
+                    )
+                    clean_tags = legacy
+                    clean_spacing = legacy
+                    clean_symbols = legacy
+                    clean_commas = legacy
+                    clean_timing = legacy
+                if "strip_hi" in data or "strip_hi_labels" in data:
+                    strip_hi = _as_bool(
+                        data.get("strip_hi", data.get("strip_hi_labels")), False
+                    )
+                if "eastern_arabic_numerals" in data or "eastern_numerals" in data:
+                    eastern_arabic_numerals = _as_bool(
+                        data.get(
+                            "eastern_arabic_numerals", data.get("eastern_numerals")
+                        ),
+                        False,
+                    )
+                if "strip_diacritics" in data or "stripDiacritics" in data:
+                    strip_diacritics = _as_bool(
+                        data.get("strip_diacritics", data.get("stripDiacritics")),
+                        False,
+                    )
         except Exception as e:
             logger.debug(f"Base64 JSON decode skipped for config string: {e}")
 
@@ -148,6 +333,62 @@ def parse_user_config(
                     exclude_hi = parsed_qs["exclude_hi"][0].lower() in ("1", "true", "yes")
                 if "nuvio_mode" in parsed_qs:
                     nuvio_mode = parsed_qs["nuvio_mode"][0].lower() in ("1", "true", "yes")
+                if hi_preference == "neutral" and "hi_preference" in parsed_qs:
+                    raw_hi = parsed_qs["hi_preference"][0].strip().lower()
+                    if raw_hi in ("prefer", "exclude"):
+                        hi_preference = raw_hi
+                if badge_parts is None and "badge_parts" in parsed_qs:
+                    badge_parts = normalize_badge_parts(parsed_qs["badge_parts"][0])
+                if badge_parts is None and "badge_format" in parsed_qs:
+                    raw_badge = parsed_qs["badge_format"][0].strip().lower()
+                    if raw_badge:
+                        badge_parts = badge_format_to_parts(raw_badge)
+                if "enable_subdl" in parsed_qs:
+                    enable_subdl = _as_bool(parsed_qs["enable_subdl"][0], True)
+                if "enable_subsource" in parsed_qs:
+                    enable_subsource = _as_bool(parsed_qs["enable_subsource"][0], True)
+                if "enable_opensubtitles" in parsed_qs:
+                    enable_opensubtitles = _as_bool(parsed_qs["enable_opensubtitles"][0], False)
+                if "enable_yifysubtitles" in parsed_qs:
+                    enable_yifysubtitles = _as_bool(parsed_qs["enable_yifysubtitles"][0], False)
+                if "enable_subtitlecat" in parsed_qs:
+                    enable_subtitlecat = _as_bool(parsed_qs["enable_subtitlecat"][0], False)
+                if "enable_rtl_fix" in parsed_qs:
+                    enable_rtl_fix = _as_bool(parsed_qs["enable_rtl_fix"][0], True)
+                if "enable_ad_removal" in parsed_qs:
+                    enable_ad_removal = _as_bool(parsed_qs["enable_ad_removal"][0], True)
+                if "keep_translator_credits" in parsed_qs:
+                    keep_translator_credits = _as_bool(
+                        parsed_qs["keep_translator_credits"][0], True
+                    )
+                # fix_encoding is baked into the core engine (always active) — ignored.
+                if "clean_tags" in parsed_qs:
+                    clean_tags = _as_bool(parsed_qs["clean_tags"][0], True)
+                if "strip_colors" in parsed_qs:
+                    strip_colors = _as_bool(parsed_qs["strip_colors"][0], False)
+                if "clean_spacing" in parsed_qs:
+                    clean_spacing = _as_bool(parsed_qs["clean_spacing"][0], True)
+                if "clean_symbols" in parsed_qs:
+                    clean_symbols = _as_bool(parsed_qs["clean_symbols"][0], True)
+                if "clean_commas" in parsed_qs:
+                    clean_commas = _as_bool(parsed_qs["clean_commas"][0], True)
+                if "clean_timing" in parsed_qs:
+                    clean_timing = _as_bool(parsed_qs["clean_timing"][0], True)
+                if "clean_syntax" in parsed_qs:
+                    legacy_qs = _as_bool(parsed_qs["clean_syntax"][0], True)
+                    clean_tags = legacy_qs
+                    clean_spacing = legacy_qs
+                    clean_symbols = legacy_qs
+                    clean_commas = legacy_qs
+                    clean_timing = legacy_qs
+                if "strip_hi" in parsed_qs:
+                    strip_hi = _as_bool(parsed_qs["strip_hi"][0], False)
+                if "eastern_arabic_numerals" in parsed_qs:
+                    eastern_arabic_numerals = _as_bool(
+                        parsed_qs["eastern_arabic_numerals"][0], False
+                    )
+                if "strip_diacritics" in parsed_qs:
+                    strip_diacritics = _as_bool(parsed_qs["strip_diacritics"][0], False)
             except Exception:
                 pass
 
@@ -203,6 +444,9 @@ def parse_user_config(
         f"[Config Check] Exclude HI: {exclude_hi} | Languages: {languages} | OpenSubtitles: {'Yes' if effective_opensubtitles else 'No'}"
     )
 
+    if hi_preference == "neutral" and exclude_hi:
+        hi_preference = "exclude"
+
     return UserPreferences(
         subdl_key=effective_subdl,
         subsource_key=effective_subsource,
@@ -210,4 +454,25 @@ def parse_user_config(
         languages=languages,
         exclude_hi=exclude_hi,
         nuvio_mode=nuvio_mode,
+        hi_preference=hi_preference,
+        badge_parts=normalize_badge_parts(badge_parts),
+        enable_subdl=enable_subdl,
+        enable_subsource=enable_subsource,
+        enable_opensubtitles=enable_opensubtitles,
+        enable_yifysubtitles=enable_yifysubtitles,
+        enable_subtitlecat=enable_subtitlecat,
+        enable_rtl_fix=enable_rtl_fix,
+        enable_ad_removal=enable_ad_removal,
+        keep_translator_credits=keep_translator_credits,
+        # Baked into the core engine — always active regardless of payload.
+        fix_encoding=True,
+        clean_tags=clean_tags,
+        strip_colors=strip_colors,
+        clean_spacing=clean_spacing,
+        clean_symbols=clean_symbols,
+        clean_commas=clean_commas,
+        clean_timing=clean_timing,
+        strip_hi=strip_hi,
+        eastern_arabic_numerals=eastern_arabic_numerals,
+        strip_diacritics=strip_diacritics,
     )

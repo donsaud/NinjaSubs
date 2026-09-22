@@ -12,6 +12,7 @@ from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
 from app.utils.language import get_subsource_lang_name, normalize_to_iso639_2
+from app.utils.uploader import extract_uploader
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -503,6 +504,10 @@ class SubSourceService:
 
                     item_lang = str(item.get("lang") or item.get("language") or "").lower()
 
+                    # Username comes from contributors[].displayname (SubSource exposes
+                    # only a numeric uploaderId otherwise).
+                    uploader = extract_uploader(item)
+
                     matched_subs.append(
                         {
                             "id": str(sub_id),
@@ -514,6 +519,7 @@ class SubSourceService:
                             or f"/subtitles/{sub_id}/download",
                             "hearing_impaired": is_hi,
                             "files": item.get("files") or [],
+                            "uploader": uploader,
                         }
                     )
                     passed += 1
@@ -695,6 +701,7 @@ class SubsourceProvider(BaseSubtitleProvider):
                         format=sub_fmt,
                         hearing_impaired=is_hi,
                         lang=item_lang,
+                        uploader=str(item.get("uploader") or "").strip(),
                     )
                 )
             except Exception as map_err:

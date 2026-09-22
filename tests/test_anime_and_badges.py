@@ -19,6 +19,7 @@ from app.services.subtitle_matcher import (
     is_anime_content,
     rank_subtitles,
 )
+from app.utils.config_parser import encode_user_config
 
 # =======================================================
 # 1. ANIME ABSOLUTE NUMBERING EXTRACTION & MATCHING TESTS
@@ -375,7 +376,8 @@ async def test_endpoint_verified_hash_and_informative_badge(client):
         ),
     ):
         extra = "videoHash=abcdef1234567890&videoSize=2048576&filename=Shawshank.1994.1080p.BluRay.x264-FLUX.mkv"
-        resp = client.get(f"/subtitles/movie/tt0111161/{extra}.json")
+        user_cfg = encode_user_config(enable_opensubtitles=True)
+        resp = client.get(f"/{user_cfg}/subtitles/movie/tt0111161/{extra}.json")
         assert resp.status_code == 200
 
         data = resp.json()

@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NinjaSubs</title>
-    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="alternate icon" type="image/png" href="/static/favicon.png">
-    <link rel="apple-touch-icon" href="/static/icon.png">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=3">
+    <link rel="icon" href="/static/favicon.ico?v=3" sizes="any">
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=3">
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -15,29 +15,55 @@
             theme: {
                 extend: {
                     fontFamily: {
-                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
-                        mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+                        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+                        mono: ['Space Mono', 'ui-monospace', 'monospace'],
                     },
                     colors: {
-                        mono: {
-                            bg: '#0c0d0e',
-                            card: '#141619',
-                            border: '#22262b',
-                            muted: '#8b929a',
-                            subtle: '#1a1d21',
+                        ninja: {
+                            accent: '#f2f2f2',
+                            accent2: '#e8e8e8',
+                            bg: '#0c0c0c',
+                            card: '#151515',
+                            tertiary: '#c8c8c8',
                         }
                     }
                 }
             }
         }
     </script>
-    <!-- Google Fonts Inter & JetBrains Mono -->
+    <!-- Google Fonts: Inter (UI) + Space Mono (code) - https://fonts.google.com/specimen/Inter -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300..800;1,14..32,300..800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
     <!-- Tom Select CSS -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/css/tom-select.css">
     <style>
+        :root {
+            --bg: #0c0c0c;
+            --card: #151515;
+            --card-h: #1c1c1c;
+            --line: rgba(255, 255, 255, .07);
+            --line-h: rgba(255, 255, 255, .14);
+            --w: #f2f2f2;
+            --w2: #c8c8c8;
+            --g: #8e8e8e;
+            --g2: #636363;
+            --btn-hover: #e8e8e8;
+            /* legacy aliases mapped to kit palette */
+            --panel: var(--card);
+            --panel-hover: var(--card-h);
+            --line-strong: var(--line-h);
+            --text: var(--w);
+            --muted: var(--g);
+            --faint: var(--g2);
+            --accent: var(--w);
+            --accent-2: var(--w2);
+            --tertiary: var(--w2);
+            --grad: none;
+            --mono: 'Space Mono', monospace;
+            --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+
         @font-face {
             font-family: 'Hoshiko Satsuki';
             src: url('/static/fonts/Hoshiko-Satsuki.ttf') format('truetype');
@@ -46,79 +72,629 @@
             font-display: swap;
         }
 
-        /* Title specific style */
-        .brand-title {
-            font-family: 'Hoshiko Satsuki', -apple-system, sans-serif;
-            font-size: 2.8rem;
-            font-weight: normal;
-            letter-spacing: 0.04em;
-            color: #ffffff;
-            text-align: center;
-            margin: 4px 0 8px 0;
-            text-shadow: 0 4px 18px rgba(0, 0, 0, 0.6);
+        /* Brand wordmark: "Serif Black" + "Serif BlackItalic" (self-hosted) */
+        @font-face {
+            font-family: 'Serif Black';
+            src: url('/static/fonts/SerifBlack.ttf') format('truetype');
+            font-weight: 900;
+            font-style: normal;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Serif BlackItalic';
+            src: url('/static/fonts/SerifBlackItalic.ttf') format('truetype');
+            font-weight: 900;
+            font-style: italic;
+            font-display: swap;
+        }
+
+        * { box-sizing: border-box; }
+
+        html {
+            background: #06070a;
+            color: var(--w2);
+            font-family: var(--sans);
+            scroll-behavior: smooth;
+            -webkit-font-smoothing: antialiased;
         }
 
         body {
-            background-color: #0c0d0e;
-            color: #ffffff;
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: transparent;
+            color: var(--w2);
+            font-family: var(--sans);
+            margin: 0;
+            min-height: 100vh;
+            overflow-x: hidden;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            text-rendering: optimizeLegibility;
         }
 
-        /* Minimal Monochrome Card (24px radius, #141619 background, #22262b border) */
+        /* kit: remove ambient color orbs, keep empty shells for compat */
+        .bg-orbs {
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            pointer-events: none;
+            overflow: hidden;
+            display: none;
+        }
+        .bg-orbs::before,
+        .bg-orbs::after {
+            display: none;
+        }
+
+        .grid-overlay {
+            display: none;
+        }
+
+        /* Animated mesh gradient blobs (subtle ambient lighting) */
+        @keyframes meshFloat1 {
+            0% { transform: translate3d(0, 0, 0) scale(1); }
+            50% { transform: translate3d(-60px, 40px, 0) scale(1.08); }
+            100% { transform: translate3d(40px, -30px, 0) scale(1); }
+        }
+        @keyframes meshFloat2 {
+            0% { transform: translate3d(0, 0, 0) scale(1); }
+            50% { transform: translate3d(50px, -45px, 0) scale(1.1); }
+            100% { transform: translate3d(-35px, 35px, 0) scale(1); }
+        }
+        @keyframes meshFloat3 {
+            0% { transform: translate3d(0, 0, 0) scale(1); }
+            50% { transform: translate3d(-40px, -35px, 0) scale(1.06); }
+            100% { transform: translate3d(55px, 30px, 0) scale(1); }
+        }
+        .mesh-blob-1 { animation: meshFloat1 20s ease-in-out infinite alternate; }
+        .mesh-blob-2 { animation: meshFloat2 22s ease-in-out infinite alternate; }
+        .mesh-blob-3 { animation: meshFloat3 18s ease-in-out infinite alternate; }
+        @media (prefers-reduced-motion: reduce) {
+            .mesh-blob-1, .mesh-blob-2, .mesh-blob-3 { animation: none; }
+        }
+
+        /* Header — kit style */
+        .app-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            padding-top: 8px;
+        }
+
+        /* GitHub repository link (top-right, vertically centered on the logo line) */
+        .github-link {
+            position: absolute;
+            top: 0.5rem;
+            right: 1.5rem;
+            color: #9ca3af;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            transition: color 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+            text-decoration: none;
+        }
+        .github-link:hover {
+            color: #ffffff;
+            background-color: rgba(255, 255, 255, 0.08);
+            transform: scale(1.05);
+        }
+        /* The header logo is taller from 768px up, so nudge the icon to match. */
+        @media (min-width: 768px) {
+            .github-link { top: 0.75rem; }
+        }
+        /* Ensure the header/parent container has relative positioning */
+        .header,
+        .container-header {
+            position: relative;
+        }
+        .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+        .brand-text { padding-top: 2px; }
+        .brand-logo {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            border: 1px solid var(--line-h);
+            box-shadow: none;
+            background: var(--card);
+            object-fit: cover;
+            flex-shrink: 0;
+        }
+        .brand-title {
+            font-family: 'Serif Black', Georgia, 'Times New Roman', serif;
+            font-size: clamp(28px, 6vw, 40px);
+            font-weight: 900;
+            font-style: normal;
+            letter-spacing: -0.01em;
+            line-height: 1;
+            margin: 0;
+            color: var(--w);
+            text-shadow: none;
+        }
+        .brand-sub {
+            margin: 8px 0 0 0;
+            font-size: 14px;
+            font-weight: 400;
+            letter-spacing: 0;
+            color: var(--g);
+            max-width: 30rem;
+            line-height: 1.55;
+        }
+        .header-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-family: var(--mono);
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: .02em;
+            color: var(--w2);
+            background: rgba(255,255,255,.06);
+            border: 1px solid rgba(255,255,255,.1);
+            backdrop-filter: none;
+        }
+        .header-pill .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 9999px;
+            background: var(--w);
+            box-shadow: none;
+        }
+
+        /* Wizard stepper: pills sit naturally on the layout, aligned with the card */
+        .wizard-progress {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            margin-bottom: 20px;
+            padding: 0;
+            position: static;
+            background: transparent;
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+            border: 0;
+        }
+        .wizard-step-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 16px;
+            min-height: 0;
+            border-radius: 6px;
+            border: 0;
+            background: transparent;
+            color: var(--g);
+            font-family: var(--sans);
+            font-size: 13px;
+            font-weight: 500;
+            letter-spacing: .02em;
+            cursor: pointer;
+            transition: background-color .2s ease, color .2s ease;
+        }
+        .wizard-step-btn:hover { border-color: transparent; color: var(--w2); background: transparent; }
+        .wizard-step-num {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border-radius: 9999px;
+            background: rgba(255, 255, 255, 0.06);
+            font-family: var(--mono);
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--w2);
+        }
+        .wizard-step-btn.active {
+            color: var(--w);
+            border-color: transparent;
+            background: rgba(255,255,255,.1);
+        }
+        .wizard-step-btn.active .wizard-step-num {
+            background: rgba(255,255,255,.14);
+            color: var(--w);
+        }
+        .wizard-step-btn.complete { color: var(--w2); }
+        .wizard-progress-line {
+            flex: 0 0 auto;
+            width: 2px;
+            height: 2px;
+            border-radius: 9999px;
+            background: transparent;
+        }
+        .wizard-step-label { white-space: nowrap; }
+        .wizard-controls {
+            position: static;
+            background: none;
+            padding-top: 0;
+        }
+
+        /* Minimal open-source footer note */
+        .site-footer {
+            margin-top: 2.5rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            text-align: center;
+            color: #6b7280;
+            font-size: 0.82rem;
+        }
+        .footer-link {
+            color: inherit;
+            text-decoration: underline dotted;
+            text-underline-offset: 2px;
+            transition: color 0.2s ease;
+        }
+        .footer-link:hover { color: #9ca3af; }
+        .version-tag {
+            font-family: 'JetBrains Mono', ui-monospace, monospace;
+            font-size: 0.72rem;
+            color: #9ca3af;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 9999px;
+            padding: 1px 8px;
+            margin-left: 2px;
+        }
+        @media (max-width: 480px) {
+            .wizard-step-label { display: none; }
+            .wizard-step-btn { padding: 8px 10px; }
+        }
+
+        /* Cards — dark semi-opaque glass over vibrant mesh lighting */
         .mono-card {
-            background-color: #141619;
-            border: 1px solid #22262b;
-            border-radius: 24px;
-            transition: border-color 0.2s ease;
+            position: relative;
+            min-width: 0;
+            background: rgba(24, 24, 27, 0.9);
+            border: 1px solid rgba(39, 39, 42, 0.8);
+            border-top: 1px solid rgba(39, 39, 42, 0.8);
+            border-radius: 10px;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            box-shadow: none;
+            transition: border-color .2s ease, transform .2s ease;
         }
         .mono-card:hover {
-            border-color: #2e343b;
+            border-color: var(--line-h);
+            background: rgba(28, 28, 32, 0.92);
+            box-shadow: none;
+            transform: translateY(-1px);
         }
 
-        /* Clean Monochrome Input Fields */
+        .section-kicker {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-family: var(--sans);
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: -.01em;
+            text-transform: none;
+            color: var(--w);
+        }
+        .section-kicker::before {
+            content: '';
+            width: auto;
+            height: auto;
+            border-radius: 5px;
+            background: rgba(255,255,255,.06);
+            box-shadow: none;
+            font-family: var(--mono);
+            font-size: 11px;
+            padding: 0;
+        }
+
+        /* Inputs — kit search-input style */
         .mono-input {
-            background-color: #0c0d0e !important;
-            border: 1px solid #22262b !important;
-            border-radius: 14px !important;
-            color: #ffffff !important;
-            padding: 10px 14px !important;
-            font-size: 0.875rem !important;
-            transition: border-color 0.15s ease, box-shadow 0.15s ease !important;
+            background-color: var(--card) !important;
+            border: 1px solid var(--line) !important;
+            border-radius: 10px !important;
+            color: var(--w2) !important;
+            padding: 0.82rem 1rem !important;
+            font-size: 0.9rem !important;
+            font-family: var(--sans) !important;
+            transition: border-color .2s ease, background .2s ease !important;
             outline: none !important;
         }
         .mono-input:focus {
-            border-color: #ffffff !important;
-            box-shadow: 0 0 0 1px #ffffff !important;
+            border-color: var(--line-h) !important;
+            background-color: var(--card-h) !important;
+            box-shadow: none !important;
         }
-        .mono-input::placeholder {
-            color: #454c55 !important;
+        .mono-input::placeholder { color: var(--g2) !important; }
+
+        /* Toggle switch — kit monochrome */
+        .toggle {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            flex-shrink: 0;
+            /* Expand the touch target to >=44px without changing the track size */
+            padding: 10px 6px;
+            margin: -10px -6px;
+        }
+        .toggle-track {
+            width: 40px;
+            height: 22px;
+            border-radius: 9999px;
+            background: rgba(255,255,255,.08);
+            border: 1px solid var(--line);
+            position: relative;
+            transition: background .2s ease, border-color .2s ease;
+        }
+        .toggle-track::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 16px;
+            height: 16px;
+            border-radius: 9999px;
+            background: var(--g);
+            transition: transform .2s ease, background .2s ease;
+        }
+        .peer:checked + .toggle-track {
+            background: var(--w);
+            border-color: var(--w);
+            box-shadow: none;
+        }
+        .peer:checked + .toggle-track::after {
+            transform: translateX(18px);
+            background: #0c0c0c;
+            box-shadow: none;
+        }
+        .peer:focus-visible + .toggle-track {
+            outline: 2px solid rgba(255,255,255,.5);
+            outline-offset: 2px;
         }
 
-        /* Tom Select Monochrome Dark Overrides */
-        .ts-wrapper {
-            position: relative;
-            width: 100%;
+        /* Provider rows — kit list */
+        .provider-list { display: flex; flex-direction: column; }
+        .provider-row {
+            padding: 16px 12px;
+            margin: 0 -12px;
+            border-top: 1px solid var(--line);
+            border-radius: 10px;
+            transition: background .2s ease, border-color .2s ease;
         }
+        .provider-row:first-child { border-top: 0; padding-top: 8px; }
+        .provider-row:hover {
+            background: rgba(255,255,255,.025);
+            box-shadow: none;
+        }
+        .provider-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .provider-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
+        .provider-id img {
+            width: 22px;
+            height: 22px;
+            border-radius: 6px;
+            object-fit: contain;
+            flex-shrink: 0;
+            filter: drop-shadow(0 3px 8px rgba(0,0,0,0.6));
+        }
+        .provider-name {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #fff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .pref-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 16px 0;
+            border-top: 1px solid var(--line);
+        }
+        .pref-row:first-child { border-top: 0; padding-top: 4px; }
+        .pref-label { font-size: 0.875rem; font-weight: 500; color: #fff; cursor: pointer; display: block; }
+        .pref-desc { font-size: 0.75rem; color: var(--muted); margin: 3px 0 0 0; line-height: 1.5; }
+        /* Visually link a sub-option to the row above it */
+        .pref-subrow {
+            padding-left: 16px;
+            margin-left: 4px;
+            border-left: 2px solid var(--line-h);
+            transition: opacity 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+                filter 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .pref-subrow .pref-label { font-size: 0.8125rem; }
+        .pref-subrow.is-disabled {
+            opacity: 0.4;
+            pointer-events: none;
+        }
+        /* Prerequisite-disabled rows (e.g. Arabic dependents when Auto UTF-8 off) */
+        .pref-row.is-disabled {
+            opacity: 0.4;
+            pointer-events: none;
+        }
+        /* Grouped preference sections (A/B/C/D) — subtle kit-style divider */
+        .pref-group-label {
+            font-family: var(--mono);
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            color: var(--g2);
+            padding: 18px 0 2px;
+            margin-top: 6px;
+            border-top: 1px solid var(--line);
+        }
+        .pref-group-label:first-of-type { margin-top: 0; }
+
+
+        /* Provider tag badges (colors applied via Tailwind utilities per variant) */
+        .badge-tag {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 9999px;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            white-space: nowrap;
+            border-width: 1px;
+            border-style: solid;
+        }
+
+        /* Collapsible provider API key input */
+        .provider-key {
+            overflow: hidden;
+            max-height: 0;
+            opacity: 0;
+            transition: max-height 0.32s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, margin-top 0.32s ease;
+        }
+        .provider-key.expanded {
+            max-height: 170px;
+            opacity: 1;
+            margin-top: 12px;
+        }
+        .provider-key-wrap { position: relative; }
+        .provider-key-wrap .mono-input { padding-right: 118px !important; }
+        .provider-key-action {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            min-height: 36px;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: var(--sans);
+            color: var(--w2);
+            background: rgba(255,255,255,.03);
+            border: 1px solid var(--line);
+            text-decoration: none;
+            transition: border-color .2s ease, background-color .2s ease;
+        }
+        .provider-key-action:hover {
+            background: rgba(255,255,255,.06);
+            border-color: var(--line-h);
+        }
+
+        /* Buttons — kit copy-btn system */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            font-family: var(--sans);
+            min-height: 42px;
+            padding: .85rem 1rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background-color .2s ease, transform .2s ease, border-color .2s ease;
+            border: 1px solid transparent;
+        }
+        /* Install buttons may wrap their label in narrow / side columns */
+        .area-stremio .grid > .btn {
+            min-width: 0;
+            white-space: normal;
+            line-height: 1.15;
+            text-align: center;
+        }
+        .btn:active { transform: scale(0.98); }
+        .btn:focus-visible {
+            outline: 2px solid rgba(255,255,255,.5);
+            outline-offset: 2px;
+        }
+        .btn-primary {
+            background: var(--w);
+            color: #0c0c0c;
+            border-color: var(--w);
+            box-shadow: none;
+        }
+        .btn-primary:hover {
+            filter: none;
+            background: var(--btn-hover);
+            border-color: var(--btn-hover);
+            box-shadow: none;
+            transform: translateY(-1px);
+        }
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--w2);
+            border: 1px solid var(--line);
+        }
+        .btn-secondary:hover { background: rgba(255,255,255,.05); border-color: var(--line-h); color: var(--w); }
+
+        /* Badge component chips — kit badge style */
+        .badge-chip {
+            display: inline-flex;
+            align-items: center;
+            max-width: 100%;
+            min-width: 0;
+            overflow-wrap: anywhere;
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: rgba(255,255,255,.06);
+            border: 1px solid rgba(255,255,255,.1);
+            color: var(--g);
+            font-family: var(--mono);
+            font-size: 11px;
+            font-weight: 500;
+            line-height: 1.4;
+            cursor: pointer;
+            user-select: none;
+            text-decoration: line-through;
+            transition: border-color .2s ease, background-color .2s ease, color .2s ease;
+        }
+        .badge-chip:hover { border-color: var(--line-h); color: var(--w2); }
+        .badge-chip.active {
+            color: var(--w);
+            border-color: rgba(255,255,255,.14);
+            background: rgba(255,255,255,.1);
+            text-decoration: none;
+            box-shadow: none;
+        }
+
+        /* Manifest preview — kit code block */
+        #manifestPreview {
+            background: rgba(255,255,255,.02) !important;
+            border: 1px solid var(--line) !important;
+            border-radius: 10px !important;
+            color: var(--w2) !important;
+            font-family: var(--mono) !important;
+        }
+
+        /* Tom Select dark overrides — kit */
+        .ts-wrapper { position: relative; width: 100%; }
         .ts-wrapper.multi .ts-control {
-            background-color: #0c0d0e !important;
-            border: 1px solid #22262b !important;
-            border-radius: 14px !important;
-            color: #ffffff !important;
+            background-color: var(--card) !important;
+            border: 1px solid var(--line) !important;
+            border-radius: 10px !important;
+            color: var(--w2) !important;
             padding: 6px 12px !important;
-            min-height: 46px !important;
+            min-height: 48px !important;
             display: flex !important;
             flex-wrap: wrap !important;
             align-items: center !important;
             gap: 6px !important;
             box-shadow: none !important;
-            transition: border-color 0.15s ease, box-shadow 0.15s ease !important;
+            transition: border-color .2s ease, background .2s ease !important;
         }
         .ts-wrapper.focus .ts-control {
-            border-color: #ffffff !important;
-            box-shadow: 0 0 0 1px #ffffff !important;
+            border-color: var(--line-h) !important;
+            background: var(--card-h) !important;
+            box-shadow: none !important;
         }
         .ts-control input {
-            color: #ffffff !important;
+            color: var(--text) !important;
             background: transparent !important;
             border: none !important;
             outline: none !important;
@@ -127,14 +703,12 @@
             padding: 2px 0 !important;
             margin: 0 !important;
         }
-        .ts-control input::placeholder {
-            color: #454c55 !important;
-        }
+        .ts-control input::placeholder { color: var(--faint) !important; }
         .ts-wrapper.multi .ts-control > div.item {
-            background: #1e2227 !important;
-            color: #ffffff !important;
-            border: 1px solid #2d333b !important;
-            border-radius: 8px !important;
+            background: rgba(255,255,255,.1) !important;
+            color: var(--w) !important;
+            border: 1px solid var(--line-h) !important;
+            border-radius: 6px !important;
             padding: 3px 8px 3px 10px !important;
             font-size: 0.8125rem !important;
             font-weight: 500 !important;
@@ -146,229 +720,678 @@
             display: inline-flex !important;
             align-items: center !important;
             justify-content: center !important;
-            color: #8b929a !important;
+            color: var(--g) !important;
             font-size: 1rem !important;
             line-height: 1 !important;
             margin-left: 4px !important;
             padding: 0 4px !important;
-            border-left: 1px solid #2d333b !important;
-            opacity: 0.8 !important;
+            border-left: 1px solid var(--line-h) !important;
+            opacity: 0.85 !important;
             text-decoration: none !important;
             transition: all 0.15s ease !important;
         }
         .ts-wrapper.plugin-remove_button .item .remove:hover {
             opacity: 1 !important;
-            color: #ffffff !important;
-            background: #383e47 !important;
+            color: var(--w) !important;
+            background: rgba(255,255,255,.1) !important;
             border-radius: 0 6px 6px 0 !important;
         }
         .ts-dropdown {
-            background: #141619 !important;
-            border: 1px solid #22262b !important;
-            border-radius: 14px !important;
-            box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.9) !important;
+            background: var(--card-h) !important;
+            border: 1px solid var(--line-h) !important;
+            border-radius: 10px !important;
+            box-shadow: 0 20px 48px rgba(0,0,0,.52) !important;
             margin-top: 6px !important;
-            color: #ffffff !important;
+            color: var(--w2) !important;
             z-index: 9999 !important;
             overflow: hidden !important;
         }
-        .ts-dropdown .ts-dropdown-content {
-            max-height: 220px !important;
-            overflow-y: auto !important;
-            padding: 6px !important;
-        }
+        .ts-dropdown .ts-dropdown-content { max-height: 220px !important; overflow-y: auto !important; padding: 6px !important; }
         .ts-dropdown .option {
             padding: 8px 12px !important;
-            border-radius: 8px !important;
-            color: #8b929a !important;
+            border-radius: 6px !important;
+            color: var(--g) !important;
             font-size: 0.8125rem !important;
             cursor: pointer !important;
             transition: all 0.15s ease !important;
         }
         .ts-dropdown .option:hover,
-        .ts-dropdown .option.active {
-            background: #1f2328 !important;
-            color: #ffffff !important;
-        }
-        .ts-dropdown .option.selected {
-            color: #434952 !important;
-            background: transparent !important;
-        }
+        .ts-dropdown .option.active { background: rgba(255,255,255,.08) !important; color: var(--w) !important; }
+        .ts-dropdown .option.selected { color: var(--g2) !important; background: transparent !important; }
+
         select[multiple]#languageSelect {
             width: 100%;
-            background: #0c0d0e;
-            border: 1px solid #22262b;
-            border-radius: 14px;
-            color: #ffffff;
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            color: var(--w2);
             padding: 8px 12px;
             min-height: 100px;
             font-size: 0.875rem;
             outline: none;
         }
-        select[multiple]#languageSelect option:checked {
-            background: #1e2227;
-            color: #ffffff;
+        select[multiple]#languageSelect option:checked { background: rgba(255,255,255,.12); color: var(--w); }
+
+        /* Toast — kit dark sheet */
+        #toast {
+            background: rgba(21,21,21,.96) !important;
+            color: var(--w) !important;
+            border: 1px solid var(--line-h) !important;
+            box-shadow: 0 18px 42px rgba(0,0,0,.42) !important;
+            border-radius: 12px !important;
         }
+
+        /* Keyboard focus clarity */
+        a:focus-visible,
+        input:focus-visible,
+        select:focus-visible {
+            outline: 2px solid rgba(255,255,255,.5);
+            outline-offset: 2px;
+            border-radius: 8px;
+        }
+
+        /* Touch ergonomics: enforce >=44px tap targets at every breakpoint */
+        .toggle,
+        .badge-chip,
+        .provider-key-action,
+        .btn,
+        .mono-input { min-height: 44px; }
+
+        /* ---- kit compat overrides for inline Tailwind colors ---- */
+        .badge-tag {
+            background: rgba(255,255,255,.06) !important;
+            color: var(--w2) !important;
+            border-color: rgba(255,255,255,.1) !important;
+            font-family: var(--mono) !important;
+            font-size: 10px !important;
+            font-weight: 500 !important;
+        }
+        .provider-name { color: var(--w) !important; }
+        .pref-label { color: var(--w) !important; }
+        .pref-desc { color: var(--g) !important; }
+        .wizard-controls {
+            position: static !important;
+            background: none !important;
+        }
+        #prog-kit {
+            position: fixed; top: 0; left: 0; height: 2px; background: var(--w); z-index: 100; width: 0;
+        }
+        @media (max-width: 640px) {
+            .badge-chip { padding: 12px 14px; }
+            .mono-input { min-height: 48px !important; }
+            .btn { min-height: 46px; }
+            .mono-card { border-radius: 16px; }
+        }
+
+        /* Prevent long tokens/logos from forcing horizontal scroll */
+        img, svg, video { max-width: 100%; }
     </style>
 </head>
-<body class="bg-[#0c0d0e] text-white font-sans min-h-screen flex items-center justify-center p-4 sm:p-6 antialiased selection:bg-white selection:text-[#0c0d0e] relative overflow-x-hidden">
+<body class="font-sans antialiased min-h-screen text-zinc-100 relative overflow-x-hidden selection:bg-white selection:text-black">
+    <div class="bg-orbs" aria-hidden="true"></div>
+    <div class="grid-overlay" aria-hidden="true"></div>
 
-    <!-- Main Container (24px radius, #141619 background, #22262b border) -->
-    <div class="relative z-10 w-full max-w-xl mono-card p-6 sm:p-8 shadow-2xl shadow-black/80 space-y-6 my-8">
+    <!-- Interactive paper-design ambient background -->
+    <canvas id="paper-shader-canvas" class="fixed inset-0 w-full h-full -z-10 pointer-events-none" aria-hidden="true"></canvas>
+
+    <div class="relative z-10 pointer-events-auto mx-auto w-full max-w-2xl px-4 sm:px-6 py-8 sm:py-12 pb-16 overflow-x-hidden">
 
         <!-- Header & Branding -->
-        <div class="text-center pt-1">
-            <h1 class="brand-title">NinjaSubs</h1>
-            <p class="text-sm text-[#8b929a] max-w-md mx-auto leading-relaxed">
-                Smart, high-accuracy subtitle aggregator from SubDL, SubSource, and OpenSubtitles for Stremio.
-            </p>
-        </div>
+        <header class="relative flex flex-col items-start border-b border-zinc-800/60 pb-6 mb-8">
+            <img src="/static/logo.png" alt="NinjaSubs" class="h-14 md:h-16 w-auto object-contain select-none self-start">
+            <p class="mt-3 text-sm text-zinc-400 font-normal leading-relaxed text-left max-w-xl">Smart, high-accuracy subtitle aggregator from multiple sources for Stremio.</p>
+            <a href="https://github.com/donsaud/NinjaSubs"
+               target="_blank"
+               rel="noopener noreferrer"
+               class="github-link"
+               aria-label="NinjaSubs on GitHub"
+               title="NinjaSubs on GitHub">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+                </svg>
+            </a>
+        </header>
 
         {{env_banner_html}}
 
-        <!-- Card 1: Credentials -->
-        <div class="mono-card p-5 sm:p-6 space-y-4">
-            <div>
-                <div class="flex items-center justify-between mb-1.5">
-                    <label for="subdl-key" class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">Subdl API Key</label>
-                    <a href="https://subdl.com/panel/api" target="_blank" class="text-xs text-white hover:text-[#8b929a] transition-colors inline-flex items-center gap-1 font-medium underline underline-offset-4 decoration-[#22262b] hover:decoration-white">Get API Key <span class="text-[10px]">&#8599;</span></a>
-                </div>
-                <div class="flex items-center gap-3">
-                    <input type="text" id="subdl-key" value="{{initial_subdl}}" placeholder="Paste your Subdl API Key (Required for Subdl)" class="mono-input flex-1 min-w-0" autocomplete="off">
-                    <div id="subdl-status" class="shrink-0"></div>
-                </div>
+        <!-- Wizard progress bar -->
+        <nav class="wizard-progress" aria-label="Configuration steps">
+            <button type="button" class="wizard-step-btn active" data-step-target="1">
+                <span class="wizard-step-num">1</span>
+                <span class="wizard-step-label">Providers</span>
+            </button>
+            <span class="wizard-progress-line" aria-hidden="true"></span>
+            <button type="button" class="wizard-step-btn" data-step-target="2">
+                <span class="wizard-step-num">2</span>
+                <span class="wizard-step-label">Preferences</span>
+            </button>
+            <span class="wizard-progress-line" aria-hidden="true"></span>
+            <button type="button" class="wizard-step-btn" data-step-target="3">
+                <span class="wizard-step-num">3</span>
+                <span class="wizard-step-label">Install</span>
+            </button>
+        </nav>
+
+        <div class="wizard-body">
+            <!-- ===================== STEP 1: PROVIDERS ===================== -->
+            <div class="wizard-step space-y-4" data-step="1">
+
+                <!-- Card: Subtitle Providers -->
+                <section class="mono-card area-providers p-4 lg:p-6">
+                    <div class="mb-2">
+                        <h2 class="section-kicker">Subtitle Providers</h2>
+                        <p class="text-[11px] text-[#8b929a] mt-2">Enable or disable sources and add an API key where required.</p>
+                    </div>
+
+                    <div class="provider-list">
+                        <!-- SubDL -->
+                        <div class="provider-row">
+                            <div class="provider-head">
+                                <div class="provider-id">
+                                    <img src="/static/subdl.png" alt="SubDL">
+                                    <span class="provider-name">SubDL</span>
+                                    <span class="badge-tag bg-amber-500/10 text-amber-400 border-amber-500/20">Requires Key</span>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="enableSubdl" checked class="peer sr-only">
+                                    <span class="toggle-track"></span>
+                                </label>
+                            </div>
+                            <div id="subdlKey" class="provider-key expanded">
+                                <div class="provider-key-wrap">
+                                    <input type="text" id="subdl-key" value="{{initial_subdl}}" placeholder="Paste your SubDL API key" class="mono-input w-full" autocomplete="off">
+                                    <a href="https://subdl.com/panel/api" target="_blank" class="provider-key-action">Get API Key <span class="text-[10px]">&#8599;</span></a>
+                                </div>
+                                <div id="subdl-status" class="mt-2"></div>
+                            </div>
+                        </div>
+
+                        <!-- SubSource -->
+                        <div class="provider-row">
+                            <div class="provider-head">
+                                <div class="provider-id">
+                                    <img src="/static/subsource.png" alt="SubSource">
+                                    <span class="provider-name">SubSource</span>
+                                    <span class="badge-tag bg-amber-500/10 text-amber-400 border-amber-500/20">Requires Key</span>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="enableSubsource" checked class="peer sr-only">
+                                    <span class="toggle-track"></span>
+                                </label>
+                            </div>
+                            <div id="subsourceKey" class="provider-key expanded">
+                                <div class="provider-key-wrap">
+                                    <input type="text" id="subsource-key" value="{{initial_subsource}}" placeholder="Paste your SubSource API key" class="mono-input w-full" autocomplete="off">
+                                    <a href="https://subsource.net/dashboard/profile" target="_blank" class="provider-key-action">Get API Key <span class="text-[10px]">&#8599;</span></a>
+                                </div>
+                                <div id="subsource-status" class="mt-2"></div>
+                            </div>
+                        </div>
+
+                        <!-- OpenSubtitles -->
+                        <div class="provider-row">
+                            <div class="provider-head">
+                                <div class="provider-id">
+                                    <img src="/static/opensubtitles.png" alt="OpenSubtitles">
+                                    <span class="provider-name">OpenSubtitles</span>
+                                    <span class="badge-tag bg-amber-500/10 text-amber-400 border-amber-500/20">Requires Key</span>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="enableOpensubtitles" class="peer sr-only">
+                                    <span class="toggle-track"></span>
+                                </label>
+                            </div>
+                            <div id="opensubtitlesKey" class="provider-key">
+                                <div class="provider-key-wrap">
+                                    <input type="text" id="opensubtitles-key" value="{{initial_opensubtitles}}" placeholder="Paste your OpenSubtitles API key" class="mono-input w-full" autocomplete="off">
+                                    <a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="provider-key-action">Get API Key <span class="text-[10px]">&#8599;</span></a>
+                                </div>
+                                <div id="opensubtitles-status" class="mt-2"></div>
+                            </div>
+                        </div>
+
+                        <!-- YIFYSubtitles -->
+                        <div class="provider-row">
+                            <div class="provider-head">
+                                <div class="provider-id">
+                                    <img src="/static/yifysubtitles.png" alt="YIFYSubtitles">
+                                    <span class="provider-name">YIFYSubtitles</span>
+                                    <span class="badge-tag bg-emerald-500/10 text-emerald-400 border-emerald-500/20">Free / No Key</span>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="enableYifysubtitles" class="peer sr-only">
+                                    <span class="toggle-track"></span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- SubtitleCat -->
+                        <div class="provider-row">
+                            <div class="provider-head">
+                                <div class="provider-id">
+                                    <img src="/static/subtitlecat.png" alt="SubtitleCat">
+                                    <span class="provider-name">SubtitleCat</span>
+                                    <span class="badge-tag bg-purple-500/10 text-purple-400 border-purple-500/20">Machine Translated</span>
+                                </div>
+                                <label class="toggle">
+                                    <input type="checkbox" id="enableSubtitlecat" class="peer sr-only">
+                                    <span class="toggle-track"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </section>
             </div>
 
-            <div>
-                <div class="flex items-center justify-between mb-1.5">
-                    <label for="subsource-key" class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">
-                        Subsource API Key <span class="text-xs font-normal normal-case text-[#454c55]">(Optional)</span>
-                    </label>
-                    <a href="https://subsource.net/dashboard/profile" target="_blank" class="text-xs text-white hover:text-[#8b929a] transition-colors inline-flex items-center gap-1 font-medium underline underline-offset-4 decoration-[#22262b] hover:decoration-white">Get API Key <span class="text-[10px]">&#8599;</span></a>
-                </div>
-                <div class="flex items-center gap-3">
-                    <input type="text" id="subsource-key" value="{{initial_subsource}}" placeholder="Paste your Subsource API Key (Optional)" class="mono-input flex-1 min-w-0" autocomplete="off">
-                    <div id="subsource-status" class="shrink-0"></div>
-                </div>
-                <p class="text-[11px] text-[#454c55] mt-1">Leave empty to use Subdl only.</p>
+            <!-- ===================== STEP 2: PREFERENCES & PREVIEW ===================== -->
+            <div class="wizard-step hidden space-y-4" data-step="2">
+
+                <!-- Card: Configuration Settings -->
+                <section class="mono-card area-preferences p-4 lg:p-6">
+                    <div class="mb-2">
+                        <h2 class="section-kicker">Preferences</h2>
+                    </div>
+
+                    <div class="pref-row">
+                        <div class="min-w-0">
+                            <label for="languageSelect" class="pref-label">Preferred Languages</label>
+                            <p class="pref-desc">Ordered list of subtitle languages to request.</p>
+                        </div>
+                    </div>
+                    <div class="pb-4">
+                        <select id="languageSelect" name="languages" multiple placeholder="Select languages you like" autocomplete="off">
+                            {{language_options_html}}
+                        </select>
+                    </div>
+
+                    <!-- Section B: Arabic Language Engine -->
+                    <div class="pref-group-label">Arabic Language Engine</div>
+
+                    <div id="rtlFixRow" class="pref-row">
+                        <div class="min-w-0">
+                            <label for="enableRtlFix" class="pref-label">Arabic RTL Alignment Fix</label>
+                            <p class="pref-desc">Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods (e.g. <span class="inline-flex items-center gap-1 font-mono text-white text-xs" dir="ltr"><bdi dir="rtl">.مرحبا -</bdi><span>&rarr;</span><bdi dir="rtl">- مرحبا.</bdi></span>).</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="enableRtlFix" checked class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div id="stripDiacriticsRow" class="pref-row">
+                        <div class="min-w-0">
+                            <label for="stripDiacritics" class="pref-label">Strip Arabic diacritics (Tashkeel)</label>
+                            <p class="pref-desc text-xs text-zinc-400">Removes Harakat while keeping Shadda, Tanween, and feminine Kasra (e.g. <bdi dir="rtl" class="font-mono text-white"><code>أنتِ</code>، <code>لكِ</code>، <code>علّمتِ</code></bdi>).</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="stripDiacritics" class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div id="cleanCommasRow" class="pref-row">
+                        <div class="min-w-0">
+                            <label for="cleanCommas" class="pref-label">Normalize Arabic commas</label>
+                            <p class="pref-desc">Converts Latin commas in Arabic text to Arabic commas (e.g. <code dir="ltr" class="text-white font-mono"><bdi dir="rtl">نعم , لا</bdi> &rarr; <bdi dir="rtl">نعم، لا</bdi></code>).</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="cleanCommas" class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div id="easternNumeralsRow" class="pref-row">
+                        <div class="min-w-0">
+                            <label for="easternArabicNumerals" class="pref-label">Convert numbers to Eastern Arabic</label>
+                            <p class="pref-desc">Converts Western digits to Eastern Arabic numerals in Arabic dialogue (e.g. <span class="inline-flex items-center gap-1 font-mono text-white text-xs" dir="ltr"><bdi dir="rtl">قبل 3 أيام</bdi><span>&rarr;</span><bdi dir="rtl">قبل ٣ أيام</bdi></span>).</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="easternArabicNumerals" class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <!-- Section C: Dialogue & Clean-up -->
+                    <div class="pref-group-label">Dialogue &amp; Clean-up</div>
+
+                    <div class="pref-row">
+                        <div class="min-w-0">
+                            <label for="excludeHi" class="pref-label">Exclude HI (Hearing Impaired)</label>
+                            <p class="pref-desc">Filter out subtitles with sound effects and audio descriptions.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="excludeHi" {{initial_exclude_hi}} class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div id="stripHiRow" class="pref-row pref-subrow">
+                        <div class="min-w-0">
+                            <label for="stripHiLabels" class="pref-label">Strip in-dialogue HI labels</label>
+                            <p class="pref-desc">Clean sound effects, audio cues, and speaker tags (e.g. [LAUGHS], (SIGHS), or JOHN:) while keeping dialogue intact.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="stripHiLabels" class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div class="pref-row">
+                        <div class="min-w-0">
+                            <label for="enableAdRemoval" class="pref-label">Remove ads</label>
+                            <p class="pref-desc">Clean promotional links, website domains, and social media handles from subtitles automatically.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="enableAdRemoval" checked class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div id="translatorCreditsRow" class="pref-row pref-subrow">
+                        <div class="min-w-0">
+                            <label for="keepTranslatorCredits" class="pref-label">Keep translator credits</label>
+                            <p class="pref-desc">Preserve translator names while removing spam, ads, and website links.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="keepTranslatorCredits" checked class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <!-- Section D: Text Formatting & Timing -->
+                    <div class="pref-group-label">Text Formatting &amp; Timing</div>
+
+                    <div class="pref-row">
+                        <div class="min-w-0">
+                            <label for="cleanTags" class="pref-label">Clean tags</label>
+                            <p class="pref-desc">Fixes unclosed <code class="text-white font-mono">&lt;i&gt;/&lt;b&gt;</code> tags and repairs malformed wrappers.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="cleanTags" checked class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div class="pref-row">
+                        <div class="min-w-0">
+                            <label for="stripColors" class="pref-label">Strip text colors</label>
+                            <p class="pref-desc">Removes ASS/inline custom font colors to enforce a clean, player-native uniform text color.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="stripColors" class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div class="pref-row">
+                        <div class="min-w-0">
+                            <label for="cleanSpacing" class="pref-label">Normalize spacing</label>
+                            <p class="pref-desc">Collapses multi-spaces and fixes <code class="text-white font-mono">word , next &rarr; word, next</code>.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="cleanSpacing" class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div class="pref-row">
+                        <div class="min-w-0">
+                            <label for="cleanSymbols" class="pref-label">Clean symbols &amp; breaks</label>
+                            <p class="pref-desc">Normalizes loose dashes <code class="text-white font-mono">-- &rarr; ...</code> and cleans stray <code class="text-white font-mono">&lt;br&gt;</code>.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="cleanSymbols" class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
+                    <div class="pref-row">
+                        <div class="min-w-0">
+                            <label for="cleanTiming" class="pref-label">Fix display timing</label>
+                            <p class="pref-desc">Clamps micro-overlaps (&lt;500ms) between consecutive cues to stop player flickering.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="cleanTiming" class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+                </section>
+
+                <!-- Card: Subtitle Badge -->
+                <section class="mono-card area-badge p-4 lg:p-6">
+                    <h2 class="section-kicker mb-4">Subtitle Badge Preview</h2>
+                    <div id="badgeBuilder" class="flex flex-wrap items-center gap-2 mb-3">
+                        <button type="button" class="badge-chip active" data-part="score">[100%]</button>
+                        <button type="button" class="badge-chip active" data-part="provider">[SubDL]</button>
+                        <button type="button" class="badge-chip active" data-part="filename">Example.Show.S01E01.1080p.WEB-DL-FLUX</button>
+                            <button type="button" class="badge-chip active" data-part="uploader">(by 'username')</button>
+                    </div>
+                    <div id="badgePreview" class="font-mono text-xs text-white bg-[#0c0d0e] border border-[#22262b] p-4 rounded-xl break-all leading-relaxed">[100%] [SubDL] Example.Show.S01E01.1080p.WEB-DL-FLUX (by 'username')</div>
+                    <p class="text-[11px] text-[#94a1b2] mt-2">Tap a part to show or hide it. Live preview of how each subtitle appears in the Stremio (or Stremio client) player.</p>
+
+                    <!-- Badge component legend -->
+                    <div class="mt-3 pt-3 border-t border-[#22262b] grid grid-cols-1 sm:grid-cols-2 gap-x-5 gap-y-1.5 text-xs text-slate-400">
+                        <div class="flex items-baseline gap-2">
+                            <code class="text-slate-300 font-mono bg-white/5 px-1.5 py-0.5 rounded shrink-0">[100%]</code>
+                            <span>Match score based on release filename.</span>
+                        </div>
+                        <div class="flex items-baseline gap-2">
+                            <code class="text-slate-300 font-mono bg-white/5 px-1.5 py-0.5 rounded shrink-0">[SubDL]</code>
+                            <span>Subtitle provider source.</span>
+                        </div>
+                        <div class="flex items-baseline gap-2">
+                            <code class="text-slate-300 font-mono bg-white/5 px-1.5 py-0.5 rounded shrink-0">Release</code>
+                            <span>Video file release name / source tag.</span>
+                        </div>
+                        <div class="flex items-baseline gap-2">
+                            <code class="text-slate-300 font-mono bg-white/5 px-1.5 py-0.5 rounded shrink-0">(by 'username')</code>
+                            <span>Subtitle uploader or translator.</span>
+                        </div>
+                    </div>
+                </section>
             </div>
 
-            <div>
-                <div class="flex items-center justify-between mb-1.5">
-                    <label for="opensubtitles-key" class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">
-                        OpenSubtitles API Key <span class="text-xs font-normal normal-case text-[#454c55]">(Optional)</span>
-                    </label>
-                    <a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="text-xs text-white hover:text-[#8b929a] transition-colors inline-flex items-center gap-1 font-medium underline underline-offset-4 decoration-[#22262b] hover:decoration-white">Get API Key <span class="text-[10px]">&#8599;</span></a>
-                </div>
-                <div class="flex items-center gap-3">
-                    <input type="text" id="opensubtitles-key" value="{{initial_opensubtitles}}" placeholder="Paste your OpenSubtitles API Key (Optional)" class="mono-input flex-1 min-w-0" autocomplete="off">
-                    <div id="opensubtitles-status" class="shrink-0"></div>
-                </div>
-                <p class="text-[11px] text-[#454c55] mt-1">Leave empty to use Subdl/Subsource only.</p>
-            </div>
-        </div>
+            <!-- ===================== STEP 3: INSTALLATION & OUTPUT ===================== -->
+            <div class="wizard-step hidden space-y-4" data-step="3">
 
-        <!-- Card 2: Configuration Settings -->
-        <div class="mono-card p-5 sm:p-6 space-y-4">
-            <div>
-                <label for="languageSelect" class="block text-xs font-semibold uppercase tracking-wider text-[#8b929a] mb-1.5">Preferred Languages</label>
-                <select id="languageSelect" name="languages" multiple placeholder="Select languages you like" autocomplete="off">
-                    {{language_options_html}}
-                </select>
-            </div>
+                <!-- Card: Network & Host (hidden - auto uses current origin) -->
+                <section class="mono-card area-host p-4 lg:p-6" style="display:none !important;" aria-hidden="true">
+                    <div class="flex flex-wrap items-center justify-between mb-2 gap-2">
+                        <label for="hostUrl" class="section-kicker">Addon Host</label>
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-[#1e2227] text-white border border-[#2d333b]">
+                            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                            <span id="hostBadgeText">Auto-detected: {{lan_ip}}</span>
+                        </span>
+                    </div>
+                    <input type="text" id="hostUrl" placeholder="http://192.168.1.xxx:7000" value="{{base_url}}" class="mono-input w-full font-mono text-xs" autocomplete="off">
+                    <p class="text-[11px] text-[#94a1b2] mt-2">LAN base URL used to build the manifest link.</p>
+                </section>
 
-            <!-- Simple, elegant toggle switch for Exclude HI -->
-            <div class="flex items-center justify-between pt-4 border-t border-[#22262b]">
-                <div>
-                    <label for="excludeHi" class="text-sm font-medium text-white block cursor-pointer">
-                        Exclude HI (Hearing Impaired)
-                    </label>
-                    <p class="text-xs text-[#8b929a] mt-0.5">Filter out subtitles with sound effects and audio descriptions.</p>
-                </div>
-                <label class="relative inline-flex items-center cursor-pointer select-none">
-                    <input type="checkbox" id="excludeHi" {{initial_exclude_hi}} class="sr-only peer">
-                    <div class="w-11 h-6 bg-[#0c0d0e] border border-[#22262b] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#8b929a] peer-checked:after:bg-[#0c0d0e] after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-white peer-checked:border-white"></div>
-                </label>
-            </div>
-        </div>
+                <!-- Card: Stremio Installation -->
+                <section class="mono-card area-stremio p-4 lg:p-6 space-y-4">
+                    <div class="flex items-start gap-3.5">
+                        <div class="w-11 h-11 rounded-[10px] bg-white/[.06] border border-white/10 flex items-center justify-center shrink-0">
+                            <svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                <path d="M12 1.75 22.25 12 12 22.25 1.75 12 12 1.75Z" fill="#f2f2f2"/>
+                                <path d="M12 1.75 22.25 12 12 22.25 1.75 12 12 1.75Z" stroke="rgba(255,255,255,.2)" stroke-width="0.75" stroke-linejoin="round"/>
+                                <path d="M9.6 8.35 16.3 12l-6.7 3.65Z" fill="#0c0c0c"/>
+                            </svg>
+                        </div>
+                        <div class="min-w-0">
+                            <h3 class="text-sm font-bold text-white">Stremio</h3>
+                            <p class="text-xs text-[#8e8e8e] mt-0.5 leading-relaxed">
+                                Install directly to Stremio or copy the manifest link.
+                            </p>
+                        </div>
+                    </div>
 
-        <!-- Card 3: Network & Host -->
-        <div class="mono-card p-5 sm:p-6">
-            <div class="flex items-center justify-between mb-1.5">
-                <label for="hostUrl" class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">Addon Host / LAN Base URL</label>
-                <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-[#1e2227] text-white border border-[#2d333b]">
-                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                    <span id="hostBadgeText">Auto-detected: {{lan_ip}}</span>
-                </span>
-            </div>
-            <input type="text" id="hostUrl" placeholder="http://192.168.1.xxx:7000" value="{{base_url}}" class="mono-input w-full font-mono text-xs" autocomplete="off">
-        </div>
+                    <div class="flex flex-col gap-2 pt-1">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <button id="installStremioApp" type="button" class="btn btn-primary">
+                                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                                <span>Install to Stremio</span>
+                            </button>
+                            <button id="installStremioWeb" type="button" class="btn btn-secondary">
+                                <svg class="w-4 h-4 text-[#8b929a]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                                <span>Stremio Web</span>
+                                <span class="text-[10px]">&#8599;</span>
+                            </button>
+                        </div>
+                        <button id="btnCopy" type="button" onclick="copyManifestLink()" class="btn btn-secondary w-full">
+                            <svg class="w-4 h-4 text-[#8b929a]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                            <span id="btnCopyText">Copy Link</span>
+                        </button>
+                    </div>
+                </section>
 
-        <!-- Stremio Installation Card -->
-        <div class="mono-card p-5 sm:p-6 space-y-4">
-            <!-- Card Header -->
-            <div class="flex items-start gap-3.5">
-                <div class="w-10 h-10 rounded-xl bg-[#6A38EB]/15 border border-[#6A38EB]/30 flex items-center justify-center shrink-0 shadow-sm">
-                    <svg class="w-5 h-5 text-[#8A5CFF]" viewBox="0 0 24 24" fill="none">
-                        <path d="M12 2L21 12L12 22L3 12L12 2Z" fill="#6A38EB" fill-opacity="0.3" stroke="#6A38EB" stroke-width="1.5" stroke-linejoin="round"/>
-                        <path d="M10 8.5L16 12L10 15.5V8.5Z" fill="#8A5CFF"/>
-                    </svg>
-                </div>
-                <div>
-                    <h3 class="text-sm font-bold text-white flex items-center gap-2">
-                        Stremio
-                    </h3>
-                    <p class="text-xs text-[#8b929a] mt-0.5 leading-relaxed">
-                        Install to Stremio or other Stremio addon compatible clients using the Manifest URL.
+                <!-- Card: Manifest URL -->
+                <section class="mono-card area-manifest p-4 lg:p-6">
+                    <span class="section-kicker">Generated Manifest URL</span>
+                    <div class="font-mono text-xs text-[#8b929a] bg-[#0c0d0e] border border-[#22262b] p-4 rounded-xl break-all select-all leading-relaxed mt-3" id="manifestPreview">
+                        {{base_url}}/manifest.json
+                    </div>
+                    <p class="text-[11px] text-[#94a1b2] mt-2 leading-relaxed">
+                        Stateless configuration: all API keys and preferences are serialized into the manifest URL. No personal data is stored on this server.
                     </p>
-                </div>
-            </div>
-
-            <!-- Action Buttons: Solid White Primary CTA + Dark Secondary Copy Link -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                <!-- Primary CTA: Solid white button with black text (#0c0d0e), rounded corners, high visibility -->
-                <button id="installStremioApp" type="button" class="inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm text-[#0c0d0e] bg-white hover:bg-[#e4e7eb] active:scale-[0.98] transition-all duration-150 cursor-pointer shadow-sm">
-                    <svg class="w-4 h-4 text-[#0c0d0e]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-                    <span>Install to Stremio</span>
-                </button>
-                <!-- Secondary CTA: Dark surface matching monochrome theme -->
-                <button id="btnCopy" type="button" onclick="copyManifestLink()" class="inline-flex items-center justify-center gap-2 px-5 py-3.5 rounded-xl font-semibold text-sm text-white bg-[#1e2227] hover:bg-[#282d34] border border-[#2f353d] active:scale-[0.98] transition-all duration-150 cursor-pointer">
-                    <svg class="w-4 h-4 text-[#8b929a]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                    <span id="btnCopyText">Copy Link</span>
-                </button>
-            </div>
-
-            <!-- Secondary Stremio Web Option -->
-            <div class="pt-1 text-center">
-                <button id="installStremioWeb" type="button" class="inline-flex items-center gap-1.5 text-xs text-[#8b929a] hover:text-white transition-colors py-1 cursor-pointer">
-                    <svg class="w-3.5 h-3.5 text-[#454c55]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-                    <span>Install to Stremio Web</span>
-                    <span class="text-[10px]">&#8599;</span>
-                </button>
+                </section>
             </div>
         </div>
 
-        <!-- Manifest URL & Details -->
-        <div class="space-y-2 pt-1">
-            <div class="flex items-center justify-between">
-                <span class="text-xs font-semibold uppercase tracking-wider text-[#8b929a]">Generated Manifest URL</span>
-            </div>
-
-            <div class="font-mono text-xs text-[#8b929a] bg-[#0c0d0e] border border-[#22262b] p-3.5 rounded-xl break-all select-all shadow-inner leading-relaxed" id="manifestPreview">
-                {{base_url}}/manifest.json
-            </div>
-
-            <p class="text-center text-[11px] text-[#454c55] pt-1">
-                Stateless configuration: all API keys and preferences are serialized into the manifest URL. No personal data is stored on this server.
-            </p>
+        <!-- Wizard controls — normal flow, directly under active step -->
+        <div class="wizard-controls flex items-center justify-between mt-8 pt-6 border-t border-white/10">
+            <button id="wizardBack" type="button" class="btn btn-secondary">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+                <span>Back</span>
+            </button>
+            <button id="wizardNext" type="button" class="btn btn-primary ml-auto">
+                <span>Next</span>
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+            </button>
         </div>
+
+        <!-- Footer -->
+        <footer class="site-footer">Free &amp; <a href="https://github.com/donsaud/NinjaSubs" target="_blank" rel="noopener noreferrer" class="footer-link">Open Source</a> for the community &bull; <span class="version-tag">v1.0.0</span></footer>
     </div>
 
     <!-- Minimal Toast Notification -->
-    <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 hidden z-50 items-center gap-2 px-5 py-2.5 rounded-full bg-white text-[#0c0d0e] font-bold text-xs shadow-2xl transition-all duration-300">
-        <svg class="w-4 h-4 text-[#0c0d0e]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+    <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 hidden z-50 items-center gap-2 px-5 py-2.5 rounded-full font-bold text-xs shadow-2xl transition-all duration-300">
+        <svg class="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
         <span>Copied to Clipboard!</span>
     </div>
+
+    <!-- Three.js paper-design ambient shader (simplex domain-warp + grain) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        window.addEventListener('DOMContentLoaded', function () {
+            var canvas = document.getElementById('paper-shader-canvas');
+            function fallback() {
+                document.body.style.backgroundColor = '#06070a';
+                document.body.style.backgroundImage =
+                    'radial-gradient(circle at 85% 15%, rgba(217,70,239,0.55) 0%, rgba(30,64,175,0.35) 35%, transparent 65%),' +
+                    'radial-gradient(circle at 15% 85%, rgba(56,189,248,0.45) 0%, rgba(29,78,216,0.3) 35%, transparent 65%)';
+                document.body.style.backgroundAttachment = 'fixed';
+                document.body.style.backgroundRepeat = 'no-repeat';
+            }
+            if (!canvas || !window.THREE) {
+                if (!window.THREE) console.error('paper-shader: three.js failed to load');
+                fallback();
+                return;
+            }
+            var renderer;
+            try {
+                renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: false, alpha: false });
+            } catch (e) {
+                console.error('paper-shader: WebGL unavailable', e);
+                fallback();
+                return;
+            }
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+            renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+            var scene = new THREE.Scene();
+            var camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+            var uniforms = {
+                u_time: { value: 0.0 },
+                u_res: { value: new THREE.Vector2(canvas.width, canvas.height) }
+            };
+            var material = new THREE.ShaderMaterial({
+                uniforms: uniforms,
+                vertexShader: 'varying vec2 v_uv;void main(){v_uv=uv;gl_Position=vec4(position,1.0);}',
+                fragmentShader: [
+                    'precision highp float;',
+                    'varying vec2 v_uv;',
+                    'uniform vec2 u_res;',
+                    'uniform float u_time;',
+                    'vec3 permute(vec3 x){return mod(((x*34.0)+1.0)*x,289.0);}',
+                    'float snoise(vec2 v){',
+                    '  const vec4 C=vec4(0.211324865405187,0.366025403784439,-0.577350269189626,0.024390243902439);',
+                    '  vec2 i=floor(v+dot(v,C.yy));',
+                    '  vec2 x0=v-i+dot(i,C.xx);',
+                    '  vec2 i1=(x0.x>x0.y)?vec2(1.0,0.0):vec2(0.0,1.0);',
+                    '  vec4 x12=x0.xyxy+C.xxzz;',
+                    '  x12.xy-=i1;',
+                    '  i=mod(i,289.0);',
+                    '  vec3 p=permute(permute(i.y+vec3(0.0,i1.y,1.0))+i.x+vec3(0.0,i1.x,1.0));',
+                    '  vec3 m=max(0.5-vec3(dot(x0,x0),dot(x12.xy,x12.xy),dot(x12.zw,x12.zw)),0.0);',
+                    '  m=m*m;m=m*m;',
+                    '  vec3 x=2.0*fract(p*C.www)-1.0;',
+                    '  vec3 h=abs(x)-0.5;',
+                    '  vec3 ox=floor(x+0.5);',
+                    '  vec3 a0=x-ox;',
+                    '  m*=1.79284291400159-0.85373472095314*(a0*a0+h*h);',
+                    '  vec3 g;',
+                    '  g.x=a0.x*x0.x+h.x*x0.y;',
+                    '  g.yz=a0.yz*x12.xz+h.yz*x12.yw;',
+                    '  return 130.0*dot(m,g);',
+                    '}',
+                    'float fbm(vec2 p){float v=0.0;float a=0.5;for(int i=0;i<5;i++){v+=a*snoise(p);p*=2.0;a*=0.5;}return v;}',
+                    'void main(){',
+                    '  float aspect=u_res.x/u_res.y;',
+                    '  vec2 p=vec2(v_uv.x*aspect,v_uv.y);',
+                    '  float t=u_time*0.06;',
+                    '  vec2 warp=vec2(fbm(p*1.6+t),fbm(p*1.6-t*1.3));',
+                    '  vec2 q=p+0.35*warp;',
+                    '  vec2 c1=vec2(0.85*aspect,0.12);',
+                    '  vec2 c2=vec2(0.12*aspect,0.88);',
+                    '  float d1=length((q-c1)*vec2(1.0,1.2));',
+                    '  float d2=length((q-c2)*vec2(1.0,1.2));',
+                    '  vec3 base=vec3(0.0235,0.0275,0.0392);',
+                    '  vec3 magenta=vec3(0.851,0.278,0.937);',
+                    '  vec3 blue=vec3(0.149,0.388,0.922);',
+                    '  float g1=exp(-d1*d1*5.0);',
+                    '  float g2=exp(-d2*d2*5.0);',
+                    '  vec3 col=base+magenta*g1*0.6+blue*g2*0.55;',
+                    '  float grain=fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233)))*43758.5453);',
+                    '  col+=(grain-0.5)*0.08;',
+                    '  gl_FragColor=vec4(col,1.0);',
+                    '}'
+                ].join('\n')
+            });
+            scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material));
+
+            function resize() {
+                renderer.setSize(window.innerWidth, window.innerHeight, false);
+                uniforms.u_res.value.set(canvas.width, canvas.height);
+            }
+            window.addEventListener('resize', resize);
+            resize();
+
+            var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            var start = performance.now();
+            function frame(now) {
+                uniforms.u_time.value = (now - start) / 1000;
+                renderer.render(scene, camera);
+            }
+            if (reduceMotion) {
+                frame(start);
+            } else {
+                (function loop(now) {
+                    frame(now);
+                    requestAnimationFrame(loop);
+                })(start);
+            }
+        });
+    </script>
 
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/js/tom-select.complete.min.js"></script>
@@ -376,6 +1399,7 @@
         const serverLanIp = "{{lan_ip}}";
         const serverPort = "{{port}}" || "7000";
         const serverLanUrl = "{{lan_url}}";
+        const initialPrefs = {{initial_phase2_json}};
 
         const hostInput = document.getElementById("hostUrl");
         if (hostInput) {
@@ -443,8 +1467,168 @@
             if (el) {
                 return Array.from(el.selectedOptions).map(opt => opt.value).filter(Boolean);
             }
-            return ["ara"];
+            return [];
         }
+
+        // ------------------------------------------------------------------
+        // Subtitle badge builder (score / provider / filename / uploader).
+        // ------------------------------------------------------------------
+        const CANONICAL_BADGE_PARTS = ["score", "provider", "filename", "uploader"];
+        const DEFAULT_BADGE_PARTS = ["score", "provider", "filename", "uploader"];
+        let badgeParts = [...DEFAULT_BADGE_PARTS];
+
+        function getBadgeParts() {
+            return CANONICAL_BADGE_PARTS.filter((part) => badgeParts.includes(part));
+        }
+
+        function renderBadgeBuilder() {
+            document.querySelectorAll("#badgeBuilder .badge-chip").forEach((chip) => {
+                const part = chip.getAttribute("data-part");
+                chip.classList.toggle("active", badgeParts.includes(part));
+            });
+        }
+
+        function applyInitialPrefs() {
+            if (!initialPrefs || typeof initialPrefs !== "object") return;
+            if (Array.isArray(initialPrefs.badge_parts)) {
+                const allowed = CANONICAL_BADGE_PARTS.filter((part) =>
+                    initialPrefs.badge_parts.includes(part)
+                );
+                badgeParts = allowed.length ? allowed : [...DEFAULT_BADGE_PARTS];
+            }
+            const yifyToggle = document.getElementById("enableYifysubtitles");
+            if (yifyToggle && typeof initialPrefs.enable_yifysubtitles === "boolean") {
+                yifyToggle.checked = initialPrefs.enable_yifysubtitles;
+            }
+            const catToggle = document.getElementById("enableSubtitlecat");
+            if (catToggle && typeof initialPrefs.enable_subtitlecat === "boolean") {
+                catToggle.checked = initialPrefs.enable_subtitlecat;
+            }
+            const rtlToggle = document.getElementById("enableRtlFix");
+            if (rtlToggle && typeof initialPrefs.enable_rtl_fix === "boolean") {
+                rtlToggle.checked = initialPrefs.enable_rtl_fix;
+            }
+            const adToggle = document.getElementById("enableAdRemoval");
+            if (adToggle && typeof initialPrefs.enable_ad_removal === "boolean") {
+                adToggle.checked = initialPrefs.enable_ad_removal;
+            }
+            const creditsToggle = document.getElementById("keepTranslatorCredits");
+            if (creditsToggle && typeof initialPrefs.keep_translator_credits === "boolean") {
+                creditsToggle.checked = initialPrefs.keep_translator_credits;
+            }
+            const cleanFlagToggles = {
+                cleanTags: initialPrefs.clean_tags,
+                stripColors: initialPrefs.strip_colors,
+                cleanSpacing: initialPrefs.clean_spacing,
+                cleanSymbols: initialPrefs.clean_symbols,
+                cleanCommas: initialPrefs.clean_commas,
+                cleanTiming: initialPrefs.clean_timing,
+            };
+            Object.entries(cleanFlagToggles).forEach(([id, value]) => {
+                const el = document.getElementById(id);
+                if (el && typeof value === "boolean") el.checked = value;
+            });
+            const easternNumeralsToggle = document.getElementById("easternArabicNumerals");
+            if (
+                easternNumeralsToggle &&
+                typeof initialPrefs.eastern_arabic_numerals === "boolean"
+            ) {
+                easternNumeralsToggle.checked = initialPrefs.eastern_arabic_numerals;
+            }
+            const stripDiacriticsToggle = document.getElementById("stripDiacritics");
+            if (
+                stripDiacriticsToggle &&
+                typeof initialPrefs.strip_diacritics === "boolean"
+            ) {
+                stripDiacriticsToggle.checked = initialPrefs.strip_diacritics;
+            }
+            const stripHiToggle = document.getElementById("stripHiLabels");
+            if (stripHiToggle && typeof initialPrefs.strip_hi === "boolean") {
+                stripHiToggle.checked = initialPrefs.strip_hi;
+            }
+
+            const providerToggles = {
+                enableSubdl: initialPrefs.enable_subdl,
+                enableSubsource: initialPrefs.enable_subsource,
+                enableOpensubtitles: initialPrefs.enable_opensubtitles,
+            };
+            Object.entries(providerToggles).forEach(([id, value]) => {
+                const el = document.getElementById(id);
+                if (el && typeof value === "boolean") el.checked = value;
+            });
+        }
+
+        const PROVIDER_KEY_WRAPPERS = {
+            enableSubdl: "subdlKey",
+            enableSubsource: "subsourceKey",
+            enableOpensubtitles: "opensubtitlesKey",
+        };
+
+        function updateProviderCollapse() {
+            Object.entries(PROVIDER_KEY_WRAPPERS).forEach(([toggleId, wrapperId]) => {
+                const toggle = document.getElementById(toggleId);
+                const wrapper = document.getElementById(wrapperId);
+                if (!toggle || !wrapper) return;
+                wrapper.classList.toggle("expanded", toggle.checked);
+            });
+        }
+
+        function updateAdRemovalDependents() {
+            const adToggle = document.getElementById("enableAdRemoval");
+            const subrow = document.getElementById("translatorCreditsRow");
+            const creditsToggle = document.getElementById("keepTranslatorCredits");
+            if (!adToggle || !subrow || !creditsToggle) return;
+            const enabled = adToggle.checked;
+            creditsToggle.disabled = !enabled;
+            subrow.classList.toggle("is-disabled", !enabled);
+            subrow.setAttribute("aria-disabled", enabled ? "false" : "true");
+        }
+
+        function updateHiDependents() {
+            const excludeToggle = document.getElementById("excludeHi");
+            const subrow = document.getElementById("stripHiRow");
+            const stripToggle = document.getElementById("stripHiLabels");
+            if (!excludeToggle || !subrow || !stripToggle) return;
+            // Excluding HI entirely makes in-dialogue stripping redundant.
+            const excluded = excludeToggle.checked;
+            stripToggle.disabled = excluded;
+            subrow.classList.toggle("is-disabled", excluded);
+            subrow.setAttribute("aria-disabled", excluded ? "true" : "false");
+        }
+
+        function updateBadgePreview() {
+            const preview = document.getElementById("badgePreview");
+            if (!preview) return;
+            const providerLabel = "SubDL";
+            const sampleScore = 100;
+            const name = "Example.Show.S01E01.1080p.WEB-DL-FLUX";
+            const parts = getBadgeParts();
+
+            let out = "";
+            if (parts.includes("score")) out = `[${sampleScore}%]`;
+            if (parts.includes("provider")) out = out ? `${out} [${providerLabel}]` : `[${providerLabel}]`;
+            if (parts.includes("filename")) out = out ? `${out} ${name}` : name;
+            if (parts.includes("uploader")) out = out ? `${out} (by 'username')` : "(by 'username')";
+
+            preview.textContent = out || name;
+        }
+
+        document.querySelectorAll("#badgeBuilder .badge-chip").forEach((chip) => {
+            chip.addEventListener("click", () => {
+                const part = chip.getAttribute("data-part");
+                if (badgeParts.includes(part)) {
+                    badgeParts = badgeParts.filter((p) => p !== part);
+                } else {
+                    badgeParts = CANONICAL_BADGE_PARTS.filter(
+                        (p) => badgeParts.includes(p) || p === part
+                    );
+                }
+                if (badgeParts.length === 0) badgeParts = ["filename"];
+                renderBadgeBuilder();
+                updateBadgePreview();
+                updateUrls();
+            });
+        });
 
         function getEffectiveBaseUrl() {
             const val = hostInput ? hostInput.value.trim().replace(/[/]+$/, "") : "";
@@ -497,7 +1681,92 @@
             if (langs.length > 0) configObj.languages = langs;
             if (excludeHi) configObj.exclude_hi = true;
 
-            if (Object.keys(configObj).length === 0) {
+            if (excludeHi) {
+                configObj.hi_preference = "exclude";
+            }
+
+            const parts = getBadgeParts();
+            const isDefaultBadge =
+                parts.length === DEFAULT_BADGE_PARTS.length &&
+                parts.join(",") === DEFAULT_BADGE_PARTS.join(",");
+            if (!isDefaultBadge) {
+                configObj.badge_parts = parts;
+            }
+
+            const yifyToggle = document.getElementById("enableYifysubtitles");
+            const catToggle = document.getElementById("enableSubtitlecat");
+            const yifyEnabled = yifyToggle ? yifyToggle.checked : true;
+            const catEnabled = catToggle ? catToggle.checked : true;
+            if (!yifyEnabled) configObj.enable_yifysubtitles = false;
+            if (!catEnabled) configObj.enable_subtitlecat = false;
+
+            const rtlToggle = document.getElementById("enableRtlFix");
+            // Auto UTF-8 is baked into the core engine (always active), so no gating.
+            const rtlEnabled = rtlToggle ? rtlToggle.checked : true;
+            if (!rtlEnabled) configObj.enable_rtl_fix = false;
+
+            const adToggle = document.getElementById("enableAdRemoval");
+            const adEnabled = adToggle ? adToggle.checked : true;
+            if (!adEnabled) configObj.enable_ad_removal = false;
+
+            const creditsToggle = document.getElementById("keepTranslatorCredits");
+            const creditsEnabled = creditsToggle ? creditsToggle.checked : true;
+            // Only meaningful while ad removal is on; otherwise ignore it.
+            if (adEnabled && !creditsEnabled) configObj.keep_translator_credits = false;
+
+            const cleanFlagToggles = {
+                cleanTags: ["clean_tags", true],
+                stripColors: ["strip_colors", false],
+                cleanSpacing: ["clean_spacing", true],
+                cleanSymbols: ["clean_symbols", true],
+                cleanCommas: ["clean_commas", true],
+                cleanTiming: ["clean_timing", true],
+            };
+            let cleanFlagsNonDefault = false;
+            Object.entries(cleanFlagToggles).forEach(([id, [key, def]]) => {
+                const el = document.getElementById(id);
+                const enabled = el ? el.checked : def;
+                if (enabled !== def) {
+                    configObj[key] = enabled;
+                    cleanFlagsNonDefault = true;
+                }
+            });
+
+            const easternNumeralsToggle = document.getElementById("easternArabicNumerals");
+            const easternNumeralsEnabled =
+                easternNumeralsToggle ? easternNumeralsToggle.checked : false;
+            if (easternNumeralsEnabled) configObj.eastern_arabic_numerals = true;
+
+            const stripDiacriticsToggle = document.getElementById("stripDiacritics");
+            const stripDiacriticsEnabled = stripDiacriticsToggle
+                ? stripDiacriticsToggle.checked
+                : false;
+            if (stripDiacriticsEnabled) configObj.strip_diacritics = true;
+
+            const stripHiToggle = document.getElementById("stripHiLabels");
+            const stripHiEnabled = stripHiToggle ? stripHiToggle.checked : false;
+            // Only meaningful while HI exclusion is off; otherwise ignore it.
+            if (!excludeHi && stripHiEnabled) configObj.strip_hi = true;
+
+            const subdlToggle = document.getElementById("enableSubdl");
+            const subsourceToggle = document.getElementById("enableSubsource");
+            const opensubtitlesToggle = document.getElementById("enableOpensubtitles");
+            const subdlEnabled = subdlToggle ? subdlToggle.checked : true;
+            const subsourceEnabled = subsourceToggle ? subsourceToggle.checked : true;
+            const opensubtitlesEnabled = opensubtitlesToggle ? opensubtitlesToggle.checked : true;
+            if (!subdlEnabled) configObj.enable_subdl = false;
+            if (!subsourceEnabled) configObj.enable_subsource = false;
+            if (!opensubtitlesEnabled) configObj.enable_opensubtitles = false;
+
+            const hasAnyPreference =
+                subdl || subsource || opensubtitles || excludeHi || !isDefaultBadge ||
+                !yifyEnabled || !catEnabled || !rtlEnabled || !adEnabled ||
+                (adEnabled && !creditsEnabled) || cleanFlagsNonDefault ||
+                easternNumeralsEnabled || stripDiacriticsEnabled ||
+                (!excludeHi && stripHiEnabled) ||
+                !subdlEnabled || !subsourceEnabled || !opensubtitlesEnabled;
+
+            if (!hasAnyPreference) {
                 return null;
             }
 
@@ -529,6 +1798,57 @@
         }
 
         const updateInstallUrls = updateUrls;
+
+        // Alias used by the wizard when landing on the final Install step.
+        function updateManifestUrl() {
+            updateUrls();
+        }
+
+        // ------------------------------------------------------------------
+        // 3-step wizard navigation (providers -> preferences -> install)
+        // ------------------------------------------------------------------
+        const WIZARD_TOTAL_STEPS = 3;
+        let wizardStep = 1;
+
+        function renderWizard() {
+            document.querySelectorAll(".wizard-step").forEach((panel) => {
+                const step = Number(panel.getAttribute("data-step"));
+                panel.classList.toggle("hidden", step !== wizardStep);
+            });
+            document.querySelectorAll(".wizard-step-btn").forEach((btn) => {
+                const step = Number(btn.getAttribute("data-step-target"));
+                btn.classList.toggle("active", step === wizardStep);
+                btn.classList.toggle("complete", step < wizardStep);
+            });
+
+            const back = document.getElementById("wizardBack");
+            const next = document.getElementById("wizardNext");
+            if (back) back.classList.toggle("hidden", wizardStep === 1);
+            if (next) next.classList.toggle("hidden", wizardStep === WIZARD_TOTAL_STEPS);
+        }
+
+        function showWizardStep(step) {
+            wizardStep = Math.min(Math.max(step, 1), WIZARD_TOTAL_STEPS);
+            renderWizard();
+            // Keep the confirmation/manifest URL fresh on the final step.
+            if (wizardStep === WIZARD_TOTAL_STEPS) updateManifestUrl();
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+
+        document.querySelectorAll(".wizard-step-btn").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                showWizardStep(Number(btn.getAttribute("data-step-target")));
+            });
+        });
+
+        const wizardBackBtn = document.getElementById("wizardBack");
+        if (wizardBackBtn) {
+            wizardBackBtn.addEventListener("click", () => showWizardStep(wizardStep - 1));
+        }
+        const wizardNextBtn = document.getElementById("wizardNext");
+        if (wizardNextBtn) {
+            wizardNextBtn.addEventListener("click", () => showWizardStep(wizardStep + 1));
+        }
 
         // 1. Install to Desktop / Mobile App (Converts to stremio:// and copies HTTP URL to clipboard)
         const installAppBtn = document.getElementById("installStremioApp");
@@ -569,17 +1889,19 @@
             });
         }
 
+        let copyFeedbackTimer;
         function copyManifestLink() {
             const text = document.getElementById("manifestPreview").textContent.trim();
-            navigator.clipboard.writeText(text).then(() => {
-                const toast = document.getElementById("toast");
-                toast.classList.remove("hidden");
-                toast.classList.add("flex");
-                setTimeout(() => {
-                    toast.classList.add("hidden");
-                    toast.classList.remove("flex");
+            const showCopied = () => {
+                const label = document.getElementById("btnCopyText");
+                if (!label) return;
+                label.textContent = "Copied!";
+                clearTimeout(copyFeedbackTimer);
+                copyFeedbackTimer = setTimeout(() => {
+                    label.textContent = "Copy Link";
                 }, 2000);
-            }).catch(() => {
+            };
+            navigator.clipboard.writeText(text).then(showCopied).catch(() => {
                 prompt("Copy this URL:", text);
             });
         }
@@ -766,9 +2088,55 @@
             });
         }
 
-        document.getElementById("excludeHi").addEventListener("change", updateUrls);
+        document.getElementById("excludeHi").addEventListener("change", () => {
+            updateHiDependents();
+            updateBadgePreview();
+            updateUrls();
+        });
 
+        Object.keys(PROVIDER_KEY_WRAPPERS).forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener("change", () => {
+                    updateProviderCollapse();
+                    updateUrls();
+                });
+            }
+        });
+
+        [
+            "enableYifysubtitles",
+            "enableSubtitlecat",
+            "enableRtlFix",
+            "enableAdRemoval",
+            "keepTranslatorCredits",
+            "cleanTags",
+            "stripColors",
+            "cleanSpacing",
+            "cleanSymbols",
+            "cleanCommas",
+            "cleanTiming",
+            "easternArabicNumerals",
+            "stripDiacritics",
+            "stripHiLabels",
+        ].forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener("change", updateUrls);
+        });
+
+        const adRemovalToggleEl = document.getElementById("enableAdRemoval");
+        if (adRemovalToggleEl) {
+            adRemovalToggleEl.addEventListener("change", updateAdRemovalDependents);
+        }
+
+        applyInitialPrefs();
+        updateAdRemovalDependents();
+        updateHiDependents();
+        updateProviderCollapse();
+        renderBadgeBuilder();
+        updateBadgePreview();
         updateUrls();
+        showWizardStep(1);
 
         // Validate initial keys on page load if present
         if (subdlInput && subdlInput.value.trim()) {

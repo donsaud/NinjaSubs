@@ -120,6 +120,51 @@ async def test_opensubtitles_search_movie_v1():
 
 
 @pytest.mark.asyncio
+async def test_opensubtitles_search_extracts_uploader():
+    """Verify the uploader username is extracted from attributes.uploader.name."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+
+    def mock_get(url, params=None, headers=None, timeout=None, **kwargs):
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.json.return_value = {
+            "data": [
+                {
+                    "id": "item_1",
+                    "attributes": {
+                        "language": "ar",
+                        "release": "Movie.2024.1080p.BluRay",
+                        "uploader": {"name": "subsmaster", "uploader_id": 42},
+                        "files": [{"file_id": 111, "file_name": "Movie.2024.srt"}],
+                    },
+                },
+                {
+                    "id": "item_2",
+                    "attributes": {
+                        "language": "ar",
+                        "release": "Movie.2024.720p.HDTV",
+                        "files": [{"file_id": 222, "file_name": "Movie.2024.720p.srt"}],
+                    },
+                },
+            ]
+        }
+        return resp
+
+    mock_client.get.side_effect = mock_get
+
+    provider = OpenSubtitlesProvider(mock_client)
+    results = await provider.search_subtitles(
+        imdb_id="tt0111161",
+        api_key="os_key",
+        languages=["ara"],
+    )
+
+    assert len(results) == 2
+    assert results[0].uploader == "subsmaster"
+    assert results[1].uploader == ""
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("video_hash", [None, "", "   ", "8e245d9679d31e12"])
 @pytest.mark.parametrize(
     "confirmation",
@@ -409,6 +454,7 @@ async def test_opensubtitles_stremio_endpoint_integration(client):
         subdl_key="subdl_key",
         subsource_key="subsource_key",
         opensubtitles_key="os_key_123",
+        enable_opensubtitles=True,
         languages=["ara"],
     )
 
@@ -453,7 +499,7 @@ async def test_opensubtitles_serve_subtitle_endpoint(client):
         },
     )
 
-    fake_srt_bytes = b"1\n00:00:01,000 --> 00:00:03,000\nOpenSubtitles delivered successfully\n"
+    fake_srt_bytes = b"1\n00:00:01,000 --> 00:00:03,000\nSubtitle delivered successfully\n"
 
     with (
         patch(
@@ -468,7 +514,7 @@ async def test_opensubtitles_serve_subtitle_endpoint(client):
         resp = client.get(f"/sub/{sub_id}.srt")
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("application/x-subrip")
-        assert b"OpenSubtitles delivered successfully" in resp.content
+        assert b"Subtitle delivered successfully" in resp.content
         mock_dl.assert_called_once_with(
             "/sub/opensubtitles/77777.srt",
             api_key="my_os_key",
@@ -493,7 +539,8 @@ async def test_opensubtitles_proxy_stream_direct_delivery(client):
     ):
         resp = client.get(f"/sub/opensubtitles/{file_id}.srt?api_key=my_key")
         assert resp.status_code == 200
-        assert resp.content == mock_resp.content
+        # Arabic line ends with a period -> the UBA fix appends RLM (U+200F).
+        assert resp.content == mock_resp.content.replace(b".\n", b".\xe2\x80\x8f\n")
         assert "application/x-subrip" in resp.headers["content-type"]
 
 
@@ -516,7 +563,8 @@ async def test_opensubtitles_proxy_stream_configured_direct_delivery(client):
     ):
         resp = client.get(f"/{user_cfg}/sub/opensubtitles/{file_id}.srt")
         assert resp.status_code == 200
-        assert resp.content == mock_resp.content
+        # Arabic line ends with a period -> the UBA fix appends RLM (U+200F).
+        assert resp.content == mock_resp.content.replace(b".\n", b".\xe2\x80\x8f\n")
         mock_get_dl.assert_called_once_with(file_id, "cfg_os_key")
 
 

@@ -10,6 +10,7 @@ from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
 from app.utils.language import get_opensubtitles_lang_code, normalize_to_iso639_2
+from app.utils.uploader import extract_uploader
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -159,6 +160,9 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
                     if exclude_hi and is_hi:
                         continue
 
+                    # Uploader/author username (e.g. attributes.uploader.name)
+                    uploader = extract_uploader(attributes)
+
                     is_hash_match = (
                         bool(params.get("moviehash")) and attributes.get("moviehash_match") is True
                     )
@@ -186,6 +190,7 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
                             hearing_impaired=is_hi,
                             lang=norm_lang,
                             is_hash_match=is_hash_match,
+                            uploader=uploader,
                         )
                     )
 

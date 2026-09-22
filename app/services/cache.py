@@ -30,12 +30,31 @@ def build_cache_key(
     subdl_key: str | None = None,
     subsource_key: str | None = None,
     opensubtitles_key: str | None = None,
+    hi_preference: str = "neutral",
+    enable_subdl: bool = True,
+    enable_subsource: bool = True,
+    enable_opensubtitles: bool = True,
+    enable_yifysubtitles: bool = True,
+    enable_subtitlecat: bool = True,
+    enable_rtl_fix: bool = True,
+    enable_ad_removal: bool = True,
+    keep_translator_credits: bool = True,
+    fix_encoding: bool = True,
+    clean_tags: bool = True,
+    strip_colors: bool = False,
+    clean_spacing: bool = True,
+    clean_symbols: bool = True,
+    clean_commas: bool = True,
+    clean_timing: bool = True,
+    strip_hi: bool = False,
+    eastern_arabic_numerals: bool = False,
+    strip_diacritics: bool = False,
     **kwargs,
 ) -> str:
     """
     Build a deterministic cache key for a subtitle aggregation request.
     Accounts for media type, ID, season/ep, playback filename, video hash/size,
-    languages, exclude_hi, and active API keys.
+    languages, exclude_hi, active API keys, and Phase-2 ranking preferences.
     """
     # Clean IMDb / Kitsu ID
     clean_id = str(imdb_id or "").strip().lower()
@@ -77,6 +96,25 @@ def build_cache_key(
         k1,
         k2,
         k3,
+        str(hi_preference or "neutral").strip().lower(),
+        "1" if enable_subdl else "0",
+        "1" if enable_subsource else "0",
+        "1" if enable_opensubtitles else "0",
+        "1" if enable_yifysubtitles else "0",
+        "1" if enable_subtitlecat else "0",
+        "1" if enable_rtl_fix else "0",
+        "1" if enable_ad_removal else "0",
+        "1" if keep_translator_credits else "0",
+        "1" if fix_encoding else "0",
+        "1" if clean_tags else "0",
+        "1" if strip_colors else "0",
+        "1" if clean_spacing else "0",
+        "1" if clean_symbols else "0",
+        "1" if clean_commas else "0",
+        "1" if clean_timing else "0",
+        "1" if strip_hi else "0",
+        "1" if eastern_arabic_numerals else "0",
+        "1" if strip_diacritics else "0",
     ]
     raw_key = ":".join(parts)
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()

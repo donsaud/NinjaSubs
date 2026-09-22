@@ -1,6 +1,7 @@
 """FastAPI application for Stremio Arabic Subtitles Addon."""
 
 import hashlib
+import json
 import logging
 import re
 import urllib.parse
@@ -24,12 +25,28 @@ from app.extractor import (
     transcode_to_utf8,
 )
 from app.models import Manifest, SubtitleItem, SubtitlesResponse, UserPreferences
-from app.providers import CinemetaClient, OpenSubtitlesProvider, SubdlProvider, SubsourceProvider
+from app.providers import (
+    CinemetaClient,
+    OpenSubtitlesProvider,
+    SubdlProvider,
+    SubsourceProvider,
+    SubtitlecatProvider,
+    YifysubtitlesProvider,
+)
 from app.services.aggregator import (
     aggregate_subtitles,
     format_informative_badge,
 )
 from app.services.cache import clear_subtitle_cache
+from app.utils.cleaners import (
+    CleanOptions,
+    clean_subtitle_bytes,
+    convert_eastern_arabic_numerals_bytes,
+    fix_subtitle_encoding_bytes,
+    strip_advertisements_bytes,
+    strip_arabic_diacritics_bytes,
+    strip_hi_artifacts_bytes,
+)
 from app.utils.config_parser import parse_user_config
 from app.utils.language import AVAILABLE_LANGUAGES, get_language_name, normalize_to_iso639_2
 from app.utils.network import get_base_url, get_local_lan_ip
@@ -37,6 +54,7 @@ from app.utils.parser import parse_stremio_id
 from app.utils.release_matcher import (
     extract_stream_params,
 )
+from app.utils.rtl import fix_rtl_punctuation_bytes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,7 +95,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NinjaSubs",
     version="1.0.0",
-    description="A fast pass-through proxy that fetches, extracts, and streams native subtitles directly to Stremio.",
+    description="Smart, high-accuracy subtitle aggregator from multiple sources for Stremio.",
     lifespan=lifespan,
 )
 
@@ -118,17 +136,18 @@ async def add_global_cors_headers(request: Request, call_next):
 
 def _build_manifest(config_str: str | None = None, request: Request | None = None) -> Manifest:
     """Build Stremio Manifest object with community-standard behaviorHints."""
-    desc = "A fast pass-through proxy that fetches, extracts, and streams native subtitles directly to Stremio."
+    desc = "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
 
     base_url = get_base_url(request)
     icon_url = f"{base_url}/static/icon.png"
+    logo_url = f"{base_url}/static/logo.png"
 
     return Manifest(
         id="org.ninjasubs.addon",
         name="NinjaSubs",
         version="1.0.0",
         description=desc,
-        logo=icon_url,
+        logo=logo_url,
         icon=icon_url,
         resources=["subtitles"],
         types=["movie", "series", "anime"],
@@ -171,7 +190,38 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
     )
     initial_exclude_hi = "checked" if prefs.exclude_hi else ""
 
-    pref_langs = [normalize_to_iso639_2(lang) for lang in prefs.languages] if prefs.languages else ["ara"]
+    # User-selectable subtitle badge style (prefilled on the config page)
+    # Fresh page (no prefill): new clean defaults — only core 5 enabled.
+    _fresh_defaults = not prefill_config
+    initial_phase2_json = json.dumps(
+        {
+            "badge_parts": prefs.resolved_badge_parts,
+            "enable_subdl": prefs.enable_subdl,
+            "enable_subsource": prefs.enable_subsource,
+            "enable_opensubtitles": prefs.enable_opensubtitles,
+            "enable_yifysubtitles": prefs.enable_yifysubtitles,
+            "enable_subtitlecat": prefs.enable_subtitlecat,
+            "enable_rtl_fix": prefs.enable_rtl_fix,
+            "enable_ad_removal": prefs.enable_ad_removal,
+            "keep_translator_credits": prefs.keep_translator_credits,
+            "fix_encoding": prefs.fix_encoding,
+            "clean_tags": prefs.clean_tags,
+            "strip_colors": prefs.strip_colors,
+            "clean_spacing": False if _fresh_defaults else prefs.clean_spacing,
+            "clean_symbols": False if _fresh_defaults else prefs.clean_symbols,
+            "clean_commas": False if _fresh_defaults else prefs.clean_commas,
+            "clean_timing": False if _fresh_defaults else prefs.clean_timing,
+            "strip_hi": prefs.strip_hi,
+            "eastern_arabic_numerals": prefs.eastern_arabic_numerals,
+            "strip_diacritics": prefs.strip_diacritics,
+        }
+    )
+
+    if prefill_config:
+        pref_langs = [normalize_to_iso639_2(lang) for lang in prefs.languages] if prefs.languages else ["ara"]
+    else:
+        # Fresh configure page: no pre-selected language — let the user choose.
+        pref_langs = []
     options_html = []
     seen_codes = set()
     for lang in AVAILABLE_LANGUAGES:
@@ -215,6 +265,7 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
             .replace("{{initial_subsource}}", initial_subsource)
             .replace("{{initial_opensubtitles}}", initial_opensubtitles)
             .replace("{{initial_exclude_hi}}", initial_exclude_hi)
+            .replace("{{initial_phase2_json}}", initial_phase2_json)
             .replace("{{language_options_html}}", language_options_html)
             .replace("{{env_banner_html}}", env_banner_html)
         )
@@ -528,6 +579,10 @@ async def _fetch_subtitles_handler(
             source_tag = "SubSource"
         elif rel_prov == "opensubtitles":
             source_tag = "OpenSubtitles"
+        elif rel_prov == "yifysubtitles":
+            source_tag = "YIFY"
+        elif rel_prov == "subtitlecat":
+            source_tag = "SubtitleCat"
         else:
             source_tag = "SubDL"
 
@@ -552,19 +607,22 @@ async def _fetch_subtitles_handler(
         # Resolve clean display language name (e.g. 'Arabic', 'English')
         lang_name = get_language_name(rel_lang, default="Arabic")
 
-        # Format title and display label:
+        # Format title and display label using the user's chosen badge style:
         display_label = format_informative_badge(
             rel,
             display_score,
             lang_name=lang_name,
             source_tag=source_tag,
+            badge_parts=prefs.resolved_badge_parts,
         )
 
         # Standard modern subtitle response:
+        # - "id": clean display label (some clients such as Nuvio render the id directly,
+        #   so it must never contain the internal sub_id hash)
         # - "lang": user-selected clean ISO-639-2 code (e.g. "ara", "eng")
         # - "title": formatted clean title (e.g. "[100%] [SubDL] Dexter.S08.1080p.BluRay.x265-ImE")
         track_lang = rel_lang
-        track_id = f"{display_label}_{sub_id}"
+        track_id = display_label
 
         # Determine subtitle format extension (.ass, .ssa, .vtt, or .srt)
         sub_format = getattr(rel, "format", "srt") or "srt"
@@ -603,11 +661,23 @@ async def _fetch_subtitles_handler(
             )
         )
 
+    # The track id is now the clean display label. Guard against collisions by
+    # keeping the first occurrence of any identical (label, language) pair, while
+    # still preserving the same label across different languages.
+    seen_track_keys: set[tuple[str, str]] = set()
+    unique_items: list[SubtitleItem] = []
+    for item in subtitle_items:
+        dedup_key = (item.id, item.lang)
+        if dedup_key in seen_track_keys:
+            continue
+        seen_track_keys.add(dedup_key)
+        unique_items.append(item)
+
     logger.info(
-        f"Returning {len(subtitle_items)} ranked subtitles for {raw_id} "
+        f"Returning {len(unique_items)} ranked subtitles for {raw_id} "
         f"(Target stream: '{target_filename or 'None'}')"
     )
-    return SubtitlesResponse(subtitles=subtitle_items)
+    return SubtitlesResponse(subtitles=unique_items)
 
 
 # Direct subtitle routes (Server-wide default)
@@ -789,12 +859,61 @@ def _format_content_disposition(filename: Any, ext: str) -> str:
     return f'inline; filename="{safe}.{clean_ext}"'
 
 
+_CLEAN_OPTION_DEFAULTS: dict[str, bool] = {
+    "fix_encoding": True,
+    "clean_tags": True,
+    "strip_colors": False,
+    "clean_spacing": True,
+    "clean_symbols": True,
+    "clean_commas": True,
+    "clean_timing": True,
+}
+
+
+def _clean_options_from_query(query_params: Any) -> CleanOptions:
+    """Build CleanOptions from URL query params, falling back to the defaults."""
+    values = dict(_CLEAN_OPTION_DEFAULTS)
+    for name, default in _CLEAN_OPTION_DEFAULTS.items():
+        if name in query_params:
+            raw = query_params.get(name, "1" if default else "0")
+            values[name] = str(raw).lower() not in ("0", "false", "no")
+    return CleanOptions(**values)
+
+
 def _build_subtitle_response(
     sub_bytes: bytes,
     release_name: Any,
     req_format: str = "srt",
+    enable_rtl_fix: bool = True,
+    enable_ad_removal: bool = True,
+    keep_translator_credits: bool = True,
+    clean_options: CleanOptions | None = None,
+    strip_hi: bool = False,
+    eastern_arabic_numerals: bool = False,
+    strip_diacritics: bool = False,
 ) -> Response:
     """Construct HTTP response preserving exact original subtitle format (pass-through)."""
+    # Fix legacy encodings first so every later text pass sees clean UTF-8, then strip
+    # in-dialogue HI artifacts, remove advertisement cues, apply the selected syntax
+    # cleanups, and finally run the Arabic RTL normalization (punctuation/brackets/
+    # quotes + RLM). All happen at serve time.
+    options = clean_options or CleanOptions()
+    if options.fix_encoding:
+        sub_bytes = fix_subtitle_encoding_bytes(sub_bytes)
+    if strip_hi:
+        sub_bytes = strip_hi_artifacts_bytes(sub_bytes)
+    if enable_ad_removal:
+        sub_bytes = strip_advertisements_bytes(sub_bytes, keep_translator_credits)
+    # Diacritics must be stripped before comma normalization / RTL fixing so those
+    # character-offset sensitive passes see the final text.
+    if strip_diacritics:
+        sub_bytes = strip_arabic_diacritics_bytes(sub_bytes)
+    sub_bytes = clean_subtitle_bytes(sub_bytes, options)
+    if enable_rtl_fix:
+        sub_bytes = fix_rtl_punctuation_bytes(sub_bytes)
+    if eastern_arabic_numerals:
+        sub_bytes = convert_eastern_arabic_numerals_bytes(sub_bytes)
+
     # 1. Native ASS / SSA detection
     if is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa"):
         ext = "ssa" if req_format == "ssa" else "ass"
@@ -846,6 +965,33 @@ async def _serve_subtitle_handler(
     if _http_client is None:
         raise HTTPException(status_code=503, detail="HTTP client is not initialized")
 
+    # Per-user subtitle processing preferences (default: enabled)
+    rtl_fix_enabled = True
+    ad_removal_enabled = True
+    keep_credits_enabled = True
+    clean_options = CleanOptions()
+    strip_hi_enabled = False
+    eastern_numerals_enabled = False
+    strip_diacritics_enabled = False
+    if config_str:
+        try:
+            cfg_prefs = parse_user_config(config_str)
+            rtl_fix_enabled = cfg_prefs.enable_rtl_fix
+            ad_removal_enabled = cfg_prefs.enable_ad_removal
+            keep_credits_enabled = cfg_prefs.keep_translator_credits
+            clean_options = CleanOptions.from_prefs(cfg_prefs)
+            strip_hi_enabled = cfg_prefs.strip_hi
+            eastern_numerals_enabled = cfg_prefs.eastern_arabic_numerals
+            strip_diacritics_enabled = cfg_prefs.strip_diacritics
+        except Exception:
+            rtl_fix_enabled = True
+            ad_removal_enabled = True
+            keep_credits_enabled = True
+            clean_options = CleanOptions()
+            strip_hi_enabled = False
+            eastern_numerals_enabled = False
+            strip_diacritics_enabled = False
+
     # URL-decode incoming sub_id in case player encoded spaces/brackets (%5B...%5D)
     clean_sub_id = urllib.parse.unquote(sub_id).strip()
 
@@ -878,7 +1024,18 @@ async def _serve_subtitle_handler(
     if cached_content:
         meta = cache_manager.get_metadata(target_id)
         release_name = meta.get("release_name", target_id) if meta else target_id
-        return _build_subtitle_response(cached_content, release_name, detected_format)
+        return _build_subtitle_response(
+            cached_content,
+            release_name,
+            detected_format,
+            rtl_fix_enabled,
+            ad_removal_enabled,
+            keep_credits_enabled,
+            clean_options,
+            strip_hi_enabled,
+            eastern_numerals_enabled,
+            strip_diacritics_enabled,
+        )
 
     # 2. Cache miss: retrieve metadata for on-demand fetch
     meta = cache_manager.get_metadata(target_id)
@@ -910,7 +1067,9 @@ async def _serve_subtitle_handler(
         raise HTTPException(status_code=404, detail="Missing download URL for subtitle")
 
     # 3. Instantiate appropriate provider and fetch archive
-    provider: SubdlProvider | SubsourceProvider | OpenSubtitlesProvider
+    provider: (
+        SubdlProvider | SubsourceProvider | OpenSubtitlesProvider | YifysubtitlesProvider | SubtitlecatProvider
+    )
     if provider_name == "subdl":
         provider = SubdlProvider(_http_client)
         raw_archive = await provider.download_archive(download_url, api_key=subdl_key)
@@ -920,6 +1079,12 @@ async def _serve_subtitle_handler(
     elif provider_name == "opensubtitles":
         provider = OpenSubtitlesProvider(_http_client)
         raw_archive = await provider.download_archive(download_url, api_key=opensubtitles_key)
+    elif provider_name == "yifysubtitles":
+        provider = YifysubtitlesProvider(_http_client)
+        raw_archive = await provider.download_archive(download_url)
+    elif provider_name == "subtitlecat":
+        provider = SubtitlecatProvider(_http_client)
+        raw_archive = await provider.download_archive(download_url)
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider_name}")
 
@@ -945,7 +1110,18 @@ async def _serve_subtitle_handler(
                     f"Fallback to Subsource succeeded for #{target_id} ({len(fallback_bytes)} bytes)"
                 )
                 await cache_manager.save_subtitle(target_id, fallback_bytes)
-                return _build_subtitle_response(fallback_bytes, release_name, detected_format)
+                return _build_subtitle_response(
+                    fallback_bytes,
+                    release_name,
+                    detected_format,
+                    rtl_fix_enabled,
+                    ad_removal_enabled,
+                    keep_credits_enabled,
+                    clean_options,
+                    strip_hi_enabled,
+                    eastern_numerals_enabled,
+                    strip_diacritics_enabled,
+                )
 
         raise HTTPException(
             status_code=502, detail="Failed to download subtitle from upstream provider"
@@ -973,7 +1149,18 @@ async def _serve_subtitle_handler(
     await cache_manager.save_subtitle(target_id, srt_bytes)
 
     # 6. Serve with appropriate headers preserving native subtitle format
-    return _build_subtitle_response(srt_bytes, release_name, detected_format)
+    return _build_subtitle_response(
+        srt_bytes,
+        release_name,
+        detected_format,
+        rtl_fix_enabled,
+        ad_removal_enabled,
+        keep_credits_enabled,
+        clean_options,
+        strip_hi_enabled,
+        eastern_numerals_enabled,
+        strip_diacritics_enabled,
+    )
 
 
 @app.api_route("/sub/opensubtitles/{file_id}.srt", methods=["GET", "HEAD"])
@@ -993,12 +1180,80 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
     else:
         req_fmt = "srt"
 
+    # Per-user subtitle processing preferences (default: enabled)
+    rtl_fix_enabled = True
+    ad_removal_enabled = True
+    keep_credits_enabled = True
+    clean_options = CleanOptions()
+    strip_hi_enabled = False
+    eastern_numerals_enabled = False
+    strip_diacritics_enabled = False
+    if config:
+        try:
+            cfg_prefs = parse_user_config(config)
+            rtl_fix_enabled = cfg_prefs.enable_rtl_fix
+            ad_removal_enabled = cfg_prefs.enable_ad_removal
+            keep_credits_enabled = cfg_prefs.keep_translator_credits
+            clean_options = CleanOptions.from_prefs(cfg_prefs)
+            strip_hi_enabled = cfg_prefs.strip_hi
+            eastern_numerals_enabled = cfg_prefs.eastern_arabic_numerals
+            strip_diacritics_enabled = cfg_prefs.strip_diacritics
+        except Exception:
+            rtl_fix_enabled = True
+            ad_removal_enabled = True
+            keep_credits_enabled = True
+            clean_options = CleanOptions()
+            strip_hi_enabled = False
+            eastern_numerals_enabled = False
+            strip_diacritics_enabled = False
+    else:
+        if "enable_rtl_fix" in request.query_params:
+            rtl_fix_enabled = request.query_params.get("enable_rtl_fix", "1").lower() not in (
+                "0",
+                "false",
+                "no",
+            )
+        if "enable_ad_removal" in request.query_params:
+            ad_removal_enabled = request.query_params.get(
+                "enable_ad_removal", "1"
+            ).lower() not in ("0", "false", "no")
+        if "keep_translator_credits" in request.query_params:
+            keep_credits_enabled = request.query_params.get(
+                "keep_translator_credits", "1"
+            ).lower() not in ("0", "false", "no")
+        if "strip_hi" in request.query_params:
+            strip_hi_enabled = request.query_params.get("strip_hi", "0").lower() not in (
+                "0",
+                "false",
+                "no",
+            )
+        if "eastern_arabic_numerals" in request.query_params:
+            eastern_numerals_enabled = request.query_params.get(
+                "eastern_arabic_numerals", "0"
+            ).lower() not in ("0", "false", "no")
+        if "strip_diacritics" in request.query_params:
+            strip_diacritics_enabled = request.query_params.get(
+                "strip_diacritics", "0"
+            ).lower() not in ("0", "false", "no")
+        clean_options = _clean_options_from_query(request.query_params)
+
     # 1. Check local disk cache first
     cached_content = await cache_manager.get_subtitle(str(file_id))
     if cached_content:
         meta = cache_manager.get_metadata(str(file_id))
         release_name = meta.get("release_name", file_id) if meta else file_id
-        return _build_subtitle_response(cached_content, release_name, req_fmt)
+        return _build_subtitle_response(
+            cached_content,
+            release_name,
+            req_fmt,
+            rtl_fix_enabled,
+            ad_removal_enabled,
+            keep_credits_enabled,
+            clean_options,
+            strip_hi_enabled,
+            eastern_numerals_enabled,
+            strip_diacritics_enabled,
+        )
 
     # 2. Extract keys
     api_key = ""
@@ -1046,7 +1301,18 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
                 release_name = meta.get("release_name", file_id) if meta else file_id
                 sub_bytes = transcode_to_utf8(dl_resp.content)
                 await cache_manager.save_subtitle(str(file_id), sub_bytes)
-                return _build_subtitle_response(sub_bytes, release_name, req_fmt)
+                return _build_subtitle_response(
+                    sub_bytes,
+                    release_name,
+                    req_fmt,
+                    rtl_fix_enabled,
+                    ad_removal_enabled,
+                    keep_credits_enabled,
+                    clean_options,
+                    strip_hi_enabled,
+                    eastern_numerals_enabled,
+                    strip_diacritics_enabled,
+                )
             else:
                 logger.warning(
                     f"[OpenSubtitles Direct Fetch] HTTP {dl_resp.status_code} from {download_url}"
@@ -1087,6 +1353,13 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
                 fallback_bytes,
                 meta.get("release_name", file_id),
                 req_fmt,
+                rtl_fix_enabled,
+                ad_removal_enabled,
+                keep_credits_enabled,
+                clean_options,
+                strip_hi_enabled,
+                eastern_numerals_enabled,
+                strip_diacritics_enabled,
             )
 
     raise HTTPException(status_code=404, detail="Subtitle link expired or limit reached")

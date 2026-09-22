@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.models import MatchTier, SubtitleRelease
+from app.models import MatchTier, SubtitleRelease, UserPreferences
 from app.providers.opensubtitles import OpenSubtitlesProvider
 from app.providers.subdl import SubdlProvider
 from app.providers.subsource import SubsourceProvider
@@ -26,6 +26,7 @@ from app.services.subtitle_matcher import (
     calculate_match_score,
     rank_subtitles,
 )
+from app.utils.config_parser import encode_user_config
 
 
 @pytest.fixture
@@ -744,6 +745,7 @@ async def test_aggregator_deduplication_preserves_hash_match_over_text_duplicate
             use_cache=False,
             subdl_key="key1",
             opensubtitles_key="key2",
+            user_preferences=UserPreferences(enable_opensubtitles=True),
             http_client=AsyncMock(spec=httpx.AsyncClient),
         )
 
@@ -822,8 +824,9 @@ def test_stremio_endpoint_hash_short_circuit_e2e(client):
         ),
         patch("app.providers.cinemeta.CinemetaClient.get_metadata", new=AsyncMock(return_value=None)),
     ):
+        user_cfg = encode_user_config(enable_opensubtitles=True)
         url = (
-            "/subtitles/movie/tt0172495/"
+            f"/{user_cfg}/subtitles/movie/tt0172495/"
             f"videoHash=8e245d9679d31e12&videoSize=2147483648&filename={target_video}.json"
         )
         response = client.get(url)

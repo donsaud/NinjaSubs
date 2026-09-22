@@ -7,11 +7,18 @@ import re
 import httpx
 
 from app.config import settings
-from app.models import SubtitleRelease, UserPreferences
+from app.models import (
+    SubtitleRelease,
+    UserPreferences,
+    badge_format_to_parts,
+    normalize_badge_parts,
+)
 from app.providers.base import BaseSubtitleProvider
 from app.providers.opensubtitles import OpenSubtitlesProvider
 from app.providers.subdl import SubdlProvider
 from app.providers.subsource import SubsourceProvider
+from app.providers.subtitlecat import SubtitlecatProvider
+from app.providers.yifysubtitles import YifysubtitlesProvider
 from app.services.cache import (
     build_cache_key,
     get_cached_subtitles,
@@ -103,10 +110,18 @@ def format_informative_badge(
     display_score: int,
     lang_name: str = "Arabic",
     source_tag: str = "SubDL",
+    badge_format: str = "score_provider",
+    badge_parts: list[str] | None = None,
 ) -> str:
     """
-    Format subtitle label strictly as:
-    f"[{pct}%] [{source_provider}] {clean_filename}"
+    Format a subtitle label by composing user-selected components in canonical order:
+      - "score"    -> "[{pct}%]"
+      - "provider" -> "[{provider}]"
+      - "filename" -> "{clean_filename}"
+      - "uploader" -> "(by {uploader})" (only when an uploader is known)
+
+    `badge_parts` takes precedence. When omitted, the legacy `badge_format` preset is
+    mapped to its component list for backward compatibility.
 
     Specifications:
     - pct: Calculated integer match percentage (e.g. 100, 95, 61).
@@ -136,6 +151,10 @@ def format_informative_badge(
         source_provider = "SubSource"
     elif prov in ("opensubtitles", "opensubtitlesv3", "os"):
         source_provider = "OpenSubtitles"
+    elif prov == "yifysubtitles":
+        source_provider = "YIFY"
+    elif prov == "subtitlecat":
+        source_provider = "SubtitleCat"
     else:
         source_provider = "SubDL"
 
@@ -144,10 +163,23 @@ def format_informative_badge(
     clean_name = re.sub(r"_[a-fA-F0-9]{8,32}$", "", clean_filename)
     clean_name = clean_final_label(clean_name)
 
-    if clean_name:
-        label = f"[{pct_int}%] [{source_provider}] {clean_name}"
-    else:
-        label = f"[{pct_int}%] [{source_provider}]"
+    parts = normalize_badge_parts(badge_parts) if badge_parts is not None else badge_format_to_parts(
+        badge_format
+    )
+    uploader = clean_final_label(str(getattr(release, "uploader", "") or "").strip())
+
+    label = ""
+    if "score" in parts:
+        label = f"[{pct_int}%]"
+    if "provider" in parts:
+        label = f"{label} [{source_provider}]".strip()
+    if "filename" in parts and clean_name:
+        label = f"{label} {clean_name}".strip()
+    if "uploader" in parts and uploader:
+        label = f"{label} (by {uploader})".strip()
+
+    if not label:
+        label = clean_name or f"[{pct_int}%]"
 
     label = re.sub(r"_[a-fA-F0-9]{8,32}$", "", label)
     return clean_final_label(label)
@@ -176,6 +208,8 @@ async def aggregate_subtitles(
     subdl_provider: BaseSubtitleProvider | None = None,
     subsource_provider: BaseSubtitleProvider | None = None,
     opensubtitles_provider: BaseSubtitleProvider | None = None,
+    yifysubtitles_provider: BaseSubtitleProvider | None = None,
+    subtitlecat_provider: BaseSubtitleProvider | None = None,
     use_cache: bool = True,
 ) -> list[SubtitleRelease]:
     """
@@ -190,7 +224,10 @@ async def aggregate_subtitles(
         opensubtitles_key if opensubtitles_key is not None else prefs.opensubtitles_key
     )
     effective_langs = languages if languages is not None else prefs.languages
-    effective_exclude_hi = exclude_hi if exclude_hi is not None else prefs.exclude_hi
+    hi_preference = getattr(prefs, "hi_preference", "neutral") or "neutral"
+    effective_exclude_hi = (
+        exclude_hi if exclude_hi is not None else prefs.exclude_hi
+    ) or hi_preference == "exclude"
 
     # Normalize season / episode
     parsed_season: int | None = None
@@ -231,6 +268,27 @@ async def aggregate_subtitles(
         subdl_key=effective_subdl_key,
         subsource_key=effective_subsource_key,
         opensubtitles_key=effective_opensubtitles_key,
+        hi_preference=hi_preference,
+        enable_subdl=bool(getattr(prefs, "enable_subdl", True)),
+        enable_subsource=bool(getattr(prefs, "enable_subsource", True)),
+        enable_opensubtitles=bool(getattr(prefs, "enable_opensubtitles", False)),
+        enable_yifysubtitles=bool(getattr(prefs, "enable_yifysubtitles", False)),
+        enable_subtitlecat=bool(getattr(prefs, "enable_subtitlecat", False)),
+        enable_rtl_fix=bool(getattr(prefs, "enable_rtl_fix", True)),
+        enable_ad_removal=bool(getattr(prefs, "enable_ad_removal", True)),
+        keep_translator_credits=bool(getattr(prefs, "keep_translator_credits", True)),
+        fix_encoding=bool(getattr(prefs, "fix_encoding", True)),
+        clean_tags=bool(getattr(prefs, "clean_tags", True)),
+        strip_colors=bool(getattr(prefs, "strip_colors", False)),
+        clean_spacing=bool(getattr(prefs, "clean_spacing", True)),
+        clean_symbols=bool(getattr(prefs, "clean_symbols", True)),
+        clean_commas=bool(getattr(prefs, "clean_commas", True)),
+        clean_timing=bool(getattr(prefs, "clean_timing", True)),
+        strip_hi=bool(getattr(prefs, "strip_hi", False)),
+        eastern_arabic_numerals=bool(
+            getattr(prefs, "eastern_arabic_numerals", False)
+        ),
+        strip_diacritics=bool(getattr(prefs, "strip_diacritics", False)),
     )
 
     if use_cache:
@@ -252,44 +310,50 @@ async def aggregate_subtitles(
             raise ValueError("HTTP client is required when a provider is not injected")
         return provider_type(http_client)
 
-    p_subdl = resolve_provider(subdl_provider, SubdlProvider)
-    p_subsource = resolve_provider(subsource_provider, SubsourceProvider)
-    p_opensubtitles = None
-    if (
+    tasks = []
+
+    # SubDL (per-user enabled + API key)
+    if bool(getattr(prefs, "enable_subdl", True)):
+        p_subdl = resolve_provider(subdl_provider, SubdlProvider)
+        tasks.append(
+            p_subdl.search_subtitles(
+                imdb_id=imdb_id,
+                is_series=is_series,
+                season=parsed_season,
+                episode=parsed_episode,
+                title=title,
+                year=year,
+                api_key=effective_subdl_key,
+                languages=effective_langs,
+                exclude_hi=effective_exclude_hi,
+            )
+        )
+
+    # SubSource (per-user enabled + API key)
+    if bool(getattr(prefs, "enable_subsource", True)):
+        p_subsource = resolve_provider(subsource_provider, SubsourceProvider)
+        tasks.append(
+            p_subsource.search_subtitles(
+                imdb_id=imdb_id,
+                is_series=is_series,
+                season=parsed_season,
+                episode=parsed_episode,
+                title=title,
+                year=year,
+                api_key=effective_subsource_key,
+                languages=effective_langs,
+                exclude_hi=effective_exclude_hi,
+                target_filename=filename,
+            )
+        )
+
+    # Include OpenSubtitles if enabled and an API key/provider is available
+    if bool(getattr(prefs, "enable_opensubtitles", False)) and (
         effective_opensubtitles_key
         or getattr(settings, "OPENSUBTITLES_API_KEY", "").strip()
         or opensubtitles_provider is not None
     ):
         p_opensubtitles = resolve_provider(opensubtitles_provider, OpenSubtitlesProvider)
-
-    tasks = [
-        p_subdl.search_subtitles(
-            imdb_id=imdb_id,
-            is_series=is_series,
-            season=parsed_season,
-            episode=parsed_episode,
-            title=title,
-            year=year,
-            api_key=effective_subdl_key,
-            languages=effective_langs,
-            exclude_hi=effective_exclude_hi,
-        ),
-        p_subsource.search_subtitles(
-            imdb_id=imdb_id,
-            is_series=is_series,
-            season=parsed_season,
-            episode=parsed_episode,
-            title=title,
-            year=year,
-            api_key=effective_subsource_key,
-            languages=effective_langs,
-            exclude_hi=effective_exclude_hi,
-            target_filename=filename,
-        ),
-    ]
-
-    # Include OpenSubtitles if API key is present, server default is configured, or mock provider injected
-    if p_opensubtitles is not None:
         tasks.append(
             p_opensubtitles.search_subtitles(
                 imdb_id=imdb_id,
@@ -303,6 +367,47 @@ async def aggregate_subtitles(
                 exclude_hi=effective_exclude_hi,
                 video_hash=video_hash,
                 video_size=video_size,
+            )
+        )
+
+    # YIFYSubtitles (no API key; movies only)
+    if yifysubtitles_provider is not None or (
+        http_client is not None
+        and getattr(settings, "ENABLE_YIFYSUBTITLES", True)
+        and bool(getattr(prefs, "enable_yifysubtitles", False))
+    ):
+        p_yify = resolve_provider(yifysubtitles_provider, YifysubtitlesProvider)
+        tasks.append(
+            p_yify.search_subtitles(
+                imdb_id=imdb_id,
+                is_series=is_series,
+                season=parsed_season,
+                episode=parsed_episode,
+                title=title,
+                year=year,
+                languages=effective_langs,
+                exclude_hi=effective_exclude_hi,
+            )
+        )
+
+    # SubtitleCat (no API key; text search by title/year or SxxExx)
+    if subtitlecat_provider is not None or (
+        http_client is not None
+        and getattr(settings, "ENABLE_SUBTITLECAT", True)
+        and bool(getattr(prefs, "enable_subtitlecat", False))
+    ):
+        p_cat = resolve_provider(subtitlecat_provider, SubtitlecatProvider)
+        tasks.append(
+            p_cat.search_subtitles(
+                imdb_id=imdb_id,
+                is_series=is_series,
+                season=parsed_season,
+                episode=parsed_episode,
+                title=title,
+                year=year,
+                languages=effective_langs,
+                exclude_hi=effective_exclude_hi,
+                target_filename=filename,
             )
         )
 
@@ -337,6 +442,7 @@ async def aggregate_subtitles(
         episode=parsed_episode,
         title=title,
         year=year,
+        hi_preference=hi_preference,
     )
 
     if use_cache:

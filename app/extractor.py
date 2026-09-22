@@ -63,33 +63,40 @@ def transcode_to_utf8(raw_bytes: bytes) -> bytes:
     Transcode subtitle content to clean UTF-8.
     Handles standard UTF-8, UTF-8-BOM, Arabic legacy encodings (CP1256, ISO-8859-6).
     Preserves ASS/SSA, SRT, and VTT subtitles in their native format without conversion.
+
+    The optional RTL normalization pass (``fix_rtl_punctuation``) is intentionally
+    applied later, at serve time, so it can be gated per user via ``enable_rtl_fix``
+    and so the on-disk cache always stores the raw original text.
     """
     if not raw_bytes:
         return b""
 
+    text: str | None = None
+
     # 1. Try UTF-8 with BOM removal
     try:
         text = raw_bytes.decode("utf-8-sig")
-        return text.encode("utf-8")
     except UnicodeDecodeError:
         pass
 
     # 2. Try Windows-1256 (standard Arabic Windows encoding)
-    try:
-        text = raw_bytes.decode("cp1256")
-        return text.encode("utf-8")
-    except UnicodeDecodeError:
-        pass
+    if text is None:
+        try:
+            text = raw_bytes.decode("cp1256")
+        except UnicodeDecodeError:
+            pass
 
     # 3. Try ISO-8859-6 (Arabic standard)
-    try:
-        text = raw_bytes.decode("iso-8859-6")
-        return text.encode("utf-8")
-    except UnicodeDecodeError:
-        pass
+    if text is None:
+        try:
+            text = raw_bytes.decode("iso-8859-6")
+        except UnicodeDecodeError:
+            pass
 
     # 4. Fallback with replacement to avoid crash
-    text = raw_bytes.decode("latin1", errors="replace")
+    if text is None:
+        text = raw_bytes.decode("latin1", errors="replace")
+
     return text.encode("utf-8")
 
 

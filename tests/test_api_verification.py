@@ -209,8 +209,9 @@ def test_configure_page_contains_badges_and_debounce(client):
     assert 'id="opensubtitles-key"' in html
     assert 'id="opensubtitles-status"' in html
 
-    # Flex container layout
-    assert "flex items-center gap-3" in html
+    # API key input wrappers (with inline "Get API Key" action)
+    assert "provider-key-wrap" in html
+    assert "provider-key-action" in html
 
     # Status badge labels and debounce timer
     assert "Valid API" in html
@@ -229,19 +230,17 @@ def test_configure_page_stremio_installation_card(client):
     assert resp.status_code == 200
     html = resp.text
 
-    # Stremio Card Header & Branding
+    # Stremio Card Header & Branding (monochrome logo, kit.betterer.cc style)
     assert "Stremio" in html
-    assert (
-        "Install to Stremio or other Stremio addon compatible clients using the Manifest URL."
-        in html
-    )
-    assert "#6A38EB" in html
+    assert "Install directly to Stremio or copy the manifest link." in html
+    assert "#f2f2f2" in html
 
     # Buttons
     assert 'id="installStremioApp"' in html
     assert 'id="installStremioWeb"' in html
     assert "Install to Stremio" in html
-    assert "Install to Stremio Web" in html
+    assert "Stremio Web" in html
+    assert "Install directly to Stremio or copy the manifest link." in html
 
     # Client-side wiring
     assert "getManifestUrl()" in html
