@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="app/static/logo.png" alt="NinjaSubs Logo" width="160" />
-
-# NinjaSubs
+<img src="app/static/logo.png" alt="NinjaSubs Logo" width="300" />
 
 **Smart subtitle aggregator for Stremio with an advanced Arabic text & BiDi processing engine.**
 
