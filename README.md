@@ -87,6 +87,9 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <details>
 <summary>🔍 <b>View Screenshot Comparison</b></summary>
 <br>
+
+* **Remove Ads:** [ON] — **Keep Translator Credits:** [ON]
+
 <img src="docs/screenshots/keep-translator-credits.png" alt="Keep translator credits" width="100%" />
 </details>
 
