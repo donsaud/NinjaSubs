@@ -29,109 +29,29 @@ A lightweight, self-hosted [Stremio](https://stremio.com) / [Nuvio](https://nuvi
 
 ### Features & Preferences
 
-Every step below is an independent, opt-in preference. Toggle them in the [configuration wizard](#configuration-ui); each choice is encoded into the stateless manifest token and folded into the cache key, so changing a preference never serves stale output.
+Every setting below is an independent, opt-in preference available in the [configuration UI](#configuration-ui). Choices are serialized into the stateless manifest token and included in the cache key, so toggling one never serves stale subtitles.
 
-#### 🇸🇦 Arabic Language Engine
+#### Arabic Language Engine
 
-**Arabic RTL Alignment Fix**
-Repairs BiDi damage introduced by bidi-unaware authors/players: flipped punctuation is moved back to the logical end, mirrored brackets and quotes are rebalanced, pre-reversed dialogue dashes are restored to the line start, and a Right-to-Left Mark (`U+200F`) locks trailing punctuation in place.
+- **Arabic RTL Alignment Fix**: Fixes inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods and leading dashes (e.g. `مرحبا. -` → `- مرحبا.`).
+- **Strip Arabic Diacritics (Tashkeel)**: Removes heavy Harakat while selectively preserving Shadda, Tanween, and feminine Kasra (e.g. `أَنْتِ الَّتِي عَلَّمْتِ` → `أنتِ التي علّمتِ`).
+- **Normalize Arabic Commas**: Converts Latin commas in Arabic dialogue into proper Arabic commas (e.g. `نعم , لا` → `نعم، لا`).
+- **Convert Numbers to Eastern Arabic**: Converts Western digits to Eastern Arabic numerals while preserving timestamps, tags, and alphanumeric terms (e.g. `قبل 3 أيام` → `قبل ٣ أيام`).
 
-```text
-Before:  مرحبا. -
-After:   - مرحبا.
-```
+#### Dialogue & Clean-up
 
-**Strip Arabic Diacritics (Tashkeel)**
-Removes heavy Harakat for clean readability while selectively keeping what changes meaning: bare **Shadda**, **all Tanween types**, and the **feminine Kasra**.
+- **Exclude HI (Hearing Impaired)**: Filters out tracks containing sound effects and audio descriptions.
+- **Strip In-dialogue HI Labels**: Cleans sound effects, audio cues, and speaker names while keeping dialogue intact (e.g. `[LAUGHS] JOHN: Hello there!` → `Hello there!`).
+- **Remove Ads**: Strips promotional links, websites, and social handles, then re-indexes SRT cues (e.g. Watch free at [www.example.com](https://www.example.com) — @promo_channel → (cue removed)).
+- **Keep Translator Credits**: Preserves translator attribution lines while cleanly dropping attached spam and links.
 
-```text
-Before:  أَنْتِ الَّتِي عَلَّمْتِ
-After:   أنتِ التي علّمتِ
-```
+#### Text Formatting & Timing
 
-**Normalize Arabic Commas**
-Converts misplaced Latin commas inside Arabic text blocks into the standard Arabic comma, without touching digits, timestamps or tag attributes.
-
-```text
-Before:  نعم , لا
-After:   نعم، لا
-```
-
-**Convert Numbers to Eastern Arabic**
-Rewrites Western digits as Eastern Arabic numerals in Arabic dialogue, while protecting HTML/ASS tags and Latin/alphanumeric tokens (`AK-47`, `MP4`, `Windows 11`).
-
-```text
-Before:  قبل 3 أيام
-After:   قبل ٣ أيام
-```
-
-#### 🎬 Dialogue & Clean-up
-
-**Exclude HI (Hearing Impaired)**
-Filters out entire subtitle tracks that are flagged as Hearing-Impaired (sound effects and audio descriptions), leaving only clean dialogue.
-
-**Strip In-dialogue HI Labels**
-Removes audio cues, bracketed noise descriptions, and speaker names from within a line while keeping the spoken dialogue untouched.
-
-```text
-Before:  [LAUGHS] JOHN: Hello there!
-After:   Hello there!
-```
-
-**Remove Ads**
-Detects and strips website URLs, promotional text, social handles, and release-group spam from the opening/closing windows, then re-indexes SRT cues.
-
-```text
-Before:  Watch free at www.example.com — @promo_channel
-After:   (cue removed)
-```
-
-**Keep Translator Credits**
-Preserves genuine translator attribution lines (`ترجمة`, `تعريب`, `Translated by`) while cleanly dropping the promotional links and spam glued to them.
-
-#### 🧹 Text Formatting & Timing
-
-**Clean Tags**
-Balances and closes unclosed formatting tags (like `<i>` / `<b>`) to prevent formatting leaks across cues, and strips unsupported or custom tags while keeping their inner text.
-
-```text
-Before:  <i>- Hello! <custom>world</custom>
-After:   <i>- Hello! world</i>
-```
-
-**Strip Text Colors**
-Removes HTML `<font color=...>` tags and ASS color codes (`{\c&H...&}`) so the media player applies its own uniform, native subtitle styling.
-
-```text
-Before:  <font color="#ff0000">Hello</font>
-After:   Hello
-```
-
-**Normalize Spacing**
-Merges consecutive duplicate spaces and eliminates improper whitespace before punctuation.
-
-```text
-Before:  word  ,  next
-After:   word, next
-```
-
-**Clean Symbols & Breaks**
-Converts stray double hyphens into a proper ellipsis (`...`) and removes redundant `<br>` line breaks.
-
-```text
-Before:  -- Wait <br>
-After:   ... Wait
-```
-
-**Fix Display Timing**
-Clamps micro-overlaps (`< 500 ms`) between consecutive cues to eliminate subtitle flickering on modern players.
-
-```text
-Before:  00:00:01,000 --> 00:00:03,000
-         00:00:02,800 --> 00:00:05,000
-After:   00:00:01,000 --> 00:00:02,800
-         00:00:02,800 --> 00:00:05,000
-```
+- **Clean Tags**: Balances and closes unclosed formatting tags (`<i>`/`<b>`) and removes unsupported wrappers (e.g. `<i>- Hello! <custom>world</custom>` → `<i>- Hello! world</i>`).
+- **Strip Text Colors**: Removes HTML font color tags and ASS color codes (`{\c&H...&}`) to enforce the player's native styling (e.g. `<font color="#ff0000">Hello</font>` → `Hello`).
+- **Normalize Spacing**: Collapses duplicate spaces and removes spaces before punctuation (e.g. `word  ,  next` → `word, next`).
+- **Clean Symbols & Breaks**: Converts stray double hyphens into ellipses and removes stray `<br>` tags (e.g. `-- Wait <br>` → `... Wait`).
+- **Fix Display Timing**: Clamps micro-overlaps (< 500ms) between consecutive cues to stop player flickering (e.g. `00:00:01,000 --> 00:00:03,000` & `00:00:02,800 --> 00:00:05,000` → clamped to `00:00:02,800`).
 
 ### Subtitle Providers
 
