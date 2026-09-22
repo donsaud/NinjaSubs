@@ -9,7 +9,7 @@
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](#-english) · [العربية](#-العربية)
+[English](#-english) · [العربية](#-العربية) · [Screenshots](#screenshots)
 
 </div>
 
@@ -45,9 +45,37 @@ Every setting below is an independent, opt-in preference available in the [confi
 All Arabic processing is applied at **serve time** (per user) and is fully toggleable:
 
 * **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods <code dir="ltr">(e.g. مرحبا. - &rarr; - مرحبا.)</code>
+
+<details id="screenshots">
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
+</details>
+
 * **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra <code dir="ltr">(e.g. أَنتِ، لَكِ، عَلَّمتِ &rarr; أنتِ، لكِ، علّمتِ)</code>
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/tashkeel-removal.png" alt="Strip Arabic diacritics (Tashkeel)" width="100%" />
+</details>
+
 * **Normalize Arabic commas** — Converts Latin commas in Arabic text to Arabic commas <code dir="ltr">(e.g. نعم , لا &rarr; نعم، لا)</code>
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
+</details>
+
 * **Convert numbers to Eastern Arabic** — Converts Western digits to Eastern Arabic numerals in Arabic dialogue <code dir="ltr">(e.g. قبل 3 أيام &rarr; قبل ٣ أيام)</code>
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/eastern-arabic-numbers.png" alt="Convert numbers to Eastern Arabic" width="100%" />
+</details>
+
 
 #### Dialogue & Clean-up
 
@@ -56,10 +84,24 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 - **Remove Ads**: Strips promotional links, websites, and social handles, then re-indexes SRT cues (e.g. Watch free at [www.example.com](https://www.example.com) — @promo_channel → (cue removed)).
 - **Keep Translator Credits**: Preserves translator attribution lines while cleanly dropping attached spam and links.
 
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/keep-translator-credits.png" alt="Keep translator credits" width="100%" />
+</details>
+
+
 #### Text Formatting & Timing
 
 - **Clean Tags**: Balances and closes unclosed formatting tags (`<i>`/`<b>`) and removes unsupported wrappers (e.g. `<i>- Hello! <custom>world</custom>` → `<i>- Hello! world</i>`).
 - **Strip Text Colors**: Removes HTML font color tags and ASS color codes (`{\c&H...&}`) to enforce the player's native styling (e.g. `<font color="#ff0000">Hello</font>` → `Hello`).
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/strip-text-colors.png" alt="Strip text colors" width="100%" />
+</details>
+
 - **Normalize Spacing**: Collapses duplicate spaces and removes spaces before punctuation (e.g. `word  ,  next` → `word, next`).
 - **Clean Symbols & Breaks**: Converts stray double hyphens into ellipses and removes stray `<br>` tags (e.g. `-- Wait <br>` → `... Wait`).
 - **Fix Display Timing**: Clamps micro-overlaps (< 500ms) between consecutive cues to stop player flickering (e.g. `00:00:01,000 --> 00:00:03,000` & `00:00:02,800 --> 00:00:05,000` → clamped to `00:00:02,800`).
@@ -141,6 +183,7 @@ mypy app                           # types
 
 - **تجميع من عدة مصادر** — SubDL وSubSource وOpenSubtitles وYIFYSubtitles وSubtitleCat بالتوازي (`asyncio.gather`) مع مهلة لكل مصدر واحتياطي عند الفشل.
 - **محرّك اللغة العربية** — ضبط اتجاه النص من اليمين لليسار، وإصلاح النص المعكوس، وإزالة التشكيل (اختياري)، وتحويل الأرقام إلى الأرقام العربية المشرقية، وتنظيف وسوم الصوت الوصفية.
+
 - **إعدادات لكل مستخدم بدون حفظ** — تُرمّز كل الإعدادات ومفاتيح الـ API داخل رابط الـ manifest (Base64) ولا يُخزَّن شيء على الخادم.
 - **شارات مطابقة غنية** — تتكوّن من نسبة المطابقة والمصدر واسم الإصدار واسم الرافع.
 - **استهلاك منخفض** — فكّ ضغط داخل الذاكرة (مع حماية Zip Slip) وذاكرة تخزين LRU مؤقتة.
@@ -158,9 +201,37 @@ mypy app                           # types
 ### محرّك اللغة العربية
 
 - **ضبط الاتجاه والترقيم** — إضافة علامة RLM (`U+200F`) بعد علامات الترقيم النهائية، وإصلاح العلامات المعكوسة والأقواس والاقتباسات، وتصحيح الشرطات المقلوبة (`"نص -" ← "- نص."`).
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
+</details>
+
 - **تنظيف الصياغة** — خيارات مستقلة للوسوم والمسافات والرموز (`-- ← ...`) والفواصل اللاتينية، وضبط تداخل التوقيت (< 500ms).
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
+</details>
+
 - **إزالة التشكيل (Tashkeel)** — مع الحفاظ على **الشدة** و**جميع أنواع التنوين** و**كسرة المؤنث** (`أنتِ`، `لكِ`، `علّمتِ`).
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/tashkeel-removal.png" alt="Strip Arabic diacritics (Tashkeel)" width="100%" />
+</details>
+
 - **تحويل الأرقام** — `3 أيام` ← `٣ أيام` مع حماية الوسوم والتوقيت والرموز اللاتينية (`AK-47`، `MP4`، `Windows 11`).
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/eastern-arabic-numbers.png" alt="Convert numbers to Eastern Arabic" width="100%" />
+</details>
+
 - **تنظيف وسوم الصوت الوصفية** — إزالة `[MUSIC]` و`(SIGHS)` و`JOHN:` مع الإبقاء على الحوار.
 - **أمان الترميز** — تحويل CP1256 / ISO-8859-6 إلى UTF-8 نظيف.
 
