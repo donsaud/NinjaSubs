@@ -1401,28 +1401,43 @@
         const serverLanUrl = "{{lan_url}}";
         const initialPrefs = {{initial_phase2_json}};
 
+        // Loopback / Docker bridge hosts must never be embedded in the manifest URL.
+        function isLocalOrContainerHost(hostname) {
+            const h = (hostname || "").toLowerCase();
+            if (!h) return true;
+            if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "0.0.0.0") return true;
+            if (h.startsWith("127.")) return true;
+            // Docker default bridge / private container range 172.16.0.0 - 172.31.255.255
+            return /^172\.(1[6-9]|2[0-9]|3[01])\./.test(h);
+        }
+
+        // Build the LAN-facing base URL (detected LAN IP + the original service port).
+        function buildLanBaseUrl() {
+            const port = serverPort || window.location.port || "7000";
+            if (serverLanIp && serverLanIp !== "127.0.0.1" && serverLanIp !== "localhost") {
+                return `http://${serverLanIp}:${port}`;
+            }
+            return (serverLanUrl || `http://${serverLanIp}:${port}`).replace(/[/]+$/, "");
+        }
+
         const hostInput = document.getElementById("hostUrl");
         if (hostInput) {
             const curHostname = window.location.hostname || "";
             const curPort = window.location.port || serverPort;
             const curProto = window.location.protocol || "http:";
 
-            if (curHostname && curHostname !== "localhost" && curHostname !== "127.0.0.1") {
-                // If the browser accesses via a local IP (e.g. 192.168.x.x) or domain, prefer window.location.origin
+            if (!isLocalOrContainerHost(curHostname)) {
+                // Real LAN IP / public domain / reverse proxy: retain the incoming origin.
                 hostInput.value = window.location.origin || `${curProto}//${curHostname}:${curPort}`;
-            } else if (serverLanIp && serverLanIp !== "127.0.0.1" && serverLanIp !== "localhost") {
-                // If user opens via localhost or 127.0.0.1, use server-detected LAN URL
-                hostInput.value = `http://${serverLanIp}:${curPort}`;
-            } else if (!hostInput.value || hostInput.value.includes("localhost") || hostInput.value.includes("127.0.0.1")) {
-                if (serverLanUrl) {
-                    hostInput.value = serverLanUrl;
-                }
+            } else {
+                // localhost / 127.0.0.1 / Docker 172.x: swap in the detected LAN IP + port.
+                hostInput.value = buildLanBaseUrl();
             }
 
             // Update badge text dynamically
             const badgeEl = document.getElementById("hostBadgeText");
             if (badgeEl) {
-                const detectedHost = (curHostname && curHostname !== "localhost" && curHostname !== "127.0.0.1") ? curHostname : (serverLanIp || "Active");
+                const detectedHost = isLocalOrContainerHost(curHostname) ? (serverLanIp || "Active") : curHostname;
                 badgeEl.textContent = `Auto-detected: ${detectedHost}`;
             }
         }
@@ -1609,7 +1624,12 @@
 
         function getEffectiveBaseUrl() {
             const val = hostInput ? hostInput.value.trim().replace(/[/]+$/, "") : "";
-            return val || (window.location.origin || serverLanUrl || "{{base_url}}").replace(/[/]+$/, "");
+            if (val) return val;
+            const curHostname = window.location.hostname || "";
+            if (!isLocalOrContainerHost(curHostname) && window.location.origin) {
+                return window.location.origin.replace(/[/]+$/, "");
+            }
+            return buildLanBaseUrl();
         }
 
         const checkIconSvg = `<svg class="w-4 h-4 text-emerald-400 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg>`;
