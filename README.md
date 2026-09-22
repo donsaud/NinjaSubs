@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="app/static/logo.png" alt="NinjaSubs" width="112" />
+<img src="app/static/logo.png" alt="NinjaSubs Logo" width="160" />
 
 # NinjaSubs
 
@@ -19,7 +19,7 @@
 
 ## 🇬🇧 English
 
-A lightweight, self-hosted [Stremio](https://stremio.com) / [Nuvio](https://github.com) subtitle addon built with **Python 3.11+**, **FastAPI**, and **Uvicorn**. It aggregates subtitles from **five providers**, unpacks archives safely in memory, and streams native subtitles with a dedicated **Arabic Language Engine** for BiDi, punctuation, diacritics and numeral normalization.
+A lightweight, self-hosted [Stremio](https://stremio.com) / [Nuvio](https://nuvio.tv/) subtitle addon built with **Python 3.11+**, **FastAPI**, and **Uvicorn**. It aggregates subtitles from **five providers**, unpacks archives safely in memory, and streams native subtitles with a dedicated **Arabic Language Engine** for BiDi, punctuation, diacritics and numeral normalization.
 
 ### Highlights
 
@@ -102,7 +102,7 @@ mypy app                           # types
 
 ## 🇸🇦 العربية
 
-إضافة تُرجمة خفيفة وذاتية الاستضافة لـ [Stremio](https://stremio.com) و[Nuvio](https://github.com)، مبنية بـ **Python 3.11+** و**FastAPI** و**Uvicorn**. تجمع الترجمة من **خمسة مصادر**، وتفكّ ضغط الملفات داخل الذاكرة بأمان، وتبثّ الترجمة مع **محرّك خاص باللغة العربية** لمعالجة الاتجاه (BiDi) وعلامات الترقيم والتشكيل والأرقام.
+إضافة تُرجمة خفيفة وذاتية الاستضافة لـ [Stremio](https://stremio.com) و[Nuvio](https://nuvio.tv/)، مبنية بـ **Python 3.11+** و**FastAPI** و**Uvicorn**. تجمع الترجمة من **خمسة مصادر**، وتفكّ ضغط الملفات داخل الذاكرة بأمان، وتبثّ الترجمة مع **محرّك خاص باللغة العربية** لمعالجة الاتجاه (BiDi) وعلامات الترقيم والتشكيل والأرقام.
 
 ### أبرز المزايا
 
