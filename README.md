@@ -79,8 +79,8 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 
 #### Dialogue & Clean-up
 
-- **Exclude HI (Hearing Impaired)**: Filters out tracks containing sound effects and audio descriptions.
-- **Strip In-dialogue HI Labels**: Cleans sound effects, audio cues, and speaker names while keeping dialogue intact (e.g. `[LAUGHS] JOHN: Hello there!` → `Hello there!`).
+- **Exclude HI (Hearing Impaired)**: Filters out tracks containing sound effects and audio descriptions. **(Hides entire HI subtitle tracks from the list)**
+- **Strip In-dialogue HI Labels**: Cleans sound effects, audio cues, and speaker names while keeping dialogue intact (e.g. `[LAUGHS] JOHN: Hello there!` → `Hello there!`). **(Keeps the subtitle track, but removes the HI text inside it)**
 - **Remove Ads**: Strips promotional links, websites, and social handles, then re-indexes SRT cues (e.g. Watch free at [www.example.com](https://www.example.com) — @promo_channel → (cue removed)).
 - **Keep Translator Credits**: Preserves translator attribution lines while cleanly dropping attached spam and links.
 
@@ -176,6 +176,12 @@ ruff check .                       # lint
 mypy app                           # types
 ```
 
+### License
+
+This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
+
+> Note: the UI font "Serif Black" (`app/static/fonts/SerifBlackItalic.ttf`) is licensed by its source for personal use only.
+
 ---
 
 ## 🇸🇦 العربية
@@ -186,7 +192,6 @@ mypy app                           # types
 
 - **تجميع من عدة مصادر** — SubDL وSubSource وOpenSubtitles وYIFYSubtitles وSubtitleCat بالتوازي (`asyncio.gather`) مع مهلة لكل مصدر واحتياطي عند الفشل.
 - **محرّك اللغة العربية** — ضبط اتجاه النص من اليمين لليسار، وإصلاح النص المعكوس، وإزالة التشكيل (اختياري)، وتحويل الأرقام إلى الأرقام العربية المشرقية، وتنظيف وسوم الصوت الوصفية.
-
 - **إعدادات لكل مستخدم بدون حفظ** — تُرمّز كل الإعدادات ومفاتيح الـ API داخل رابط الـ manifest (Base64) ولا يُخزَّن شيء على الخادم.
 - **شارات مطابقة غنية** — تتكوّن من نسبة المطابقة والمصدر واسم الإصدار واسم الرافع.
 - **استهلاك منخفض** — فكّ ضغط داخل الذاكرة (مع حماية Zip Slip) وذاكرة تخزين LRU مؤقتة.
@@ -201,9 +206,14 @@ mypy app                           # types
 | **YIFYSubtitles** | بدون مفتاح | ⛔ معطّل | للأفلام فقط |
 | **SubtitleCat** | بدون مفتاح | ⛔ معطّل | ملفات مترجمة آليًا |
 
-### محرّك اللغة العربية
+### المزايا والتفضيلات
 
-- **ضبط الاتجاه والترقيم** — إضافة علامة RLM (`U+200F`) بعد علامات الترقيم النهائية، وإصلاح العلامات المعكوسة والأقواس والاقتباسات، وتصحيح الشرطات المقلوبة (`"نص -" ← "- نص."`).
+كل إعداد أدناه تفضيل مستقل واختياري متاح في [واجهة الإعدادات](#واجهة-الإعدادات). تُرمّز الخيارات داخل رمز الـ manifest بدون حفظ على الخادم، وتُدرج في مفتاح الذاكرة المؤقتة، لذا لا يُقدَّم محتوى قديم عند تغيير أي إعداد.
+
+#### محرّك اللغة العربية
+تُطبَّق كل معالجات اللغة العربية في **وقت التقديم** (لكل مستخدم) ويمكن تفعيلها أو تعطيلها بالكامل:
+
+* **ضبط الاتجاه والترقيم** — إصلاح تلقائي للترقيم والأقواس والاقتباسات المعكوسة في الترجمات العربية لمنع ظهور النقاط في غير موضعها <code dir="ltr">(e.g. مرحبا. - &rarr; - مرحبا.)</code>
 
 <details>
 <summary>🔍 <b>View Screenshot Comparison</b></summary>
@@ -211,15 +221,7 @@ mypy app                           # types
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-- **تنظيف الصياغة** — خيارات مستقلة للوسوم والمسافات والرموز (`-- ← ...`) والفواصل اللاتينية، وضبط تداخل التوقيت (< 500ms).
-
-<details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
-<br>
-<img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
-</details>
-
-- **إزالة التشكيل (Tashkeel)** — مع الحفاظ على **الشدة** و**جميع أنواع التنوين** و**كسرة المؤنث** (`أنتِ`، `لكِ`، `علّمتِ`).
+* **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث <code dir="ltr">(e.g. أَنتِ، لَكِ، عَلَّمتِ &rarr; أنتِ، لكِ، علّمتِ)</code>
 
 <details>
 <summary>🔍 <b>View Screenshot Comparison</b></summary>
@@ -227,7 +229,15 @@ mypy app                           # types
 <img src="docs/screenshots/tashkeel-removal.png" alt="Strip Arabic diacritics (Tashkeel)" width="100%" />
 </details>
 
-- **تحويل الأرقام** — `3 أيام` ← `٣ أيام` مع حماية الوسوم والتوقيت والرموز اللاتينية (`AK-47`، `MP4`، `Windows 11`).
+* **توحيد الفواصل العربية** — تحويل الفواصل اللاتينية في النص العربي إلى الفاصلة العربية <code dir="ltr">(e.g. نعم , لا &rarr; نعم، لا)</code>
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
+</details>
+
+* **تحويل الأرقام إلى الأرقام العربية المشرقية** — تحويل الأرقام اللاتينية إلى الأرقام العربية المشرقية في الحوار العربي مع حماية الطوابع الزمنية والوسوم والرموز اللاتينية <code dir="ltr">(e.g. قبل 3 أيام &rarr; قبل ٣ أيام)</code>
 
 <details>
 <summary>🔍 <b>View Screenshot Comparison</b></summary>
@@ -235,8 +245,36 @@ mypy app                           # types
 <img src="docs/screenshots/eastern-arabic-numbers.png" alt="Convert numbers to Eastern Arabic" width="100%" />
 </details>
 
-- **تنظيف وسوم الصوت الوصفية** — إزالة `[MUSIC]` و`(SIGHS)` و`JOHN:` مع الإبقاء على الحوار.
-- **أمان الترميز** — تحويل CP1256 / ISO-8859-6 إلى UTF-8 نظيف.
+#### الحوار والتنظيف
+
+- **استبعاد الصوت الوصفي (HI)**: استبعاد المسارات التي تحتوي على مؤثرات صوتية وأوصاف سمعية. **(يُخفي مسارات HI كاملة من القائمة)**
+- **تنظيف وسوم HI داخل الحوار**: تنظيف المؤثرات الصوتية والإشارات الصوتية وأسماء المتحدثين مع الإبقاء على الحوار (مثال `[LAUGHS] JOHN: Hello there!` ← `Hello there!`). **(يبقي مسار الترجمة، لكن يحذف نص HI الموجود داخله)**
+- **إزالة الإعلانات**: إزالة الروابط والمواقع والمعرّفات الاجتماعية والنص الترويجي، ثم إعادة ترقيم مقاطع SRT (مثال Watch free at [www.example.com](https://www.example.com) — @promo_channel ← (cue removed)).
+- **الإبقاء على حقوق المترجم**: الحفاظ على سطور نسب المترجم مع إزالة الروابط والسبام الملتصقة بها.
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+
+* **إزالة الإعلانات:** [ON] — **الإبقاء على حقوق المترجم:** [ON]
+
+<img src="docs/screenshots/keep-translator-credits.png" alt="Keep translator credits" width="100%" />
+</details>
+
+#### تنسيق النص والتوقيت
+
+- **تنظيف الوسوم**: موازنة وإغلاق وسوم التنسيق غير المغلقة (`<i>`/`<b>`) وإزالة الأغلفة غير المدعومة (مثال `<i>- Hello! <custom>world</custom>` ← `<i>- Hello! world</i>`).
+- **إزالة ألوان النص**: إزالة وسوم ألوان HTML وأكواد ألوان ASS (`{\c&H...&}`) لفرض التنسيق الأصلي للمشغل (مثال `<font color="#ff0000">Hello</font>` ← `Hello`).
+
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/strip-text-colors.png" alt="Strip text colors" width="100%" />
+</details>
+
+- **توحيد المسافات**: دمج المسافات المكررة وإزالة المسافات الزائدة قبل علامات الترقيم (مثال `word  ,  next` ← `word, next`).
+- **تنظيف الرموز والفواصل**: تحويل الشرطات المزدوجة إلى علامة حذف (`...`) وإزالة وسوم `<br>` الزائدة (مثال `-- Wait <br>` ← `... Wait`).
+- **ضبط توقيت العرض**: قص التداخلات الدقيقة (< 500ms) بين المقاطع المتتالية لمنع وميض الترجمة (مثال `00:00:01,000 --> 00:00:03,000` و`00:00:02,800 --> 00:00:05,000` ← تُضبط إلى `00:00:02,800`).
 
 ### تخصيص شارات الترجمة (Subtitle Badge Customizer)
 يتيح لك تخصيص مظهر مسارات الترجمة داخل مشغل Stremio، مع إمكانية إظهار أو إخفاء وإعادة ترتيب الوسوم والمعلومات حسب رغبتك:
@@ -246,6 +284,17 @@ mypy app                           # types
 * **اسم النسخة (Release Name)** — يوضح وسم نسخة الفيديو الأصلية (مثل `WEB-DL-FLUX`).
 * **حقوق المترجم (`(by 'username')`)** — تعرض اسم المترجم أو رافع ملف الترجمة الأصلي.
 
+### محرّك اللغة العربية
+
+تُطبَّق كل معالجات اللغة العربية في **وقت التقديم** (لكل مستخدم) ويمكن تفعيلها أو تعطيلها بالكامل:
+
+- **ضبط الاتجاه والترقيم** — إضافة علامة RLM (`U+200F`) بعد علامات الترقيم النهائية ليبقى القوس/النقطة في الجهة اليسرى؛ مع إصلاح الترقيم المعكوس والأقواس والاقتباسات المعكوسة، وتصحيح الشرطات المقلوبة (`"نص -" ← "- نص."`).
+- **تنظيف الصياغة والتنسيق** — خيارات مستقلة لإصلاح الوسوم والمسافات والرموز (`-- ← ...`) والفواصل اللاتينية، ووسوم HTML غير الآمنة، وضبط تداخل التوقيت (< 500ms).
+- **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على **الشدة** و**جميع أنواع التنوين** و**كسرة المؤنث** (`أنتِ`، `لكِ`، `علّمتِ`).
+- **تحويل الأرقام إلى الأرقام العربية المشرقية** — `3 أيام` ← `٣ أيام` مع حماية الوسوم والطوابع الزمنية والرموز اللاتينية (`AK-47`، `MP4`، `Windows 11`).
+- **تنظيف وسوم الصوت الوصفية** — إزالة `[MUSIC]` و`(SIGHS)` و`JOHN:` مع الإبقاء على الحوار.
+- **أمان الترميز** — تحويل CP1256 / ISO-8859-6 إلى UTF-8 نظيف.
+
 ### التشغيل السريع (Docker)
 
 ```bash
@@ -253,9 +302,46 @@ cp .env.example .env
 # اضبط BASE_URL على عنوان الشبكة المحلية، مثال: http://192.168.1.50:7000
 
 docker compose up -d --build
+docker compose logs -f
 ```
 
 ثم افتح `http://<HOST_IP>:7000/configure`، أدخل المفاتيح، واضغط **Install to Stremio** أو **Copy Link**.
+
+### واجهة الإعدادات
+
+تتكوّن الواجهة من معالج من 3 خطوات ورمز بدون حفظ:
+
+1. **المصادر** — اختيار المصادر ولصق مفاتيح الـ API.
+2. **التفضيلات** — محرّك اللغة، خيارات التنظيف، ومعاينة الشارة.
+3. **التثبيت** — عنوان الإضافة، وأزرار التثبيت في Stremio، ورابط الـ manifest المُنشأ.
+
+### نقاط النهاية (API)
+
+| نقطة النهاية | الطريقة | الوصف |
+| :--- | :--- | :--- |
+| `/configure` | `GET` | معالج الإعدادات |
+| `/{config}/configure` | `GET` | معالج الإعدادات مع القيم المحفوظة |
+| `/manifest.json` | `GET` | ملف manifest الافتراضي لـ Stremio v3 |
+| `/{config}/manifest.json` | `GET` | ملف manifest المخصّص بالمفاتيح الشخصية |
+| `/subtitles/{type}/{id}.json` | `GET` | البحث عن الترجمات (مفاتيح الخادم) |
+| `/{config}/subtitles/{type}/{id}.json` | `GET` | البحث عن الترجمات (مفاتيح المستخدم) |
+| `/sub/{sub_id}.srt` | `GET` | تقديم ملف ترجمة UTF-8 |
+| `/health` | `GET` | حالة الخدمة وإحصاءات الذاكرة المؤقتة |
+
+### التطوير المحلي
+
+```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1        # Windows
+# source .venv/bin/activate       # Linux/macOS
+
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 7000 --reload
+
+pytest -q                          # tests
+ruff check .                       # lint
+mypy app                           # types
+```
 
 ### الترخيص
 
