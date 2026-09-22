@@ -27,6 +27,16 @@ A lightweight, self-hosted [Stremio](https://stremio.com) / [Nuvio](https://nuvi
 - **Informative match badges** — compose the subtitle label from match score, provider, release filename and uploader.
 - **Low footprint** — in-memory ZIP extraction (Zip Slip protected), LRU disk cache, and strict memory limits.
 
+### Subtitle Providers
+
+| Provider | Access | Default | Notes |
+| :--- | :--- | :---: | :--- |
+| **SubDL** | API key | ✅ on | Primary source, broad release coverage |
+| **SubSource** | API key | ✅ on | Strong community uploads |
+| **OpenSubtitles** | API key | ⛔ off | Optional; quota-aware |
+| **YIFYSubtitles** | Keyless | ⛔ off | Movies only (IMDb lookup) |
+| **SubtitleCat** | Keyless | ⛔ off | Machine-translated `.srt` files |
+
 ### Features & Preferences
 
 Every setting below is an independent, opt-in preference available in the [configuration UI](#configuration-ui). Choices are serialized into the stateless manifest token and included in the cache key, so toggling one never serves stale subtitles.
@@ -61,16 +71,6 @@ Customizes how subtitle tracks appear inside the Stremio player interface, allow
 * **Provider Tag (`[SubDL]`)** — Identifies the upstream subtitle provider source.
 * **Release Name** — Displays the original video release tag (e.g. `WEB-DL-FLUX`).
 * **Translator Credit (`(by 'username')`)** — Displays the subtitle author or translator.
-
-### Subtitle Providers
-
-| Provider | Access | Default | Notes |
-| :--- | :--- | :---: | :--- |
-| **SubDL** | API key | ✅ on | Primary source, broad release coverage |
-| **SubSource** | API key | ✅ on | Strong community uploads |
-| **OpenSubtitles** | API key | ⛔ off | Optional; quota-aware |
-| **YIFYSubtitles** | Keyless | ⛔ off | Movies only (IMDb lookup) |
-| **SubtitleCat** | Keyless | ⛔ off | Machine-translated `.srt` files |
 
 ### Arabic Language Engine
 
