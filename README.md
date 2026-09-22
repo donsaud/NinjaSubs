@@ -32,10 +32,12 @@ A lightweight, self-hosted [Stremio](https://stremio.com) / [Nuvio](https://nuvi
 Every setting below is an independent, opt-in preference available in the [configuration UI](#configuration-ui). Choices are serialized into the stateless manifest token and included in the cache key, so toggling one never serves stale subtitles.
 
 #### Arabic Language Engine
-* **Arabic RTL Alignment Fix**: Fixes inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods and leading dashes <span dir="ltr">(e.g. `مرحبا. -` &rarr; `- مرحبا.`)</span>.
-* **Strip Arabic Diacritics (Tashkeel)**: Removes heavy Harakat while selectively preserving Shadda, Tanween, and feminine Kasra <span dir="ltr">(e.g. `أَنْتِ الَّتِي عَلَّمْتِ` &rarr; `أنتِ التي علّمتِ`)</span>.
-* **Normalize Arabic Commas**: Converts Latin commas in Arabic dialogue into proper Arabic commas <span dir="ltr">(e.g. `نعم , لا` &rarr; `نعم، لا`)</span>.
-* **Convert Numbers to Eastern Arabic**: Converts Western digits to Eastern Arabic numerals while preserving timestamps, tags, and alphanumeric terms <span dir="ltr">(e.g. `قبل 3 أيام` &rarr; `قبل ٣ أيام`)</span>.
+All Arabic processing is applied at **serve time** (per user) and is fully toggleable:
+
+* **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods (e.g. &lrm;`- مرحبا.` &larr; `مرحبا. -`&lrm;).
+* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra (e.g. &lrm;أنتِ، لكِ، علّمتِ &larr; أَنتِ، لَكِ، عَلَّمتِ&lrm;).
+* **Normalize Arabic commas** — Converts Latin commas in Arabic text to Arabic commas (e.g. &lrm;نعم، لا &larr; نعم , لا&lrm;).
+* **Convert numbers to Eastern Arabic** — Converts Western digits to Eastern Arabic numerals in Arabic dialogue (e.g. &lrm;قبل ٣ أيام &larr; قبل 3 أيام&lrm;).
 
 #### Dialogue & Clean-up
 
