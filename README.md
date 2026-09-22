@@ -34,10 +34,10 @@ Every setting below is an independent, opt-in preference available in the [confi
 #### Arabic Language Engine
 All Arabic processing is applied at **serve time** (per user) and is fully toggleable:
 
-* **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods (e.g. &lrm;`- مرحبا.` &larr; `مرحبا. -`&lrm;).
-* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra (e.g. &lrm;أنتِ، لكِ، علّمتِ &larr; أَنتِ، لَكِ، عَلَّمتِ&lrm;).
-* **Normalize Arabic commas** — Converts Latin commas in Arabic text to Arabic commas (e.g. &lrm;نعم، لا &larr; نعم , لا&lrm;).
-* **Convert numbers to Eastern Arabic** — Converts Western digits to Eastern Arabic numerals in Arabic dialogue (e.g. &lrm;قبل ٣ أيام &larr; قبل 3 أيام&lrm;).
+* **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods <code dir="ltr">(e.g. مرحبا. - &rarr; - مرحبا.)</code>
+* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra <code dir="ltr">(e.g. أَنتِ، لَكِ، عَلَّمتِ &rarr; أنتِ، لكِ، علّمتِ)</code>
+* **Normalize Arabic commas** — Converts Latin commas in Arabic text to Arabic commas <code dir="ltr">(e.g. نعم , لا &rarr; نعم، لا)</code>
+* **Convert numbers to Eastern Arabic** — Converts Western digits to Eastern Arabic numerals in Arabic dialogue <code dir="ltr">(e.g. قبل 3 أيام &rarr; قبل ٣ أيام)</code>
 
 #### Dialogue & Clean-up
 
