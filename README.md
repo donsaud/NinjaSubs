@@ -54,6 +54,14 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 - **Clean Symbols & Breaks**: Converts stray double hyphens into ellipses and removes stray `<br>` tags (e.g. `-- Wait <br>` → `... Wait`).
 - **Fix Display Timing**: Clamps micro-overlaps (< 500ms) between consecutive cues to stop player flickering (e.g. `00:00:01,000 --> 00:00:03,000` & `00:00:02,800 --> 00:00:05,000` → clamped to `00:00:02,800`).
 
+### Subtitle Badge Customizer
+Customizes how subtitle tracks appear inside the Stremio player interface, allowing you to toggle and reorder metadata tags to match your preference:
+
+* **Match Score (`[100%]`)** — Displays the filename matching accuracy score against the playing video stream.
+* **Provider Tag (`[SubDL]`)** — Identifies the upstream subtitle provider source.
+* **Release Name** — Displays the original video release tag (e.g. `WEB-DL-FLUX`).
+* **Translator Credit (`(by 'username')`)** — Displays the subtitle author or translator.
+
 ### Subtitle Providers
 
 | Provider | Access | Default | Notes |
