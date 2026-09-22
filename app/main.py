@@ -49,7 +49,7 @@ from app.utils.cleaners import (
 )
 from app.utils.config_parser import parse_user_config
 from app.utils.language import AVAILABLE_LANGUAGES, get_language_name, normalize_to_iso639_2
-from app.utils.network import get_base_url, get_local_lan_ip
+from app.utils.network import get_base_url, get_local_lan_ip, is_local_or_container_host
 from app.utils.parser import parse_stremio_id
 from app.utils.release_matcher import (
     extract_stream_params,
@@ -166,11 +166,13 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
     Loads template from app/templates/configure.html and injects dynamic server configuration.
     """
     lan_ip = get_local_lan_ip()
+    # Preserve the real service port (request port, then configured settings.PORT).
     port = request.url.port or settings.PORT or 7000
     lan_url = f"http://{lan_ip}:{port}"
     req_host = request.url.hostname or ""
-    # If accessed on localhost/127.0.0.1, prefer auto-detected LAN IP so links are network-ready
-    base_url = lan_url if req_host in ("localhost", "127.0.0.1") else get_base_url(request)
+    # If accessed on localhost/127.0.0.1 or an internal Docker bridge IP (172.16-31.x),
+    # prefer the auto-detected LAN URL so links work on external devices (Android TV, etc.).
+    base_url = lan_url if is_local_or_container_host(req_host) else get_base_url(request)
 
     subdl_env_set = bool(settings.SUBDL_API_KEY.strip())
     subsource_env_set = bool(settings.SUBSOURCE_API_KEY.strip())

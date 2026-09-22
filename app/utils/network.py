@@ -1,12 +1,31 @@
 """Network utility functions for local LAN IP detection and base URL resolution."""
 
 import os
+import re
 import socket
 import urllib.parse
 
 from starlette.requests import Request
 
 from app.config import settings
+
+# Docker default bridge / private container range: 172.16.0.0 - 172.31.255.255.
+_CONTAINER_IP_REGEX = re.compile(r"^172\.(1[6-9]|2[0-9]|3[01])\.")
+
+
+def is_local_or_container_host(hostname: str | None) -> bool:
+    """
+    Return True for loopback or internal container/bridge hosts that must never be
+    used to build a shareable manifest URL (localhost, 127.x, ::1, 0.0.0.0, 172.16-31.x).
+    """
+    host = (hostname or "").strip().lower()
+    if not host:
+        return True
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    if host.startswith("127."):
+        return True
+    return _CONTAINER_IP_REGEX.match(host) is not None
 
 
 def get_local_lan_ip() -> str:

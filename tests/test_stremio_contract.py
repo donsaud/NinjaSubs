@@ -895,6 +895,26 @@ def test_get_local_lan_ip_and_base_url():
             assert get_local_lan_ip() == "10.0.0.99"
 
 
+def test_is_local_or_container_host():
+    """Loopback and Docker bridge hosts must be flagged; real LAN/domain hosts must not."""
+    from app.utils.network import is_local_or_container_host
+
+    for host in ("localhost", "127.0.0.1", "127.0.1.1", "::1", "0.0.0.0", "", "172.17.0.1", "172.18.5.4", "172.31.255.255"):
+        assert is_local_or_container_host(host) is True, host
+    for host in ("192.168.8.114", "10.0.0.88", "172.15.0.1", "172.32.0.1", "example.com", "subs.mydomain.net"):
+        assert is_local_or_container_host(host) is False, host
+
+
+def test_configure_page_embeds_lan_resolution_logic(client):
+    """The configure page must swap loopback/Docker hosts for the detected LAN IP + port."""
+    body = client.get("/configure").text
+    assert "isLocalOrContainerHost" in body
+    assert "buildLanBaseUrl" in body
+    # Docker 172.16-31 range detection present in the client script.
+    assert "172" in body and "serverLanIp" in body
+    assert "serverPort" in body
+
+
 @pytest.mark.asyncio
 async def test_subdl_provider_requests_max_subs_per_page():
     """Verify SubdlProvider explicitly requests subs_per_page=30 to retrieve maximum available subtitles."""
