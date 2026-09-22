@@ -507,7 +507,7 @@
         }
         .pref-subrow .pref-label { font-size: 0.8125rem; }
         .pref-subrow.is-disabled {
-            opacity: 0.4;
+            opacity: 0.5;
             pointer-events: none;
         }
         /* Prerequisite-disabled rows (e.g. Arabic dependents when Auto UTF-8 off) */
@@ -1057,7 +1057,7 @@
                     <div class="pref-row">
                         <div class="min-w-0">
                             <label for="excludeHi" class="pref-label">Exclude HI (Hearing Impaired)</label>
-                            <p class="pref-desc">Filter out subtitles with sound effects and audio descriptions.</p>
+                            <p class="pref-desc">Filter out subtitles with sound effects and audio descriptions. <span style="color: #ffffff;">(Hides entire HI subtitle tracks from the list)</span></p>
                         </div>
                         <label class="toggle">
                             <input type="checkbox" id="excludeHi" {{initial_exclude_hi}} class="peer sr-only">
@@ -1065,10 +1065,10 @@
                         </label>
                     </div>
 
-                    <div id="stripHiRow" class="pref-row pref-subrow">
+                    <div id="stripHiRow" class="pref-row">
                         <div class="min-w-0">
                             <label for="stripHiLabels" class="pref-label">Strip in-dialogue HI labels</label>
-                            <p class="pref-desc">Clean sound effects, audio cues, and speaker tags (e.g. [LAUGHS], (SIGHS), or JOHN:) while keeping dialogue intact.</p>
+                            <p class="pref-desc">Clean sound effects, audio cues, and speaker tags (e.g. [LAUGHS], (SIGHS), or JOHN:) while keeping dialogue intact. <span style="color: #ffffff;">(Keeps the subtitle track, but removes the HI text inside it)</span></p>
                         </div>
                         <label class="toggle">
                             <input type="checkbox" id="stripHiLabels" class="peer sr-only">
@@ -1087,7 +1087,7 @@
                         </label>
                     </div>
 
-                    <div id="translatorCreditsRow" class="pref-row pref-subrow">
+                    <div id="translatorCreditsRow" class="pref-row">
                         <div class="min-w-0">
                             <label for="keepTranslatorCredits" class="pref-label">Keep translator credits</label>
                             <p class="pref-desc">Preserve translator names while removing spam, ads, and website links.</p>
@@ -1573,29 +1573,6 @@
             });
         }
 
-        function updateAdRemovalDependents() {
-            const adToggle = document.getElementById("enableAdRemoval");
-            const subrow = document.getElementById("translatorCreditsRow");
-            const creditsToggle = document.getElementById("keepTranslatorCredits");
-            if (!adToggle || !subrow || !creditsToggle) return;
-            const enabled = adToggle.checked;
-            creditsToggle.disabled = !enabled;
-            subrow.classList.toggle("is-disabled", !enabled);
-            subrow.setAttribute("aria-disabled", enabled ? "false" : "true");
-        }
-
-        function updateHiDependents() {
-            const excludeToggle = document.getElementById("excludeHi");
-            const subrow = document.getElementById("stripHiRow");
-            const stripToggle = document.getElementById("stripHiLabels");
-            if (!excludeToggle || !subrow || !stripToggle) return;
-            // Excluding HI entirely makes in-dialogue stripping redundant.
-            const excluded = excludeToggle.checked;
-            stripToggle.disabled = excluded;
-            subrow.classList.toggle("is-disabled", excluded);
-            subrow.setAttribute("aria-disabled", excluded ? "true" : "false");
-        }
-
         function updateBadgePreview() {
             const preview = document.getElementById("badgePreview");
             if (!preview) return;
@@ -1711,8 +1688,8 @@
 
             const creditsToggle = document.getElementById("keepTranslatorCredits");
             const creditsEnabled = creditsToggle ? creditsToggle.checked : true;
-            // Only meaningful while ad removal is on; otherwise ignore it.
-            if (adEnabled && !creditsEnabled) configObj.keep_translator_credits = false;
+            // Independent of ad removal: serialize only when the user turns it off.
+            if (!creditsEnabled) configObj.keep_translator_credits = false;
 
             const cleanFlagToggles = {
                 cleanTags: ["clean_tags", true],
@@ -1745,8 +1722,8 @@
 
             const stripHiToggle = document.getElementById("stripHiLabels");
             const stripHiEnabled = stripHiToggle ? stripHiToggle.checked : false;
-            // Only meaningful while HI exclusion is off; otherwise ignore it.
-            if (!excludeHi && stripHiEnabled) configObj.strip_hi = true;
+            // Standalone preference, independent of HI track exclusion.
+            if (stripHiEnabled) configObj.strip_hi = true;
 
             const subdlToggle = document.getElementById("enableSubdl");
             const subsourceToggle = document.getElementById("enableSubsource");
@@ -1761,9 +1738,9 @@
             const hasAnyPreference =
                 subdl || subsource || opensubtitles || excludeHi || !isDefaultBadge ||
                 !yifyEnabled || !catEnabled || !rtlEnabled || !adEnabled ||
-                (adEnabled && !creditsEnabled) || cleanFlagsNonDefault ||
+                !creditsEnabled || cleanFlagsNonDefault ||
                 easternNumeralsEnabled || stripDiacriticsEnabled ||
-                (!excludeHi && stripHiEnabled) ||
+                stripHiEnabled ||
                 !subdlEnabled || !subsourceEnabled || !opensubtitlesEnabled;
 
             if (!hasAnyPreference) {
@@ -2089,7 +2066,6 @@
         }
 
         document.getElementById("excludeHi").addEventListener("change", () => {
-            updateHiDependents();
             updateBadgePreview();
             updateUrls();
         });
@@ -2124,14 +2100,7 @@
             if (el) el.addEventListener("change", updateUrls);
         });
 
-        const adRemovalToggleEl = document.getElementById("enableAdRemoval");
-        if (adRemovalToggleEl) {
-            adRemovalToggleEl.addEventListener("change", updateAdRemovalDependents);
-        }
-
         applyInitialPrefs();
-        updateAdRemovalDependents();
-        updateHiDependents();
         updateProviderCollapse();
         renderBadgeBuilder();
         updateBadgePreview();

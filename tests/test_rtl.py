@@ -6,7 +6,12 @@
 """
 
 from app.extractor import transcode_to_utf8
-from app.utils.rtl import RLM, contains_rtl, fix_rtl_punctuation
+from app.utils.rtl import (
+    RLM,
+    contains_rtl,
+    fix_inverted_leading_quote,
+    fix_rtl_punctuation,
+)
 
 # ============================================================================
 # 1. LEGACY "REVERSE RTL START/END"
@@ -381,3 +386,43 @@ def test_standard_leading_dash_is_untouched():
 def test_pre_reversed_fix_is_idempotent():
     once = fix_rtl_punctuation("هل استمتعتِ كثيراً؟ -")
     assert fix_rtl_punctuation(once) == once
+
+
+# ============================================================================
+# 9. INVERTED LEADING QUOTE + PUNCTUATION
+# ============================================================================
+
+
+MALFORMED = '".نادِني بـ"عزيزتي'
+FIXED = 'نادِني بـ"عزيزتي".'
+
+
+def test_inverted_leading_quote_is_relocated():
+    assert fix_inverted_leading_quote(MALFORMED) == FIXED + RLM
+    # Integrated pipeline produces the same result.
+    assert fix_rtl_punctuation(MALFORMED) == FIXED + RLM
+
+
+def test_inverted_leading_quote_with_tags_is_relocated():
+    tagged = f"<i>{MALFORMED}</i>"
+    assert fix_inverted_leading_quote(tagged) == f"<i>{FIXED}</i>{RLM}"
+
+
+def test_inverted_leading_punct_then_quote_is_normalised():
+    # ."نص -> نص". (closing quote first, then punctuation)
+    assert fix_inverted_leading_quote('."نص') == 'نص".' + RLM
+
+
+def test_dialogue_dash_is_never_touched():
+    line = "- مرحباً بك"
+    assert fix_inverted_leading_quote(line) == line
+
+
+def test_valid_leading_quote_is_preserved():
+    line = '"أهلاً" قال الرجل.'
+    assert fix_inverted_leading_quote(line) == line
+
+
+def test_inverted_leading_quote_is_idempotent():
+    once = fix_inverted_leading_quote(MALFORMED)
+    assert fix_inverted_leading_quote(once) == once

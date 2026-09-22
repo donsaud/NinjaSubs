@@ -258,11 +258,9 @@ def test_configure_page_shows_keep_translator_credits_toggle(client):
     assert 'id="keepTranslatorCredits"' in body
     assert "Keep translator credits" in body
     assert "Preserve translator names while removing spam, ads, and website links." in body
-    # Sub-row is dependent on the "Remove ads" toggle.
-    assert 'id="translatorCreditsRow"' in body
-    assert "pref-subrow" in body
-    assert "is-disabled" in body
-    assert "updateAdRemovalDependents" in body
+    # Standalone preference: fully decoupled from the "Remove ads" toggle.
+    assert 'id="translatorCreditsRow" class="pref-row"' in body
+    assert "updateAdRemovalDependents" not in body
 
 
 @pytest.mark.asyncio
