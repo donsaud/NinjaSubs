@@ -32,10 +32,10 @@ A lightweight, self-hosted [Stremio](https://stremio.com) / [Nuvio](https://nuvi
 Every setting below is an independent, opt-in preference available in the [configuration UI](#configuration-ui). Choices are serialized into the stateless manifest token and included in the cache key, so toggling one never serves stale subtitles.
 
 #### Arabic Language Engine
-* **Arabic RTL Alignment Fix**: Fixes inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods and leading dashes (e.g. <bdi dir="rtl">`مرحبا. -`</bdi> &rarr; <bdi dir="rtl">`- مرحبا.`</bdi>).
-* **Strip Arabic Diacritics (Tashkeel)**: Removes heavy Harakat while selectively preserving Shadda, Tanween, and feminine Kasra (e.g. <bdi dir="rtl">`أَنْتِ الَّتِي عَلَّمْتِ`</bdi> &rarr; <bdi dir="rtl">`أنتِ التي علّمتِ`</bdi>).
-* **Normalize Arabic Commas**: Converts Latin commas in Arabic dialogue into proper Arabic commas (e.g. <bdi dir="rtl">`نعم , لا`</bdi> &rarr; <bdi dir="rtl">`نعم، لا`</bdi>).
-* **Convert Numbers to Eastern Arabic**: Converts Western digits to Eastern Arabic numerals while preserving timestamps, tags, and alphanumeric terms (e.g. <bdi dir="rtl">`قبل 3 أيام`</bdi> &rarr; <bdi dir="rtl">`قبل ٣ أيام`</bdi>).
+* **Arabic RTL Alignment Fix**: Fixes inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods and leading dashes <span dir="ltr">(e.g. `مرحبا. -` &rarr; `- مرحبا.`)</span>.
+* **Strip Arabic Diacritics (Tashkeel)**: Removes heavy Harakat while selectively preserving Shadda, Tanween, and feminine Kasra <span dir="ltr">(e.g. `أَنْتِ الَّتِي عَلَّمْتِ` &rarr; `أنتِ التي علّمتِ`)</span>.
+* **Normalize Arabic Commas**: Converts Latin commas in Arabic dialogue into proper Arabic commas <span dir="ltr">(e.g. `نعم , لا` &rarr; `نعم، لا`)</span>.
+* **Convert Numbers to Eastern Arabic**: Converts Western digits to Eastern Arabic numerals while preserving timestamps, tags, and alphanumeric terms <span dir="ltr">(e.g. `قبل 3 أيام` &rarr; `قبل ٣ أيام`)</span>.
 
 #### Dialogue & Clean-up
 
