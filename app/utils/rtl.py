@@ -92,6 +92,21 @@ _LEADING_TAGS_REGEX = re.compile(r"^(?:\{[^}]*\})+")
 _TRAILING_TAGS_REGEX = re.compile(r"(?:\{[^}]*\})+$")
 _ASS_DIALOGUE_REGEX = re.compile(r"^(?:Dialogue|Comment):", re.IGNORECASE)
 
+# Inverted leading quote + terminal punctuation (editor glitches), e.g. `".نص`, `."نص`.
+_INVERTED_LEADING_REGEX = re.compile(
+    r'^(?:'
+    r'(?P<quote1>["\u201c\u201d\u00ab\u00bb])(?P<punct1>[.!?\u2026])'
+    r"|(?P<punct2>[.!?\u2026])(?P<quote2>[\"\u201c\u201d\u00ab\u00bb])"
+    r")(?=[\u0600-\u06FF])"
+)
+# HTML/`<font>` and ASS `{...}` tags that may wrap a dialogue line.
+_ANY_TAG_PART = r"(?:\{[^}]*\}|<[^>]*>)"
+_LEADING_ANY_TAG_REGEX = re.compile(rf"^(?:{_ANY_TAG_PART})+")
+_TRAILING_ANY_TAG_REGEX = re.compile(rf"(?:{_ANY_TAG_PART})+$")
+# A line qualified for the inverted-leading-quote fix must end on an Arabic letter
+# (so properly quoted lines ending in a quote/ellipsis keep their existing handling).
+_ENDS_WITH_ARABIC_LETTER_REGEX = re.compile(r"[\u0621-\u064a][\u064b-\u0652]*$")
+
 
 def _bidi_class(char: str) -> str:
     try:
@@ -520,6 +535,63 @@ def _normalize_pre_reversed_dialogue(core: str) -> str:
     return f"{leading_ws}{dash} {body}{trailing_ws}"
 
 
+def fix_inverted_leading_quote(line: str) -> str:
+    """
+    Repair lines whose leading quote + terminal punctuation were inverted by an
+    editor glitch, e.g. ``".نادِني بـ"عزيزتي`` -> ``نادِني بـ"عزيزتي".\\u200F``.
+
+    Guardrails (return the line unchanged):
+    - dialogue lines starting with ``-`` or the tatweel ``ـ`` are never touched;
+    - a legitimate standalone leading quote (``"أهلاً" قال الرجل.``) is preserved,
+      because the quote must be *immediately* followed by terminal punctuation
+      and an Arabic letter to qualify;
+    - leading/trailing HTML (``<font>``, ``<i>``) and ASS (``{\\pos...}``) tags are
+      isolated and restored verbatim;
+    - lines that do not exactly match the inverted pattern are left as-is.
+
+    A Right-to-Left Mark (RLM) is appended to anchor the relocated punctuation in
+    BiDi-unaware players.
+    """
+    if not line or not contains_rtl(line):
+        return line
+
+    leading_tags = ""
+    trailing_tags = ""
+    core = line
+
+    leading_match = _LEADING_ANY_TAG_REGEX.match(core)
+    if leading_match:
+        leading_tags = leading_match.group(0)
+        core = core[len(leading_tags) :]
+
+    trailing_match = _TRAILING_ANY_TAG_REGEX.search(core)
+    if trailing_match:
+        trailing_tags = trailing_match.group(0)
+        core = core[: trailing_match.start()]
+
+    if core.lstrip().startswith(("-", "\u0640")):
+        return line
+
+    match = _INVERTED_LEADING_REGEX.match(core)
+    if not match:
+        return line
+
+    quote = match.group("quote1") or match.group("quote2")
+    punct = match.group("punct1") or match.group("punct2")
+    body = core[match.end() :]
+    if not body or not contains_rtl(body):
+        return line
+
+    # Only relocate when the line ends on an Arabic letter. Lines ending in a
+    # quote/ellipsis are legitimate quoted phrases handled by the quote normalizer.
+    if not _ENDS_WITH_ARABIC_LETTER_REGEX.search(core.rstrip()):
+        return line
+
+    # Avoid doubling the closing quote when the body already ends with one.
+    closing_quote = "" if body.endswith(quote) else quote
+    return f"{leading_tags}{body}{closing_quote}{punct}{trailing_tags}{RLM}"
+
+
 def _normalize_core(core: str) -> str:
     """Normalize brackets/quotes, move legacy leading punctuation, apply the RLM suffix."""
     if not contains_rtl(core):
@@ -585,6 +657,7 @@ def _process_segment(segment: str, is_ass: bool) -> str:
             trailing_tags = trailing_match.group(0)
             core = core[: trailing_match.start()]
 
+    core = fix_inverted_leading_quote(core)
     core = _normalize_pre_reversed_dialogue(core)
     return f"{leading_tags}{_normalize_core(core)}{trailing_tags}"
 
