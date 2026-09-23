@@ -1,11 +1,11 @@
 name: ninjasubs
 
 services:
-  stremio-arabic-subs:
+  ninjasubs:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: stremio-arabic-subs
+    container_name: ninjasubs
     restart: unless-stopped
     ports:
       - "7000:7000"

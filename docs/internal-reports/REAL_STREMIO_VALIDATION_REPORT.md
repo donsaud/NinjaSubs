@@ -183,7 +183,7 @@ Validated via [`tests/test_real_stremio_integration.py`](tests/test_real_stremio
 
 ## 3. Docker Container Live Status
 
-- **Container Name**: `stremio-arabic-subs`
+- **Container Name**: `ninjasubs`
 - **Status**: Up & Healthy (Port 7000:7000)
 - **Live HTTP Endpoint Verification**:
   - `GET http://localhost:7000/manifest.json`: HTTP 200 OK  

@@ -164,6 +164,6 @@ Record real results in the table below during testing:
 
 1. Perform manual tests using the checklist above on your Stremio desktop, web, or TV player.
 2. If any subtitle ranks unexpectedly:
-   - Check container logs (`docker logs stremio-arabic-subs`) with `NINJASUBS_DEBUG_RANKING=true`.
+   - Check container logs (`docker logs ninjasubs`) with `NINJASUBS_DEBUG_RANKING=true`.
    - Note the exact stream filename and subtitle release name in the log sheet.
 3. Report any observed discrepancies for precision calibration.
