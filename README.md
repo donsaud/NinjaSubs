@@ -2,7 +2,7 @@
 
 <img src="app/static/logo.png" alt="NinjaSubs Logo" width="300" />
 
-**Smart subtitle aggregator for Stremio with an advanced Arabic text & BiDi processing engine.**
+**Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization.**
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)

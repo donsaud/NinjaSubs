@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NinjaSubs",
     version="1.0.0",
-    description="Smart, high-accuracy subtitle aggregator from multiple sources for Stremio.",
+    description="Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization.",
     lifespan=lifespan,
 )
 
@@ -136,7 +136,7 @@ async def add_global_cors_headers(request: Request, call_next):
 
 def _build_manifest(config_str: str | None = None, request: Request | None = None) -> Manifest:
     """Build Stremio Manifest object with community-standard behaviorHints."""
-    desc = "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
+    desc = "Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization."
 
     base_url = get_base_url(request)
     icon_url = f"{base_url}/static/icon.png"
