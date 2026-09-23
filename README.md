@@ -52,7 +52,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra <code dir="ltr">(e.g. أَنتِ، لَكِ، عَلَّمتِ &rarr; أنتِ، لكِ، علّمتِ)</code>
+* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra <code dir="ltr">(e.g. أَنتِ، لَكِ، عَلَّمتِ)</code>
 
 <details>
 <summary>🔍 <b>View Screenshot Comparison</b></summary>
@@ -118,7 +118,7 @@ Customizes how subtitle tracks appear inside the Stremio player interface, allow
 * **Translator Credit (`(by 'username')`)** — Displays the subtitle author or translator.
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>View Screenshot</b></summary>
 <br>
 <img src="docs/screenshots/subtitle-badge-preview.png" alt="Subtitle Badge Preview" width="100%" />
 </details>
