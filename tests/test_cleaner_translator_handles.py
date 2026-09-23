@@ -59,3 +59,41 @@ def test_mixed_credit_cue_keeps_handle_strips_link():
     assert "ترجمة" in out
     assert "www.adsite.com" not in out
     assert "Actual dialogue line" in out
+
+
+def test_arabic_chained_handles_with_waw_preserved():
+    out = strip_advertisements(
+        _srt_cue_body("ترجمة: @D700mka و @SaudSub"),
+        keep_translator_credits=True,
+    )
+    assert "@D700mka" in out
+    assert "@SaudSub" in out
+
+
+def test_english_chained_handles_with_and_preserved():
+    out = strip_advertisements(
+        _srt_cue_body("Translated by: @user1 and @user2"),
+        keep_translator_credits=True,
+    )
+    assert "@user1" in out
+    assert "@user2" in out
+
+
+def test_chained_handles_with_ampersand_and_comma_preserved():
+    out = strip_advertisements(
+        _srt_cue_body("ترجمة: @user1, @user2 & @user3"),
+        keep_translator_credits=True,
+    )
+    assert "@user1" in out
+    assert "@user2" in out
+    assert "@user3" in out
+
+
+def test_promo_handle_after_credit_chain_still_stripped():
+    out = strip_advertisements(
+        _srt_cue_body("ترجمة: @D700mka و @SaudSub Follow @spammer"),
+        keep_translator_credits=True,
+    )
+    assert "@D700mka" in out
+    assert "@SaudSub" in out
+    assert "@spammer" not in out
