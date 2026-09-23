@@ -108,7 +108,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 - **Normalize Spacing**: Collapses duplicate spaces and removes spaces before punctuation (e.g. `word  ,  next` → `word, next`).
 - **Clean Symbols & Breaks**: Converts stray double hyphens into ellipses and removes stray `<br>` tags (e.g. `-- Wait <br>` → `... Wait`).
 - **Fix Display Timing**: Clamps micro-overlaps (< 500ms) between consecutive cues to stop player flickering (e.g. `00:00:01,000 --> 00:00:03,000` & `00:00:02,800 --> 00:00:05,000` → clamped to `00:00:02,800`).
-- **Convert ASS/SSA subtitles to SRT**: Enhances playback stability on Android TV and Nuvio by converting ASS/SSA to SRT while retaining primary text colors and fixing Arabic RTL alignment.
+- **Convert ASS/SSA subtitles to SRT**: Enhances playback stability on Android TV (ExoPlayer) by converting ASS/SSA to SRT while retaining primary text colors and fixing Arabic RTL alignment.
 
 ### Subtitle Badge Customizer
 Customizes how subtitle tracks appear inside the Stremio or Nuvio player interface, allowing you to toggle and reorder metadata tags to match your preference:
@@ -282,7 +282,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 - **توحيد المسافات**: دمج المسافات المكررة وإزالة المسافات الزائدة قبل علامات الترقيم (مثال `word  ,  next` ← `word, next`).
 - **تنظيف الرموز والفواصل**: تحويل الشرطات المزدوجة إلى علامة حذف (`...`) وإزالة وسوم `<br>` الزائدة (مثال `-- Wait <br>` ← `... Wait`).
 - **ضبط توقيت العرض**: قص التداخلات الدقيقة (< 500ms) بين المقاطع المتتالية لمنع وميض الترجمة (مثال `00:00:01,000 --> 00:00:03,000` و`00:00:02,800 --> 00:00:05,000` ← تُضبط إلى `00:00:02,800`).
-- **تحويل ترجمات ASS/SSA إلى SRT**: يعزز استقرار التشغيل على Android TV و Nuvio عبر تحويل ملفات ASS/SSA إلى صيغة SRT مع الاحتفاظ بألوان النص الأساسية وضبط محاذاة النص العربي (RTL).
+- **تحويل ترجمات ASS/SSA إلى SRT**: يعزز استقرار التشغيل على Android TV (ExoPlayer) عبر تحويل ملفات ASS/SSA إلى صيغة SRT مع الاحتفاظ بألوان النص الأساسية وضبط محاذاة النص العربي (RTL).
 
 ### تخصيص شارات الترجمة (Subtitle Badge Customizer)
 يتيح لك تخصيص مظهر مسارات الترجمة داخل مشغل Stremio أو Nuvio، مع إمكانية إظهار أو إخفاء وإعادة ترتيب الوسوم والمعلومات حسب رغبتك:
