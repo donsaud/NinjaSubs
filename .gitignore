@@ -28,6 +28,18 @@ env/
 .mypy_cache/
 .ruff_cache/
 
+# Local databases and temporary/build artifacts
+*.db
+*.sqlite
+*.sqlite3
+*.tmp
+*.bak
+*.orig
+*.rej
+.cache/
+build/
+dist/
+
 # System, IDE, and editor artifacts
 .DS_Store
 Thumbs.db
