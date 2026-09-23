@@ -44,7 +44,7 @@ Every setting below is an independent, opt-in preference available in the [confi
 #### Arabic Language Engine
 All Arabic processing is applied at **serve time** (per user) and is fully toggleable:
 
-* **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods <code dir="ltr">(e.g. مرحبا. - &rarr; - مرحبا.)</code>
+* **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods (`مرحبا. -` → `- مرحبا.`)
 
 <details id="screenshots">
 <summary>🔍 <b>View Screenshot</b></summary>
@@ -52,7 +52,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra <code dir="ltr">(e.g. أَنتِ، لَكِ، عَلَّمتِ)</code>
+* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra (`عُلِّمْتِ، لَكِ، أَنْتِ` → `عَلَّمْتِ، لكِ، أنتِ`)
 
 <details>
 <summary>🔍 <b>View Screenshot</b></summary>
@@ -60,7 +60,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <img src="docs/screenshots/tashkeel-removal.png" alt="Strip Arabic diacritics (Tashkeel)" width="100%" />
 </details>
 
-* **Normalize Arabic commas** — Converts Latin commas in Arabic text to Arabic commas <code dir="ltr">(e.g. نعم , لا &rarr; نعم، لا)</code>
+* **Normalize Arabic commas** — Converts Latin commas in Arabic text to Arabic commas (`نعم , لا` → `نعم، لا`)
 
 <details>
 <summary>🔍 <b>View Screenshot</b></summary>
@@ -68,7 +68,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
 </details>
 
-* **Convert numbers to Eastern Arabic** — Converts Western digits to Eastern Arabic numerals in Arabic dialogue <code dir="ltr">(e.g. قبل 3 أيام &rarr; قبل ٣ أيام)</code>
+* **Convert numbers to Eastern Arabic** — Converts Western digits to Eastern Arabic numerals in Arabic dialogue (`قبل 3 أيام` → `قبل ٣ أيام`)
 
 <details>
 <summary>🔍 <b>View Screenshot</b></summary>
@@ -219,7 +219,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 #### محرّك اللغة العربية
 تُطبَّق كل معالجات اللغة العربية في **وقت التقديم** (لكل مستخدم) ويمكن تفعيلها أو تعطيلها بالكامل:
 
-* **ضبط الاتجاه والترقيم** — إصلاح تلقائي للترقيم والأقواس والاقتباسات المعكوسة في الترجمات العربية لمنع ظهور النقاط في غير موضعها <code dir="ltr">(e.g. مرحبا. - &rarr; - مرحبا.)</code>
+* **ضبط الاتجاه والترقيم** — إصلاح تلقائي للترقيم والأقواس والاقتباسات المعكوسة في الترجمات العربية لمنع ظهور النقاط في غير موضعها <span dir="rtl">(مثال: `- مرحبا.` ← `مرحبا. -`)</span>
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
@@ -227,7 +227,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-* **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث <code dir="ltr">(e.g. أَنتِ، لَكِ، عَلَّمتِ &rarr; أنتِ، لكِ، علّمتِ)</code>
+* **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث <span dir="rtl">(مثال: `عَلَّمْتِ، لكِ، أنتِ` ← `عُلِّمْتِ، لَكِ، أَنْتِ`)</span>
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
@@ -235,7 +235,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/tashkeel-removal.png" alt="Strip Arabic diacritics (Tashkeel)" width="100%" />
 </details>
 
-* **توحيد الفواصل العربية** — تحويل الفواصل اللاتينية في النص العربي إلى الفاصلة العربية <code dir="ltr">(e.g. نعم , لا &rarr; نعم، لا)</code>
+* **توحيد الفواصل العربية** — تحويل الفواصل اللاتينية في النص العربي إلى الفاصلة العربية <span dir="rtl">(مثال: `نعم، لا` ← `نعم , لا`)</span>
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
@@ -243,7 +243,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
 </details>
 
-* **تحويل الأرقام إلى الأرقام العربية المشرقية** — تحويل الأرقام اللاتينية إلى الأرقام العربية المشرقية في الحوار العربي مع حماية الطوابع الزمنية والوسوم والرموز اللاتينية <code dir="ltr">(e.g. قبل 3 أيام &rarr; قبل ٣ أيام)</code>
+* **تحويل الأرقام إلى الأرقام العربية المشرقية** — تحويل الأرقام اللاتينية إلى الأرقام العربية المشرقية في الحوار العربي مع حماية الطوابع الزمنية والوسوم والرموز اللاتينية <span dir="rtl">(مثال: `قبل ٣ أيام` ← `قبل 3 أيام`)</span>
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
