@@ -38,6 +38,7 @@ from app.services.aggregator import (
     format_informative_badge,
 )
 from app.services.cache import clear_subtitle_cache
+from app.utils.ass_converter import convert_ass_to_srt_bytes
 from app.utils.cleaners import (
     CleanOptions,
     clean_subtitle_bytes,
@@ -218,6 +219,7 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
             "strip_hi": prefs.strip_hi,
             "eastern_arabic_numerals": prefs.eastern_arabic_numerals,
             "strip_diacritics": prefs.strip_diacritics,
+            "convert_ass_to_srt": prefs.convert_ass_to_srt,
         }
     )
 
@@ -895,6 +897,7 @@ def _build_subtitle_response(
     strip_hi: bool = False,
     eastern_arabic_numerals: bool = False,
     strip_diacritics: bool = False,
+    convert_ass: bool = True,
 ) -> Response:
     """Construct HTTP response preserving exact original subtitle format (pass-through)."""
     # Fix legacy encodings first so every later text pass sees clean UTF-8, then strip
@@ -904,6 +907,15 @@ def _build_subtitle_response(
     options = clean_options or CleanOptions()
     if options.fix_encoding:
         sub_bytes = fix_subtitle_encoding_bytes(sub_bytes)
+
+    # ASS/SSA -> color-preserved SRT (per user). Convert up-front so every later
+    # pass operates on SRT; RTL is handled by the pipeline's normal RTL step.
+    converted_from_ass = False
+    if convert_ass and (is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa")):
+        sub_bytes = convert_ass_to_srt_bytes(sub_bytes, apply_rtl=False)
+        req_format = "srt"
+        converted_from_ass = True
+
     if strip_hi:
         sub_bytes = strip_hi_artifacts_bytes(sub_bytes)
     if enable_ad_removal:
@@ -918,8 +930,8 @@ def _build_subtitle_response(
     if eastern_arabic_numerals:
         sub_bytes = convert_eastern_arabic_numerals_bytes(sub_bytes)
 
-    # 1. Native ASS / SSA detection
-    if is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa"):
+    # 1. Native ASS / SSA detection (raw passthrough only when conversion is off)
+    if (not converted_from_ass) and (is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa")):
         ext = "ssa" if req_format == "ssa" else "ass"
         return Response(
             content=sub_bytes,
@@ -977,6 +989,7 @@ async def _serve_subtitle_handler(
     strip_hi_enabled = False
     eastern_numerals_enabled = False
     strip_diacritics_enabled = False
+    convert_ass_enabled = True
     if config_str:
         try:
             cfg_prefs = parse_user_config(config_str)
@@ -987,6 +1000,7 @@ async def _serve_subtitle_handler(
             strip_hi_enabled = cfg_prefs.strip_hi
             eastern_numerals_enabled = cfg_prefs.eastern_arabic_numerals
             strip_diacritics_enabled = cfg_prefs.strip_diacritics
+            convert_ass_enabled = cfg_prefs.convert_ass_to_srt
         except Exception:
             rtl_fix_enabled = True
             ad_removal_enabled = True
@@ -995,6 +1009,7 @@ async def _serve_subtitle_handler(
             strip_hi_enabled = False
             eastern_numerals_enabled = False
             strip_diacritics_enabled = False
+            convert_ass_enabled = True
 
     # URL-decode incoming sub_id in case player encoded spaces/brackets (%5B...%5D)
     clean_sub_id = urllib.parse.unquote(sub_id).strip()
@@ -1039,6 +1054,7 @@ async def _serve_subtitle_handler(
             strip_hi_enabled,
             eastern_numerals_enabled,
             strip_diacritics_enabled,
+            convert_ass_enabled,
         )
 
     # 2. Cache miss: retrieve metadata for on-demand fetch
@@ -1125,6 +1141,7 @@ async def _serve_subtitle_handler(
                     strip_hi_enabled,
                     eastern_numerals_enabled,
                     strip_diacritics_enabled,
+                    convert_ass_enabled,
                 )
 
         raise HTTPException(
@@ -1164,6 +1181,7 @@ async def _serve_subtitle_handler(
         strip_hi_enabled,
         eastern_numerals_enabled,
         strip_diacritics_enabled,
+        convert_ass_enabled,
     )
 
 
@@ -1192,6 +1210,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
     strip_hi_enabled = False
     eastern_numerals_enabled = False
     strip_diacritics_enabled = False
+    convert_ass_enabled = True
     if config:
         try:
             cfg_prefs = parse_user_config(config)
@@ -1202,6 +1221,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             strip_hi_enabled = cfg_prefs.strip_hi
             eastern_numerals_enabled = cfg_prefs.eastern_arabic_numerals
             strip_diacritics_enabled = cfg_prefs.strip_diacritics
+            convert_ass_enabled = cfg_prefs.convert_ass_to_srt
         except Exception:
             rtl_fix_enabled = True
             ad_removal_enabled = True
@@ -1210,6 +1230,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             strip_hi_enabled = False
             eastern_numerals_enabled = False
             strip_diacritics_enabled = False
+            convert_ass_enabled = True
     else:
         if "enable_rtl_fix" in request.query_params:
             rtl_fix_enabled = request.query_params.get("enable_rtl_fix", "1").lower() not in (
@@ -1239,6 +1260,10 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             strip_diacritics_enabled = request.query_params.get(
                 "strip_diacritics", "0"
             ).lower() not in ("0", "false", "no")
+        if "convert_ass_to_srt" in request.query_params:
+            convert_ass_enabled = request.query_params.get(
+                "convert_ass_to_srt", "1"
+            ).lower() not in ("0", "false", "no")
         clean_options = _clean_options_from_query(request.query_params)
 
     # 1. Check local disk cache first
@@ -1257,6 +1282,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             strip_hi_enabled,
             eastern_numerals_enabled,
             strip_diacritics_enabled,
+            convert_ass_enabled,
         )
 
     # 2. Extract keys
@@ -1316,6 +1342,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
                     strip_hi_enabled,
                     eastern_numerals_enabled,
                     strip_diacritics_enabled,
+                    convert_ass_enabled,
                 )
             else:
                 logger.warning(
@@ -1364,6 +1391,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
                 strip_hi_enabled,
                 eastern_numerals_enabled,
                 strip_diacritics_enabled,
+                convert_ass_enabled,
             )
 
     raise HTTPException(status_code=404, detail="Subtitle link expired or limit reached")

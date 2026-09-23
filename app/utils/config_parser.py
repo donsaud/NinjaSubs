@@ -46,6 +46,7 @@ def encode_user_config(
     strip_hi: bool = False,
     eastern_arabic_numerals: bool = False,
     strip_diacritics: bool = False,
+    convert_ass_to_srt: bool = True,
 ) -> str:
     """
     Encode user configuration into a URL-safe base64 string matching community addons.
@@ -107,6 +108,8 @@ def encode_user_config(
         payload["eastern_arabic_numerals"] = True
     if strip_diacritics:
         payload["strip_diacritics"] = True
+    if convert_ass_to_srt is False:
+        payload["convert_ass_to_srt"] = False
 
     if badge_parts is not None:
         resolved_parts = normalize_badge_parts(badge_parts)
@@ -158,6 +161,7 @@ def parse_user_config(
     strip_hi: bool = False
     eastern_arabic_numerals: bool = False
     strip_diacritics: bool = False
+    convert_ass_to_srt: bool = True
 
     def _as_bool(value: Any, default: bool = True) -> bool:
         if value is None:
@@ -296,6 +300,11 @@ def parse_user_config(
                         data.get("strip_diacritics", data.get("stripDiacritics")),
                         False,
                     )
+                if "convert_ass_to_srt" in data or "convertAssToSrt" in data:
+                    convert_ass_to_srt = _as_bool(
+                        data.get("convert_ass_to_srt", data.get("convertAssToSrt")),
+                        True,
+                    )
         except Exception as e:
             logger.debug(f"Base64 JSON decode skipped for config string: {e}")
 
@@ -389,6 +398,10 @@ def parse_user_config(
                     )
                 if "strip_diacritics" in parsed_qs:
                     strip_diacritics = _as_bool(parsed_qs["strip_diacritics"][0], False)
+                if "convert_ass_to_srt" in parsed_qs:
+                    convert_ass_to_srt = _as_bool(
+                        parsed_qs["convert_ass_to_srt"][0], True
+                    )
             except Exception:
                 pass
 
@@ -475,4 +488,5 @@ def parse_user_config(
         strip_hi=strip_hi,
         eastern_arabic_numerals=eastern_arabic_numerals,
         strip_diacritics=strip_diacritics,
+        convert_ass_to_srt=convert_ass_to_srt,
     )
