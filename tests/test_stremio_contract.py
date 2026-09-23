@@ -40,7 +40,7 @@ def test_manifest_schema_and_cors(client):
     assert "anime" in data["types"]
     assert "tt" in data["idPrefixes"]
     assert "kitsu" in data["idPrefixes"]
-    assert "logo" in data and data["logo"].endswith("/static/logo.png")
+    assert "logo" in data and data["logo"].endswith("/static/icon.png")
     assert "icon" in data and data["icon"].endswith("/static/icon.png")
 
     # Test HEAD request (Nuvio ping compatibility)
@@ -468,7 +468,7 @@ def test_configured_manifest_endpoint(client):
     assert data["description"] == (
         "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
     )
-    assert "logo" in data and data["logo"].endswith("/static/logo.png")
+    assert "logo" in data and data["logo"].endswith("/static/icon.png")
     assert "icon" in data and data["icon"].endswith("/static/icon.png")
 
 
@@ -483,7 +483,7 @@ def test_parameterized_dummy_token_manifest_endpoint(client):
     assert data["description"] == (
         "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
     )
-    assert "logo" in data and data["logo"].endswith("/static/logo.png")
+    assert "logo" in data and data["logo"].endswith("/static/icon.png")
     assert "icon" in data and data["icon"].endswith("/static/icon.png")
 
     # Test HEAD request on parameterized route
