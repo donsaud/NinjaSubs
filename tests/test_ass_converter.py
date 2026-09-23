@@ -121,3 +121,63 @@ def test_pipeline_converts_ass_when_enabled_and_raw_when_disabled():
     )
     assert disabled.media_type.startswith("text/x-ssa")
     assert "Dialogue:" in disabled.body.decode("utf-8")
+
+
+
+ASS_E2E = (
+    "[Script Info]\n"
+    "Title: E2E\n"
+    "ScriptType: v4.00+\n\n"
+    "[V4+ Styles]\n"
+    "Format: Name, Fontname, Fontsize, PrimaryColour\n"
+    "Style: Default,Arial,20,&H00CCFF\n\n"
+    "[Events]\n"
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\c&H00CCFF&}"
+    "\u0646\u0639\u0645 , \u0644\u062f\u064a 3 \u0623\u064a\u0627\u0645\n"
+)
+
+
+def test_e2e_ass_converted_then_all_preferences_applied():
+    """ASS -> SRT then the full SRT pipeline (RTL, commas, numerals, colors)."""
+    from app.main import _build_subtitle_response
+    from app.utils.cleaners import CleanOptions
+
+    out = _build_subtitle_response(
+        ASS_E2E.encode("utf-8"),
+        "movie.ass",
+        "ass",
+        convert_ass=True,
+        clean_options=CleanOptions(clean_commas=True),
+        enable_rtl_fix=True,
+        strip_diacritics=True,
+        eastern_arabic_numerals=True,
+    )
+    body = out.body.decode("utf-8")
+    assert out.media_type.startswith("application/x-subrip")
+    # Color preserved (ASS BGR &H00CCFF -> #FFCC00) and hex attributes untouched.
+    assert '<font color="#FFCC00">' in body
+    # Arabic comma normalization.
+    assert "\u0646\u0639\u0645\u060c" in body
+    # Western -> Eastern Arabic numerals.
+    assert "\u0663" in body and "3 " not in body
+    # RTL anchoring.
+    assert "\u200f" in body
+
+
+def test_e2e_ass_color_stripping_removes_generated_font_tags():
+    from app.main import _build_subtitle_response
+    from app.utils.cleaners import CleanOptions
+
+    out = _build_subtitle_response(
+        ASS_E2E.encode("utf-8"),
+        "movie.ass",
+        "ass",
+        convert_ass=True,
+        clean_options=CleanOptions(strip_colors=True),
+        eastern_arabic_numerals=True,
+    )
+    body = out.body.decode("utf-8")
+    assert "<font" not in body
+    assert "#FFCC00" not in body
+    assert "\u0663" in body  # numerals still applied after color stripping
