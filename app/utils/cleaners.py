@@ -123,7 +123,7 @@ _TIMESTAMP_LINE_REGEX = re.compile(
 _MAX_OVERLAP_MS = 500
 
 # Color stripping (opt-in): ASS override commands, <font ...> tags, WebVTT classes.
-_ASS_COLOR_TAG_REGEX = re.compile(r"\{\\[1-4]?[cC](?:&H[0-9A-Fa-f]+&)?\}")
+_ASS_COLOR_TAG_REGEX = re.compile(r"\{[\\](?:[1-4]?[cC](?:&[hH][0-9A-Fa-f]+&?)?|r[A-Za-z0-9_]*)\}")
 _FONT_TAG_REGEX = re.compile(r"(?i)</?font\b[^>]*>")
 _VTT_CLASS_TAG_REGEX = re.compile(r"(?i)</?c(?:\.[A-Za-z0-9_-]+)*>")
 _VTT_VOICE_TAG_REGEX = re.compile(r"(?i)</?v(?:\.[A-Za-z0-9_-]+)*>")
