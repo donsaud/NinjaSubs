@@ -140,7 +140,9 @@ def _build_manifest(config_str: str | None = None, request: Request | None = Non
 
     base_url = get_base_url(request)
     icon_url = f"{base_url}/static/icon.png"
-    logo_url = f"{base_url}/static/logo.png"
+    # Square "N" brand icon for the Stremio catalog; the wide banner
+    # (logo.png) is only used for the configure.html header.
+    logo_url = f"{base_url}/static/icon.png"
 
     return Manifest(
         id="org.ninjasubs.addon",
