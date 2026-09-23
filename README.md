@@ -117,6 +117,12 @@ Customizes how subtitle tracks appear inside the Stremio player interface, allow
 * **Release Name** — Displays the original video release tag (e.g. `WEB-DL-FLUX`).
 * **Translator Credit (`(by 'username')`)** — Displays the subtitle author or translator.
 
+<details>
+<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<br>
+<img src="docs/screenshots/subtitle-badge-preview.png" alt="Subtitle Badge Preview" width="100%" />
+</details>
+
 ### Arabic Language Engine
 
 All Arabic processing is applied at **serve time** (per user) and is fully toggleable:
@@ -283,6 +289,12 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 * **وسم المصدر (`[SubDL]`)** — يوضح الموقع أو المزود الذي تم جلب ملف الترجمة منه.
 * **اسم النسخة (Release Name)** — يوضح وسم نسخة الفيديو الأصلية (مثل `WEB-DL-FLUX`).
 * **حقوق المترجم (`(by 'username')`)** — تعرض اسم المترجم أو رافع ملف الترجمة الأصلي.
+
+<details>
+<summary>🔍 <b>عرض لقطة الشاشة التوضيحية</b></summary>
+<br>
+<img src="docs/screenshots/subtitle-badge-preview.png" alt="معاينة شارة الترجمة" width="100%" />
+</details>
 
 ### محرّك اللغة العربية
 
