@@ -76,6 +76,14 @@ _TRANSLATOR_TRIGGER_AT_END_REGEX = re.compile(
     _TRANSLATOR_TRIGGER_CORE + r"\s*[:\u061b\uff1a\-_\u2013\u2014]*\s*$",
     re.IGNORECASE,
 )
+# Separator run between co-translator handles in a credit list:
+# whitespace, commas (Latin/Arabic), slashes, ampersands, plus signs,
+# Arabic "و" or English "and" (e.g. "@a, @b", "@a & @b", "@a و @b",
+# "@a and @b"). Anchored at the end of the preceding context.
+_HANDLE_CHAIN_SEPARATOR_AT_END_REGEX = re.compile(
+    r"(?:[\s,،;/&+]|\s*و\s*|(?<!\w)and(?!\w)\s*)+$",
+    re.IGNORECASE,
+)
 _HANDLE_TOKEN_REGEX = re.compile(r"@\w+", re.IGNORECASE)
 
 # Promotional tokens stripped from a credit line (URLs, domains, handles, sites).
@@ -370,13 +378,14 @@ def _has_credit(text: str) -> bool:
 
 
 def _translator_protected_handle_spans(line: str) -> list[tuple[int, int]]:
-    """Spans of ``@handle`` tokens directly following a translator trigger.
+    """    Spans of ``@handle`` tokens directly following a translator trigger.
 
     Only handles whose preceding text on the line ends with an attribution
     trigger (plus optional colon/dash/spaces) are protected, so
     ``Translated by: @D700mka`` keeps its handle while
-    ``... @D700mka Follow @spammer`` still loses ``@spammer``. Chained lists
-    (``ترجمة: @a, @b``) protect each subsequent handle too.
+    ``... @D700mka Follow @spammer`` still loses ``@spammer``. Chained
+    co-translator lists (``ترجمة: @a, @b``, ``@a & @b``, ``@a و @b``,
+    ``@a and @b``) protect each subsequent handle too.
     """
     spans: list[tuple[int, int]] = []
     for match in _HANDLE_TOKEN_REGEX.finditer(line):
@@ -385,15 +394,17 @@ def _translator_protected_handle_spans(line: str) -> list[tuple[int, int]]:
             spans.append(match.span())
             continue
         if spans:
-            # Allow handle lists separated by spaces/commas after the trigger.
-            tail = re.sub(r"[\s,،;&+]+$", "", context)
+            # Strip one trailing separator run, then require the remainder
+            # to end with an already-protected handle (recursive chains work
+            # because each link leaves a separator-terminated prefix).
+            core = _HANDLE_CHAIN_SEPARATOR_AT_END_REGEX.sub("", context)
             for start, end in reversed(spans):
-                if not tail.endswith(line[start:end]):
+                if not core.endswith(line[start:end]):
                     continue
-                before = tail[: -len(line[start:end])]
+                before = core[: -len(line[start:end])]
                 if _TRANSLATOR_TRIGGER_AT_END_REGEX.search(
                     before
-                ) or re.search(r"[\s,،;&+]+$", before):
+                ) or _HANDLE_CHAIN_SEPARATOR_AT_END_REGEX.search(before):
                     spans.append(match.span())
                 break
     return spans
@@ -408,9 +419,10 @@ def _strip_promotional_tokens(line: str) -> str:
     """
     cleaned = line
     placeholders: dict[str, str] = {}
-    for index, (start, end) in enumerate(
-        _translator_protected_handle_spans(cleaned)
-    ):
+    spans = _translator_protected_handle_spans(cleaned)
+    # Replace from the end so earlier spans stay valid.
+    for reversed_index, (start, end) in enumerate(reversed(spans)):
+        index = len(spans) - 1 - reversed_index
         handle = cleaned[start:end]
         token = f"\x00TRHANDLE{index}\x00"
         placeholders[token] = handle
