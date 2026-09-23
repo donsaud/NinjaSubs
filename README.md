@@ -44,7 +44,7 @@ Every setting below is an independent, opt-in preference available in the [confi
 #### Arabic Language Engine
 All Arabic processing is applied at **serve time** (per user) and is fully toggleable:
 
-* **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods (`مرحبا. -` → `- مرحبا.`)
+* **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods.
 
 <details id="screenshots">
 <summary>🔍 <b>View Screenshot</b></summary>
@@ -52,7 +52,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra <bdi dir="ltr">(`أَنْتِ، لَكِ، عُلِّمْتِ` → `أنتِ، لكِ، علّمتِ`)</bdi>
+* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra.
 
 <details>
 <summary>🔍 <b>View Screenshot</b></summary>
@@ -60,7 +60,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <img src="docs/screenshots/tashkeel-removal.png" alt="Strip Arabic diacritics (Tashkeel)" width="100%" />
 </details>
 
-* **Normalize Arabic commas** — Converts Latin commas in Arabic text to Arabic commas (`نعم , لا` → `نعم، لا`)
+* **Normalize Arabic commas** — Converts Latin commas in Arabic text to Arabic commas.
 
 <details>
 <summary>🔍 <b>View Screenshot</b></summary>
@@ -68,7 +68,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
 </details>
 
-* **Convert numbers to Eastern Arabic** — Converts Western digits to Eastern Arabic numerals in Arabic dialogue (`قبل 3 أيام` → `قبل ٣ أيام`)
+* **Convert numbers to Eastern Arabic** — Converts Western digits to Eastern Arabic numerals in Arabic dialogue.
 
 <details>
 <summary>🔍 <b>View Screenshot</b></summary>
@@ -127,10 +127,10 @@ Customizes how subtitle tracks appear inside the Stremio player interface, allow
 
 All Arabic processing is applied at **serve time** (per user) and is fully toggleable:
 
-- **RTL punctuation & BiDi alignment** — appends a Right-to-Left Mark (RLM, `U+200F`) after trailing neutral punctuation so sentence-ending marks stay on the left; repairs legacy "reverse RTL" hacks and mirrored brackets/quotes, and fixes pre-reversed dialogue dashes (`"نص -" → "- نص."`).
+- **RTL punctuation & BiDi alignment** — appends a Right-to-Left Mark (RLM, `U+200F`) after trailing neutral punctuation so sentence-ending marks stay on the left; repairs legacy "reverse RTL" hacks and mirrored brackets/quotes, and fixes pre-reversed dialogue dashes.
 - **Clean syntax & formatting** — independent toggles for tag repair, spacing, symbols (`-- → ...`), Latin→Arabic commas, unsafe/unclosed HTML `tags`, and display-timing overlap clamping (< 500 ms).
-- **Strip Arabic diacritics (Tashkeel)** — removes Harakat while keeping **Shadda**, **all Tanween types**, and the **feminine Kasra** (`أنتِ`, `لكِ`, `علّمتِ`).
-- **Convert to Eastern Arabic numerals** — `3 أيام` → `٣ أيام`, while protecting tags, timestamps and Latin/alphanumeric tokens (`AK-47`, `MP4`, `Windows 11`).
+- **Strip Arabic diacritics (Tashkeel)** — removes Harakat while keeping Shadda, all Tanween types, and the feminine Kasra.
+- **Convert to Eastern Arabic numerals** — (1, 2, 3) to (١، ٢، ٣), while protecting tags, timestamps and Latin/alphanumeric tokens (AK-47, MP4, Windows 11).
 - **Strip in-dialogue HI labels** — removes `[MUSIC]`, `(SIGHS)`, `JOHN:` artifacts while keeping dialogue.
 - **Encoding safety** — transcodes CP1256 / ISO-8859-6 to clean UTF-8.
 
