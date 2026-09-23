@@ -52,7 +52,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra (`أَنْتِ، لَكِ، عُلِّمْتِ → أنتِ، لكِ، علّمتِ`)
+* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra <bdi dir="ltr">(`أَنْتِ، لَكِ، عُلِّمْتِ` → `أنتِ، لكِ، علّمتِ`)</bdi>
 
 <details>
 <summary>🔍 <b>View Screenshot</b></summary>
