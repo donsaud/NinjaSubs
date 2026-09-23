@@ -183,6 +183,8 @@ class UserPreferences(BaseModel):
     eastern_arabic_numerals: bool = False
     # Strip Arabic diacritics (keeping Shadda) from Arabic dialogue
     strip_diacritics: bool = False
+    # Convert ASS/SSA subtitles to color-preserved SRT for playback stability
+    convert_ass_to_srt: bool = True
     # Subtitle badge components to display (order-independent; canonical order applied):
     #   "score"    -> "[100%]"
     #   "provider" -> "[SubDL]"

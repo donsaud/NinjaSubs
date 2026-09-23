@@ -289,6 +289,7 @@ async def aggregate_subtitles(
             getattr(prefs, "eastern_arabic_numerals", False)
         ),
         strip_diacritics=bool(getattr(prefs, "strip_diacritics", False)),
+        convert_ass_to_srt=bool(getattr(prefs, "convert_ass_to_srt", True)),
     )
 
     if use_cache:

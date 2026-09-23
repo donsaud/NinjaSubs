@@ -49,6 +49,7 @@ def build_cache_key(
     strip_hi: bool = False,
     eastern_arabic_numerals: bool = False,
     strip_diacritics: bool = False,
+    convert_ass_to_srt: bool = True,
     **kwargs,
 ) -> str:
     """
@@ -115,6 +116,7 @@ def build_cache_key(
         "1" if strip_hi else "0",
         "1" if eastern_arabic_numerals else "0",
         "1" if strip_diacritics else "0",
+        "1" if convert_ass_to_srt else "0",
     ]
     raw_key = ":".join(parts)
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()

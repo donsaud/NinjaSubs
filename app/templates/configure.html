@@ -1051,6 +1051,17 @@
                         </label>
                     </div>
 
+                    <div id="convertAssRow" class="pref-row">
+                        <div class="min-w-0">
+                            <label for="convertAssToSrt" class="pref-label">Convert ASS/SSA subtitles to SRT</label>
+                            <p class="pref-desc">Enhances playback stability on Android TV and Nuvio by converting ASS/SSA to SRT while retaining primary text colors and fixing Arabic RTL alignment.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="convertAssToSrt" checked class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
+
                     <!-- Section C: Dialogue & Clean-up -->
                     <div class="pref-group-label">Dialogue &amp; Clean-up</div>
 
@@ -1550,6 +1561,10 @@
             ) {
                 easternNumeralsToggle.checked = initialPrefs.eastern_arabic_numerals;
             }
+            const convertAssToggle = document.getElementById("convertAssToSrt");
+            if (convertAssToggle && typeof initialPrefs.convert_ass_to_srt === "boolean") {
+                convertAssToggle.checked = initialPrefs.convert_ass_to_srt;
+            }
             const stripDiacriticsToggle = document.getElementById("stripDiacritics");
             if (
                 stripDiacriticsToggle &&
@@ -1740,6 +1755,11 @@
                 : false;
             if (stripDiacriticsEnabled) configObj.strip_diacritics = true;
 
+            const convertAssToggle = document.getElementById("convertAssToSrt");
+            const convertAssEnabled = convertAssToggle ? convertAssToggle.checked : true;
+            // Default is on: serialize only when the user disables it.
+            if (!convertAssEnabled) configObj.convert_ass_to_srt = false;
+
             const stripHiToggle = document.getElementById("stripHiLabels");
             const stripHiEnabled = stripHiToggle ? stripHiToggle.checked : false;
             // Standalone preference, independent of HI track exclusion.
@@ -1760,7 +1780,7 @@
                 !yifyEnabled || !catEnabled || !rtlEnabled || !adEnabled ||
                 !creditsEnabled || cleanFlagsNonDefault ||
                 easternNumeralsEnabled || stripDiacriticsEnabled ||
-                stripHiEnabled ||
+                stripHiEnabled || !convertAssEnabled ||
                 !subdlEnabled || !subsourceEnabled || !opensubtitlesEnabled;
 
             if (!hasAnyPreference) {
@@ -2114,6 +2134,7 @@
             "cleanTiming",
             "easternArabicNumerals",
             "stripDiacritics",
+            "convertAssToSrt",
             "stripHiLabels",
         ].forEach((id) => {
             const el = document.getElementById(id);

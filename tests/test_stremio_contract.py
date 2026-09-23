@@ -31,7 +31,7 @@ def test_manifest_schema_and_cors(client):
     assert data["id"] == "org.ninjasubs.addon"
     assert data["name"] == "NinjaSubs"
     assert data["description"] == (
-        "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
+        "Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization."
     )
     assert data["version"] == "1.0.0"
     assert data["resources"] == ["subtitles"]
@@ -266,9 +266,11 @@ async def test_serve_subtitle_endpoint(client):
 @pytest.mark.asyncio
 async def test_serve_ass_subtitle_endpoint(client):
     """
-    Assert /sub/{sub_id}.ass serves native ASS content with text/x-ssa; charset=utf-8
-    and does not convert or corrupt formatting, styles, or tags.
+    With the default ``convert_ass_to_srt`` preference, .ass/.ssa files are
+    converted to color-preserved SRT; disabling the toggle serves raw ASS.
     """
+    from app.utils.config_parser import encode_user_config
+
     sub_id = "test_anime_sub_456"
     ass_text = (
         "[Script Info]\n"
@@ -283,29 +285,28 @@ async def test_serve_ass_subtitle_endpoint(client):
     )
     await cache_manager.save_subtitle(sub_id, ass_text.encode("utf-8"))
 
-    # 1. Requesting via .ass route
+    # 1. Default preference: converted to color-preserved SRT.
     resp = client.get(f"/sub/{sub_id}.ass")
     assert resp.status_code == 200
-    assert "text/x-ssa" in resp.headers.get("content-type", "")
-    assert "charset=utf-8" in resp.headers.get("content-type", "").lower()
+    assert "application/x-subrip" in resp.headers.get("content-type", "")
     assert "public, max-age=86400" in resp.headers.get("cache-control", "")
-    assert 'filename="test_anime_sub_456.ass"' in resp.headers.get("content-disposition", "")
-    assert resp.text == ass_text
-    assert "{\\pos(192,200)\\c&H0000FF&}" in resp.text
+    assert 'filename="test_anime_sub_456.srt"' in resp.headers.get("content-disposition", "")
+    assert "00:00:01,000 --> 00:00:03,500" in resp.text
+    assert '<font color="#FF0000">ترجمة أنمي احترافية</font>' in resp.text
+    assert "\\pos" not in resp.text and "Dialogue:" not in resp.text
 
-    # 2. Requesting via /{config}/sub/{sub_id}.ass route
-    user_cfg = "eJw1y0EKgCAURNHd_P9fE7QpU5pUIIi2EUb3ntDa3uLwIeAIEZ3JzB5q7gW1316b0i3I0oY66A21Uq_B3nOq201Q-c1W4dI4kYg_YjAhgA=="
-    resp_cfg = client.get(f"/{user_cfg}/sub/{sub_id}.ass")
+    # 2. Explicitly disabled: serve the original ASS untouched.
+    raw_cfg = encode_user_config(convert_ass_to_srt=False)
+    resp_cfg = client.get(f"/{raw_cfg}/sub/{sub_id}.ass")
     assert resp_cfg.status_code == 200
     assert "text/x-ssa" in resp_cfg.headers.get("content-type", "")
     assert resp_cfg.text == ass_text
 
-    # 3. If an ASS sub is requested with .srt extension, our server detects ASS format
-    # and safely preserves it as text/x-ssa without mangling tags into SRT
+    # 3. Requesting an ASS sub via the .srt route also converts to SRT.
     resp_srt = client.get(f"/sub/{sub_id}.srt")
     assert resp_srt.status_code == 200
-    assert "text/x-ssa" in resp_srt.headers.get("content-type", "")
-    assert "[Script Info]" in resp_srt.text
+    assert "application/x-subrip" in resp_srt.headers.get("content-type", "")
+    assert "[Script Info]" not in resp_srt.text
 
 
 @pytest.mark.asyncio
@@ -466,7 +467,7 @@ def test_configured_manifest_endpoint(client):
     assert data["id"] == "org.ninjasubs.addon"
     assert data["name"] == "NinjaSubs"
     assert data["description"] == (
-        "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
+        "Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization."
     )
     assert "logo" in data and data["logo"].endswith("/static/icon.png")
     assert "icon" in data and data["icon"].endswith("/static/icon.png")
@@ -481,7 +482,7 @@ def test_parameterized_dummy_token_manifest_endpoint(client):
     assert data["id"] == "org.ninjasubs.addon"
     assert data["name"] == "NinjaSubs"
     assert data["description"] == (
-        "Smart, high-accuracy subtitle aggregator from multiple sources for Stremio."
+        "Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization."
     )
     assert "logo" in data and data["logo"].endswith("/static/icon.png")
     assert "icon" in data and data["icon"].endswith("/static/icon.png")
