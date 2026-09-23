@@ -40,9 +40,43 @@ _AD_PATTERNS: tuple[re.Pattern[str], ...] = (
 _CREDIT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"ترجمة"),
     re.compile(r"تعريب"),
+    re.compile(r"تعديل التوقيت"),
+    re.compile(r"ضبط التوقيت"),
+    re.compile(r"تقديم"),
+    re.compile(r"دمج"),
+    re.compile(r"إعداد"),
     re.compile(r"translated\s+by", re.IGNORECASE),
+    re.compile(r"translation\s+by", re.IGNORECASE),
+    re.compile(r"synced\s+by", re.IGNORECASE),
+    re.compile(r"timed\s+by", re.IGNORECASE),
     re.compile(r"subtitles?\s+by", re.IGNORECASE),
 )
+
+# Translator-attribution triggers after which a social handle (@username) is a
+# credit, not spam. A handle is protected only when it DIRECTLY follows a
+# trigger (tolerating colons/dashes/spaces, EN case-insensitive), e.g.
+# "Translated by: @D700mka", "ترجمة: @D700mka", "تعديل التوقيت: @D700mka".
+# Standalone promo handles ("Follow @x", "Join @x", "@promo") never match.
+_TRANSLATOR_TRIGGER_CORE = (
+    r"(?:"
+    r"translated\s+by"
+    r"|translation\s+by"
+    r"|synced\s+by"
+    r"|timed\s+by"
+    r"|subtitles?\s+by"
+    r"|ترجمة"
+    r"|تعديل التوقيت"
+    r"|ضبط التوقيت"
+    r"|تقديم"
+    r"|دمج"
+    r"|إعداد"
+    r")"
+)
+_TRANSLATOR_TRIGGER_AT_END_REGEX = re.compile(
+    _TRANSLATOR_TRIGGER_CORE + r"\s*[:\u061b\uff1a\-_\u2013\u2014]*\s*$",
+    re.IGNORECASE,
+)
+_HANDLE_TOKEN_REGEX = re.compile(r"@\w+", re.IGNORECASE)
 
 # Promotional tokens stripped from a credit line (URLs, domains, handles, sites).
 _AD_TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -335,11 +369,56 @@ def _has_credit(text: str) -> bool:
     return any(pattern.search(text) for pattern in _CREDIT_PATTERNS)
 
 
+def _translator_protected_handle_spans(line: str) -> list[tuple[int, int]]:
+    """Spans of ``@handle`` tokens directly following a translator trigger.
+
+    Only handles whose preceding text on the line ends with an attribution
+    trigger (plus optional colon/dash/spaces) are protected, so
+    ``Translated by: @D700mka`` keeps its handle while
+    ``... @D700mka Follow @spammer`` still loses ``@spammer``. Chained lists
+    (``ترجمة: @a, @b``) protect each subsequent handle too.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in _HANDLE_TOKEN_REGEX.finditer(line):
+        context = line[: match.start()]
+        if _TRANSLATOR_TRIGGER_AT_END_REGEX.search(context):
+            spans.append(match.span())
+            continue
+        if spans:
+            # Allow handle lists separated by spaces/commas after the trigger.
+            tail = re.sub(r"[\s,،;&+]+$", "", context)
+            for start, end in reversed(spans):
+                if not tail.endswith(line[start:end]):
+                    continue
+                before = tail[: -len(line[start:end])]
+                if _TRANSLATOR_TRIGGER_AT_END_REGEX.search(
+                    before
+                ) or re.search(r"[\s,،;&+]+$", before):
+                    spans.append(match.span())
+                break
+    return spans
+
+
 def _strip_promotional_tokens(line: str) -> str:
-    """Remove URLs/domains/handles from a line while keeping the credit text."""
+    """Remove URLs/domains/handles from a line while keeping the credit text.
+
+    Handles directly following a translator-attribution trigger are shielded
+    behind placeholders so ``ترجمة: @D700mka`` survives while standalone
+    promo handles and ad links are still stripped.
+    """
     cleaned = line
+    placeholders: dict[str, str] = {}
+    for index, (start, end) in enumerate(
+        _translator_protected_handle_spans(cleaned)
+    ):
+        handle = cleaned[start:end]
+        token = f"\x00TRHANDLE{index}\x00"
+        placeholders[token] = handle
+        cleaned = cleaned[:start] + token + cleaned[end:]
     for pattern in _AD_TOKEN_PATTERNS:
         cleaned = pattern.sub(" ", cleaned)
+    for token, handle in placeholders.items():
+        cleaned = cleaned.replace(token, handle)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = _EDGE_SEPARATORS_REGEX.sub("", cleaned)
     return cleaned.strip()
