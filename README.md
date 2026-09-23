@@ -22,7 +22,7 @@ A lightweight, self-hosted [Stremio](https://stremio.com) subtitle addon built w
 ### Highlights
 
 - **Multi-provider aggregation** — SubDL, SubSource, OpenSubtitles, YIFYSubtitles and SubtitleCat queried in parallel (`asyncio.gather`) with per-provider timeouts and resilient fallback.
-- **Arabic Language Engine** — context-aware RTL alignment, reversal repair, optional Tashkeel (diacritics) removal, Eastern-Arabic numerals and in-dialogue HI cleanup.
+- **Arabic Subtitle Optimization** — context-aware RTL alignment, reversal repair, optional Tashkeel (diacritics) removal, Eastern-Arabic numerals and in-dialogue HI cleanup.
 - **Stateless, per-user configuration** — every preference and API key is serialized into a URL-safe Base64 token embedded in the manifest URL; nothing is stored server-side.
 - **Informative match badges** — compose the subtitle label from match score, provider, release filename and uploader.
 - **Low footprint** — in-memory ZIP extraction (Zip Slip protected), LRU disk cache, and strict memory limits.
@@ -41,7 +41,7 @@ A lightweight, self-hosted [Stremio](https://stremio.com) subtitle addon built w
 
 Every setting below is an independent, opt-in preference available in the [configuration UI](#configuration-ui). Choices are serialized into the stateless manifest token and included in the cache key, so toggling one never serves stale subtitles.
 
-#### Arabic Language Engine
+#### Arabic Subtitle Optimization
 All Arabic processing is applied at **serve time** (per user) and is fully toggleable:
 
 * **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods.
@@ -123,7 +123,7 @@ Customizes how subtitle tracks appear inside the Stremio or Nuvio player interfa
 <img src="docs/screenshots/subtitle-badge-preview.png" alt="Subtitle Badge Preview" width="100%" />
 </details>
 
-### Arabic Language Engine
+### Arabic Subtitle Optimization
 
 All Arabic processing is applied at **serve time** (per user) and is fully toggleable:
 
@@ -197,7 +197,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 ### أبرز المزايا
 
 - **تجميع من عدة مصادر** — SubDL وSubSource وOpenSubtitles وYIFYSubtitles وSubtitleCat بالتوازي (`asyncio.gather`) مع مهلة لكل مصدر واحتياطي عند الفشل.
-- **محرّك اللغة العربية** — ضبط اتجاه النص من اليمين لليسار، وإصلاح النص المعكوس، وإزالة التشكيل (اختياري)، وتحويل الأرقام إلى الأرقام العربية المشرقية، وتنظيف وسوم الصوت الوصفية.
+- **تحسين نصوص الترجمة العربية** — ضبط اتجاه النص من اليمين لليسار، وإصلاح النص المعكوس، وإزالة التشكيل (اختياري)، وتحويل الأرقام إلى الأرقام العربية المشرقية، وتنظيف وسوم الصوت الوصفية.
 - **إعدادات لكل مستخدم بدون حفظ** — تُرمّز كل الإعدادات ومفاتيح الـ API داخل رابط الـ manifest (Base64) ولا يُخزَّن شيء على الخادم.
 - **شارات مطابقة غنية** — تتكوّن من نسبة المطابقة والمصدر واسم الإصدار واسم الرافع.
 - **استهلاك منخفض** — فكّ ضغط داخل الذاكرة (مع حماية Zip Slip) وذاكرة تخزين LRU مؤقتة.
@@ -216,7 +216,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 
 كل إعداد أدناه تفضيل مستقل واختياري متاح في [واجهة الإعدادات](#واجهة-الإعدادات). تُرمّز الخيارات داخل رمز الـ manifest بدون حفظ على الخادم، وتُدرج في مفتاح الذاكرة المؤقتة، لذا لا يُقدَّم محتوى قديم عند تغيير أي إعداد.
 
-#### محرّك اللغة العربية
+#### تحسين نصوص الترجمة العربية
 تُطبَّق جميع معالجات اللغة العربية لحظيًا عند طلب الترجمة (لكل مستخدم) مع إمكانية تفعيلها أو تعطيلها بالكامل:
 
 - **ضبط الاتجاه والترقيم** — إصلاح تلقائي للترقيم والأقواس والاقتباسات المعكوسة في الترجمات العربية لمنع ظهور النقاط في غير موضعها.
@@ -296,7 +296,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/subtitle-badge-preview.png" alt="معاينة شارة الترجمة" width="100%" />
 </details>
 
-### محرّك اللغة العربية
+### تحسين نصوص الترجمة العربية
 
 تُطبَّق جميع معالجات اللغة العربية لحظيًا عند طلب الترجمة (لكل مستخدم) مع إمكانية تفعيلها أو تعطيلها بالكامل:
 
