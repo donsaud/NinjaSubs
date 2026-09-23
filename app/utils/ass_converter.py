@@ -93,38 +93,50 @@ def _ass_text_to_html(text: str, default_rgb: str | None) -> str:
 
     pieces: list[str] = []
     font_open = False
+    current_rgb: str | None = None
 
     def close_font() -> None:
-        nonlocal font_open
+        nonlocal font_open, current_rgb
         if font_open:
             pieces.append("</font>")
             font_open = False
+            current_rgb = None
 
     def open_font(rgb: str | None) -> None:
-        nonlocal font_open
-        if rgb:
-            pieces.append(f'<font color="{rgb}">')
-            font_open = True
+        nonlocal font_open, current_rgb
+        if not rgb or rgb == current_rgb:
+            return
+        if font_open:
+            pieces.append("</font>")
+        pieces.append(f'<font color="{rgb}">')
+        font_open = True
+        current_rgb = rgb
 
-    open_font(base_rgb)
+    def emit_text(segment: str) -> None:
+        if not segment:
+            return
+        if not font_open:
+            open_font(base_rgb)
+        pieces.append(segment)
 
     cursor = 0
     for match in _ASS_OVERRIDE_REGEX.finditer(text):
-        pieces.append(text[cursor : match.start()])
+        emit_text(text[cursor : match.start()])
         block = match.group(1)
 
         color_match = _ASS_PRIMARY_COLOR_REGEX.search(block)
         if color_match:
-            close_font()
-            open_font(_ass_color_to_rgb(color_match.group(1)))
+            open_font(_ass_color_to_rgb(color_match.group(1)) or base_rgb)
         elif _ASS_RESET_REGEX.search(block):
-            close_font()
-            open_font(base_rgb)
+            if base_rgb:
+                open_font(base_rgb)
+            else:
+                close_font()
         # Every other command (\pos, \an, \move, \fade, \clip, \fs, \fn, \b, \i,
         # \p, ...) is simply dropped.
         cursor = match.end()
 
-    pieces.append(text[cursor:])
+    emit_text(text[cursor:])
     close_font()
     return "".join(pieces)
 

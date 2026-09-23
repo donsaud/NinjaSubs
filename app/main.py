@@ -886,6 +886,41 @@ def _clean_options_from_query(query_params: Any) -> CleanOptions:
     return CleanOptions(**values)
 
 
+def _run_subtitle_optimization_pipeline(
+    sub_bytes: bytes,
+    *,
+    enable_rtl_fix: bool = True,
+    enable_ad_removal: bool = True,
+    keep_translator_credits: bool = True,
+    options: CleanOptions | None = None,
+    strip_hi: bool = False,
+    eastern_arabic_numerals: bool = False,
+    strip_diacritics: bool = False,
+) -> bytes:
+    """
+    Shared optimization pipeline applied to every SRT/WebVTT payload.
+
+    This is the exact same cleaning/optimization path used for native SRT files;
+    ASS/SSA inputs are converted to SRT *before* this runs, so every user
+    preference governs the converted subtitles identically.
+    """
+    options = options or CleanOptions()
+    if strip_hi:
+        sub_bytes = strip_hi_artifacts_bytes(sub_bytes)
+    if enable_ad_removal:
+        sub_bytes = strip_advertisements_bytes(sub_bytes, keep_translator_credits)
+    # Diacritics must be stripped before comma normalization / RTL fixing so those
+    # character-offset sensitive passes see the final text.
+    if strip_diacritics:
+        sub_bytes = strip_arabic_diacritics_bytes(sub_bytes)
+    sub_bytes = clean_subtitle_bytes(sub_bytes, options)
+    if enable_rtl_fix:
+        sub_bytes = fix_rtl_punctuation_bytes(sub_bytes)
+    if eastern_arabic_numerals:
+        sub_bytes = convert_eastern_arabic_numerals_bytes(sub_bytes)
+    return sub_bytes
+
+
 def _build_subtitle_response(
     sub_bytes: bytes,
     release_name: Any,
@@ -900,37 +935,32 @@ def _build_subtitle_response(
     convert_ass: bool = True,
 ) -> Response:
     """Construct HTTP response preserving exact original subtitle format (pass-through)."""
-    # Fix legacy encodings first so every later text pass sees clean UTF-8, then strip
-    # in-dialogue HI artifacts, remove advertisement cues, apply the selected syntax
-    # cleanups, and finally run the Arabic RTL normalization (punctuation/brackets/
-    # quotes + RLM). All happen at serve time.
+    # 1. Ingestion/normalization: legacy encoding first, then convert ASS/SSA into a
+    #    standard intermediate SRT so all later (SRT-only) optimizations apply.
     options = clean_options or CleanOptions()
     if options.fix_encoding:
         sub_bytes = fix_subtitle_encoding_bytes(sub_bytes)
 
-    # ASS/SSA -> color-preserved SRT (per user). Convert up-front so every later
-    # pass operates on SRT; RTL is handled by the pipeline's normal RTL step.
     converted_from_ass = False
     if convert_ass and (is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa")):
         sub_bytes = convert_ass_to_srt_bytes(sub_bytes, apply_rtl=False)
         req_format = "srt"
         converted_from_ass = True
 
-    if strip_hi:
-        sub_bytes = strip_hi_artifacts_bytes(sub_bytes)
-    if enable_ad_removal:
-        sub_bytes = strip_advertisements_bytes(sub_bytes, keep_translator_credits)
-    # Diacritics must be stripped before comma normalization / RTL fixing so those
-    # character-offset sensitive passes see the final text.
-    if strip_diacritics:
-        sub_bytes = strip_arabic_diacritics_bytes(sub_bytes)
-    sub_bytes = clean_subtitle_bytes(sub_bytes, options)
-    if enable_rtl_fix:
-        sub_bytes = fix_rtl_punctuation_bytes(sub_bytes)
-    if eastern_arabic_numerals:
-        sub_bytes = convert_eastern_arabic_numerals_bytes(sub_bytes)
+    # 2. Feed the (possibly converted) payload through the shared optimization
+    #    pipeline, governed entirely by the user's preferences.
+    sub_bytes = _run_subtitle_optimization_pipeline(
+        sub_bytes,
+        enable_rtl_fix=enable_rtl_fix,
+        enable_ad_removal=enable_ad_removal,
+        keep_translator_credits=keep_translator_credits,
+        options=options,
+        strip_hi=strip_hi,
+        eastern_arabic_numerals=eastern_arabic_numerals,
+        strip_diacritics=strip_diacritics,
+    )
 
-    # 1. Native ASS / SSA detection (raw passthrough only when conversion is off)
+    # 3. Native ASS / SSA detection (raw passthrough only when conversion is off)
     if (not converted_from_ass) and (is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa")):
         ext = "ssa" if req_format == "ssa" else "ass"
         return Response(
