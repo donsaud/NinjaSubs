@@ -52,7 +52,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra (`عُلِّمْتِ، لَكِ، أَنْتِ` → `عَلَّمْتِ، لكِ، أنتِ`)
+* **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra (`أَنْتِ، لَكِ، عُلِّمْتِ → أنتِ، لكِ، علّمتِ`)
 
 <details>
 <summary>🔍 <b>View Screenshot</b></summary>
@@ -227,7 +227,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-* **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث <span dir="rtl">(مثال: `عُلِّمْتِ، لَكِ، أَنْتِ` ← `عَلَّمْتِ، لكِ، أنتِ`)</span>
+* **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث (مثال: `أنتِ، لكِ، علّمتِ ← أَنْتِ، لَكِ، عُلِّمْتِ`)
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
