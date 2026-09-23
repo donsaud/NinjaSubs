@@ -17,7 +17,7 @@
 
 ## 🇬🇧 English
 
-A lightweight, self-hosted [Stremio](https://stremio.com) / [Nuvio](https://nuvio.tv/) subtitle addon built with **Python 3.11+**, **FastAPI**, and **Uvicorn**. It aggregates subtitles from **five providers**, unpacks archives safely in memory, and streams native subtitles with a dedicated **Arabic Language Engine** for BiDi, punctuation, diacritics and numeral normalization.
+A lightweight, self-hosted [Stremio](https://stremio.com) subtitle addon built with **Python 3.11+**, **FastAPI**, and **Uvicorn**. It aggregates subtitles from **five providers**, unpacks archives safely in memory, and streams native subtitles with a dedicated **Arabic Language Engine** for BiDi, punctuation, diacritics and numeral normalization.
 
 ### Highlights
 
@@ -110,7 +110,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 - **Fix Display Timing**: Clamps micro-overlaps (< 500ms) between consecutive cues to stop player flickering (e.g. `00:00:01,000 --> 00:00:03,000` & `00:00:02,800 --> 00:00:05,000` → clamped to `00:00:02,800`).
 
 ### Subtitle Badge Customizer
-Customizes how subtitle tracks appear inside the Stremio player interface, allowing you to toggle and reorder metadata tags to match your preference:
+Customizes how subtitle tracks appear inside the Stremio or Nuvio player interface, allowing you to toggle and reorder metadata tags to match your preference:
 
 * **Match Score (`[100%]`)** — Displays the filename matching accuracy score against the playing video stream.
 * **Provider Tag (`[SubDL]`)** — Identifies the upstream subtitle provider source.
@@ -192,7 +192,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 
 ## 🇸🇦 العربية
 
-إضافة ترجمة خفيفة وذاتية الاستضافة لـ [Stremio](https://stremio.com) و[Nuvio](https://nuvio.tv/)، مبنية بـ **Python 3.11+** و**FastAPI** و**Uvicorn**. تجمع الترجمة من **خمسة مصادر**، وتفكّ ضغط الملفات داخل الذاكرة بأمان، وتبثّ الترجمة مع **محرّك خاص باللغة العربية** لمعالجة الاتجاه (BiDi) وعلامات الترقيم والتشكيل والأرقام.
+إضافة ترجمة خفيفة وذاتية الاستضافة لـ [Stremio](https://stremio.com)، مبنية بـ **Python 3.11+** و**FastAPI** و**Uvicorn**. تجمع الترجمة من **خمسة مصادر**، وتفكّ ضغط الملفات داخل الذاكرة بأمان، وتبثّ الترجمة مع **محرّك خاص باللغة العربية** لمعالجة الاتجاه (BiDi) وعلامات الترقيم والتشكيل والأرقام.
 
 ### أبرز المزايا
 
@@ -217,7 +217,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 كل إعداد أدناه تفضيل مستقل واختياري متاح في [واجهة الإعدادات](#واجهة-الإعدادات). تُرمّز الخيارات داخل رمز الـ manifest بدون حفظ على الخادم، وتُدرج في مفتاح الذاكرة المؤقتة، لذا لا يُقدَّم محتوى قديم عند تغيير أي إعداد.
 
 #### محرّك اللغة العربية
-تُطبَّق كل معالجات اللغة العربية في **وقت التقديم** (لكل مستخدم) ويمكن تفعيلها أو تعطيلها بالكامل:
+تُطبَّق جميع معالجات اللغة العربية لحظيًا عند طلب الترجمة (لكل مستخدم) مع إمكانية تفعيلها أو تعطيلها بالكامل:
 
 - **ضبط الاتجاه والترقيم** — إصلاح تلقائي للترقيم والأقواس والاقتباسات المعكوسة في الترجمات العربية لمنع ظهور النقاط في غير موضعها.
 
@@ -227,7 +227,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-- **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث.
+- **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين والكسرة للمؤنث.
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
@@ -283,9 +283,9 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 - **ضبط توقيت العرض**: قص التداخلات الدقيقة (< 500ms) بين المقاطع المتتالية لمنع وميض الترجمة (مثال `00:00:01,000 --> 00:00:03,000` و`00:00:02,800 --> 00:00:05,000` ← تُضبط إلى `00:00:02,800`).
 
 ### تخصيص شارات الترجمة (Subtitle Badge Customizer)
-يتيح لك تخصيص مظهر مسارات الترجمة داخل مشغل Stremio، مع إمكانية إظهار أو إخفاء وإعادة ترتيب الوسوم والمعلومات حسب رغبتك:
+يتيح لك تخصيص مظهر مسارات الترجمة داخل مشغل Stremio أو Nuvio، مع إمكانية إظهار أو إخفاء وإعادة ترتيب الوسوم والمعلومات حسب رغبتك:
 
-* **نسبة التطابق (`[100%]`)** — تعرض دقة تطابق ملف الترجمة مع اسم ملف الفيديو المشغّل.
+* **نسبة التطابق (`[100%]`)** — تعرض دقة تطابق ملف الترجمة مع ملف الفيديو المشغّل.
 * **وسم المصدر (`[SubDL]`)** — يوضح الموقع أو المزود الذي تم جلب ملف الترجمة منه.
 * **اسم النسخة (Release Name)** — يوضح وسم نسخة الفيديو الأصلية (مثل `WEB-DL-FLUX`).
 * **حقوق المترجم (`(by 'username')`)** — تعرض اسم المترجم أو رافع ملف الترجمة الأصلي.
@@ -298,14 +298,13 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 
 ### محرّك اللغة العربية
 
-تُطبَّق كل معالجات اللغة العربية في **وقت التقديم** (لكل مستخدم) ويمكن تفعيلها أو تعطيلها بالكامل:
+تُطبَّق جميع معالجات اللغة العربية لحظيًا عند طلب الترجمة (لكل مستخدم) مع إمكانية تفعيلها أو تعطيلها بالكامل:
 
 - **ضبط الاتجاه والترقيم** — إضافة علامة RLM (`U+200F`) بعد علامات الترقيم النهائية، وإصلاح حيل "RTL المعكوس" القديمة والأقواس/الاقتباسات المقلوبة، وضبط شَرطات الحوار المسبقة.
 - **تنظيف الصياغة والتنسيق** — خيارات مستقلة لإصلاح الوسوم والمسافات والرموز (`-- ← ...`) والفواصل اللاتينية، ووسوم HTML غير الآمنة، وضبط تداخل التوقيت (< 500ms).
 - **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث.
 - **تحويل الأرقام إلى الأرقام العربية المشرقية** — تحويل الأرقام من (1, 2, 3) إلى (١، ٢، ٣)، مع حماية الوسوم والطوابع الزمنية والرموز اللاتينية (AK-47, MP4, Windows 11).
 - **تنظيف وسوم الصوت الوصفية** — إزالة `[MUSIC]` و`(SIGHS)` و`JOHN:` مع الإبقاء على الحوار.
-- **أمان الترميز** — تحويل CP1256 / ISO-8859-6 إلى UTF-8 نظيف.
 
 ### التشغيل السريع (Docker)
 
