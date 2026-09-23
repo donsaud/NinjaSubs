@@ -47,7 +47,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 * **Arabic RTL Alignment Fix** — Automatically fix inverted punctuation, brackets, and quotes in Arabic subtitles to prevent misplaced periods <code dir="ltr">(e.g. مرحبا. - &rarr; - مرحبا.)</code>
 
 <details id="screenshots">
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>View Screenshot</b></summary>
 <br>
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
@@ -55,7 +55,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 * **Strip Arabic diacritics (Tashkeel)** — Removes Harakat while keeping Shadda, Tanween, and feminine Kasra <code dir="ltr">(e.g. أَنتِ، لَكِ، عَلَّمتِ)</code>
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>View Screenshot</b></summary>
 <br>
 <img src="docs/screenshots/tashkeel-removal.png" alt="Strip Arabic diacritics (Tashkeel)" width="100%" />
 </details>
@@ -63,7 +63,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 * **Normalize Arabic commas** — Converts Latin commas in Arabic text to Arabic commas <code dir="ltr">(e.g. نعم , لا &rarr; نعم، لا)</code>
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>View Screenshot</b></summary>
 <br>
 <img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
 </details>
@@ -71,7 +71,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 * **Convert numbers to Eastern Arabic** — Converts Western digits to Eastern Arabic numerals in Arabic dialogue <code dir="ltr">(e.g. قبل 3 أيام &rarr; قبل ٣ أيام)</code>
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>View Screenshot</b></summary>
 <br>
 <img src="docs/screenshots/eastern-arabic-numbers.png" alt="Convert numbers to Eastern Arabic" width="100%" />
 </details>
@@ -85,7 +85,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 - **Keep Translator Credits**: Preserves translator attribution lines while cleanly dropping attached spam and links.
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>View Screenshot</b></summary>
 <br>
 
 * **Remove Ads:** [ON] — **Keep Translator Credits:** [ON]
@@ -100,7 +100,7 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 - **Strip Text Colors**: Removes HTML font color tags and ASS color codes (`{\c&H...&}`) to enforce the player's native styling (e.g. `<font color="#ff0000">Hello</font>` → `Hello`).
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>View Screenshot</b></summary>
 <br>
 <img src="docs/screenshots/strip-text-colors.png" alt="Strip text colors" width="100%" />
 </details>
@@ -222,7 +222,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 * **ضبط الاتجاه والترقيم** — إصلاح تلقائي للترقيم والأقواس والاقتباسات المعكوسة في الترجمات العربية لمنع ظهور النقاط في غير موضعها <code dir="ltr">(e.g. مرحبا. - &rarr; - مرحبا.)</code>
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>عرض لقطة الشاشة</b></summary>
 <br>
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
@@ -230,7 +230,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 * **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث <code dir="ltr">(e.g. أَنتِ، لَكِ، عَلَّمتِ &rarr; أنتِ، لكِ، علّمتِ)</code>
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>عرض لقطة الشاشة</b></summary>
 <br>
 <img src="docs/screenshots/tashkeel-removal.png" alt="Strip Arabic diacritics (Tashkeel)" width="100%" />
 </details>
@@ -238,7 +238,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 * **توحيد الفواصل العربية** — تحويل الفواصل اللاتينية في النص العربي إلى الفاصلة العربية <code dir="ltr">(e.g. نعم , لا &rarr; نعم، لا)</code>
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>عرض لقطة الشاشة</b></summary>
 <br>
 <img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
 </details>
@@ -246,7 +246,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 * **تحويل الأرقام إلى الأرقام العربية المشرقية** — تحويل الأرقام اللاتينية إلى الأرقام العربية المشرقية في الحوار العربي مع حماية الطوابع الزمنية والوسوم والرموز اللاتينية <code dir="ltr">(e.g. قبل 3 أيام &rarr; قبل ٣ أيام)</code>
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>عرض لقطة الشاشة</b></summary>
 <br>
 <img src="docs/screenshots/eastern-arabic-numbers.png" alt="Convert numbers to Eastern Arabic" width="100%" />
 </details>
@@ -259,7 +259,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 - **الإبقاء على حقوق المترجم**: الحفاظ على سطور نسب المترجم مع إزالة الروابط والسبام الملتصقة بها.
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>عرض لقطة الشاشة</b></summary>
 <br>
 
 * **إزالة الإعلانات:** [ON] — **الإبقاء على حقوق المترجم:** [ON]
@@ -273,7 +273,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 - **إزالة ألوان النص**: إزالة وسوم ألوان HTML وأكواد ألوان ASS (`{\c&H...&}`) لفرض التنسيق الأصلي للمشغل (مثال `<font color="#ff0000">Hello</font>` ← `Hello`).
 
 <details>
-<summary>🔍 <b>View Screenshot Comparison</b></summary>
+<summary>🔍 <b>عرض لقطة الشاشة</b></summary>
 <br>
 <img src="docs/screenshots/strip-text-colors.png" alt="Strip text colors" width="100%" />
 </details>
@@ -291,7 +291,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 * **حقوق المترجم (`(by 'username')`)** — تعرض اسم المترجم أو رافع ملف الترجمة الأصلي.
 
 <details>
-<summary>🔍 <b>عرض لقطة الشاشة التوضيحية</b></summary>
+<summary>🔍 <b>عرض لقطة الشاشة</b></summary>
 <br>
 <img src="docs/screenshots/subtitle-badge-preview.png" alt="معاينة شارة الترجمة" width="100%" />
 </details>
