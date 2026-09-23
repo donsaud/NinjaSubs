@@ -364,7 +364,7 @@ mypy app                           # types
 
 <div align="center">
 
-**Free & Open Source for the community · v1.0.0**
+**Made with ❤️ by donsaud · Free & Open Source for the community · v1.0.0**
 
 [github.com/donsaud/NinjaSubs](https://github.com/donsaud/NinjaSubs)
 
