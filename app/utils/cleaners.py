@@ -134,8 +134,11 @@ _WESTERN_TO_EASTERN_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 _PROTECTED_TAG_REGEX = re.compile(r"<[^>]*>|\{[^}]*\}")
 _DIGIT_RUN_REGEX = re.compile(r"\d+")
 _ASCII_LETTER_REGEX = re.compile(r"[A-Za-z]")
+# Glued identifier characters: Latin letters, digits, dots, hyphens and
+# underscores (AK-47, MP4, RTX-4090, S01_E01). Used only by the
+# Eastern-Arabic numeral guard below.
 _LATIN_TOKEN_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" + "_"
 )
 _ASS_DIALOGUE_LINE_REGEX = re.compile(r"^(?:Dialogue|Comment):", re.IGNORECASE)
 
@@ -916,8 +919,10 @@ def _digit_run_is_latin_context(text: str, start: int, end: int) -> bool:
     """
     True when a digit run belongs to a Latin/alphanumeric token and must be kept.
 
-    Covers glued identifiers (``AK-47``, ``MP4``, ``S01E01``) and space-separated
-    brand/model numbers (``Windows 11``, ``iPhone 15``).
+    Covers glued identifiers (``AK-47``, ``MP4``, ``S01E01``, ``S01_E01``),
+    hyphen/underscore-joined codes (``RTX-4090``, ``AR-15``) and
+    space-separated brand/model numbers (``Windows 11``, ``Boeing 747``,
+    ``Error 404``).
     """
     left = start
     while left > 0 and text[left - 1] in _LATIN_TOKEN_CHARS:
@@ -929,13 +934,13 @@ def _digit_run_is_latin_context(text: str, start: int, end: int) -> bool:
         return True
 
     index = start - 1
-    while index >= 0 and text[index] == " ":
+    while index >= 0 and text[index].isspace():
         index -= 1
     if index >= 0 and _ASCII_LETTER_REGEX.match(text[index]):
         return True
 
     index = end
-    while index < len(text) and text[index] == " ":
+    while index < len(text) and text[index].isspace():
         index += 1
     return index < len(text) and _ASCII_LETTER_REGEX.match(text[index]) is not None
 
@@ -989,9 +994,16 @@ def convert_eastern_arabic_numerals(content: str) -> str:
     Convert Western digits (0-9) to Eastern Arabic numerals (٠-٩) in Arabic dialogue.
 
     - Only lines/fields containing Arabic text are touched; cue indices and
-      timestamps are never modified.
+      timestamps (including milliseconds) are never modified.
     - HTML (``<font ...>``) and ASS (``{\\c&H...&}``) tags are left untouched.
-    - Latin/alphanumeric tokens such as ``AK-47``, ``MP4`` or ``Windows 11`` are kept.
+    - Glued Latin/alphanumeric tokens are kept: ``AK-47``, ``AR-15``,
+      ``M1911``, ``MP4``, ``4K``, ``1080p``, ``RTX-4090``, ``50cal``,
+      ``S01_E01``.
+    - Space-separated Latin context is kept: ``Boeing 747``, ``Error 404``,
+      ``Page 12``, ``Apollo 11``.
+    - Plain numbers in Arabic context convert: counts, years/dates,
+      percentages (``95%``), prices, durations and standalone times
+      (``5:30``).
     """
     if not content:
         return content
