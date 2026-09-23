@@ -219,7 +219,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 #### محرّك اللغة العربية
 تُطبَّق كل معالجات اللغة العربية في **وقت التقديم** (لكل مستخدم) ويمكن تفعيلها أو تعطيلها بالكامل:
 
-* **ضبط الاتجاه والترقيم** — إصلاح تلقائي للترقيم والأقواس والاقتباسات المعكوسة في الترجمات العربية لمنع ظهور النقاط في غير موضعها <span dir="rtl">(مثال: `- مرحبا.` ← `مرحبا. -`)</span>
+* **ضبط الاتجاه والترقيم** — إصلاح تلقائي للترقيم والأقواس والاقتباسات المعكوسة في الترجمات العربية لمنع ظهور النقاط في غير موضعها <span dir="rtl">(مثال: `.مرحبا --` ← `مرحبا. --`)</span>
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
@@ -227,7 +227,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/arabic-rtl-alignment.png" alt="Arabic RTL Alignment Fix" width="100%" />
 </details>
 
-* **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث <span dir="rtl">(مثال: `عَلَّمْتِ، لكِ، أنتِ` ← `عُلِّمْتِ، لَكِ، أَنْتِ`)</span>
+* **إزالة التشكيل (Tashkeel)** — إزالة الحركات مع الحفاظ على الشدة وجميع أنواع التنوين وكسرة المؤنث <span dir="rtl">(مثال: `عُلِّمْتِ، لَكِ، أَنْتِ` ← `عَلَّمْتِ، لكِ، أنتِ`)</span>
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
@@ -235,7 +235,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/tashkeel-removal.png" alt="Strip Arabic diacritics (Tashkeel)" width="100%" />
 </details>
 
-* **توحيد الفواصل العربية** — تحويل الفواصل اللاتينية في النص العربي إلى الفاصلة العربية <span dir="rtl">(مثال: `نعم، لا` ← `نعم , لا`)</span>
+* **توحيد الفواصل العربية** — تحويل الفواصل اللاتينية في النص العربي إلى الفاصلة العربية <span dir="rtl">(مثال: `نعم , لا` ← `نعم، لا`)</span>
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
@@ -243,7 +243,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/normalize-arabic-commas.png" alt="Normalize Arabic commas" width="100%" />
 </details>
 
-* **تحويل الأرقام إلى الأرقام العربية المشرقية** — تحويل الأرقام اللاتينية إلى الأرقام العربية المشرقية في الحوار العربي مع حماية الطوابع الزمنية والوسوم والرموز اللاتينية <span dir="rtl">(مثال: `قبل ٣ أيام` ← `قبل 3 أيام`)</span>
+* **تحويل الأرقام إلى الأرقام العربية المشرقية** — تحويل الأرقام اللاتينية إلى الأرقام العربية المشرقية في الحوار العربي مع حماية الطوابع الزمنية والوسوم والرموز اللاتينية <span dir="rtl">(مثال: `قبل 3 أيام` ← `قبل ٣ أيام`)</span>
 
 <details>
 <summary>🔍 <b>عرض لقطة الشاشة</b></summary>
