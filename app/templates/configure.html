@@ -1937,7 +1937,11 @@
                 statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
             }
             try {
-                const res = await fetch(`/api/verify/subdl?api_key=${encodeURIComponent(key)}`);
+                const res = await fetch(`/api/verify/subdl`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ api_key: key }),
+                });
                 const data = await res.json();
                 const curStatus = getSubdlStatus();
                 if (!curStatus) return;
@@ -1996,7 +2000,11 @@
                 statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
             }
             try {
-                const res = await fetch(`/api/verify/subsource?api_key=${encodeURIComponent(key)}`);
+                const res = await fetch(`/api/verify/subsource`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ api_key: key }),
+                });
                 const data = await res.json();
                 const curStatus = getSubsourceStatus();
                 if (!curStatus) return;
@@ -2056,7 +2064,11 @@
                 statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
             }
             try {
-                const res = await fetch(`/api/verify/opensubtitles?api_key=${encodeURIComponent(trimmedKey)}`);
+                const res = await fetch(`/api/verify/opensubtitles`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ api_key: trimmedKey }),
+                });
                 const data = await res.json();
                 const curStatus = getOpenSubtitlesStatus();
                 if (!curStatus) return;

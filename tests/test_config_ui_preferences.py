@@ -99,9 +99,11 @@ def test_configure_page_shows_rtl_fix_toggle(client):
 
 
 def test_configure_page_prefills_rtl_fix(client):
+    import re
     encoded = encode_user_config(subdl_key="k", enable_rtl_fix=False)
     body = client.get(f"/{encoded}/configure").text
-    assert '"enable_rtl_fix": false' in body
+    # Look for the JSON key-value pair in the object literal
+    assert re.search(r'"enable_rtl_fix"\s*:\s*false', body) is not None, "enable_rtl_fix should be false in prefilled config"
 
 
 @pytest.mark.asyncio
@@ -633,9 +635,15 @@ def test_configure_page_contains_badge_builder(client):
 
 def test_configure_page_prefills_badge_parts(client):
     """/{config}/configure injects the previously selected badge components."""
+    import json
+    import re
     encoded = encode_user_config(subdl_key="k", badge_parts=["filename"])
     body = client.get(f"/{encoded}/configure").text
-    assert '"badge_parts": ["filename"]' in body
+    # Look for badge_parts array in JSON
+    badge_match = re.search(r'"badge_parts"\s*:\s*(\[.*?\])', body, re.DOTALL)
+    assert badge_match is not None, "badge_parts not found in prefilled config"
+    parts = json.loads(badge_match.group(1))
+    assert parts == ["filename"], f"Expected filename-only badge_parts, got {parts}"
 
 
 def test_cache_key_includes_keyless_provider_toggles():

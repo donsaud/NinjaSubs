@@ -486,6 +486,8 @@ async def test_opensubtitles_serve_subtitle_endpoint(client):
     """Verify _serve_subtitle_handler properly calls OpenSubtitlesProvider.download_archive and caches result."""
     import uuid
 
+    from app.services.credentials import credential_store
+
     sub_id = f"os_{uuid.uuid4().hex[:12]}"
     cache_manager.store_metadata(
         sub_id,
@@ -494,9 +496,12 @@ async def test_opensubtitles_serve_subtitle_endpoint(client):
             "provider": "opensubtitles",
             "download_url": "/sub/opensubtitles/77777.srt",
             "release_name": "Gladiator.2000.1080p.BluRay",
-            "opensubtitles_key": "my_os_key",
             "lang": "ara",
         },
+    )
+    await credential_store.store(
+        sub_id,
+        {"opensubtitles_key": "my_os_key"},
     )
 
     fake_srt_bytes = b"1\n00:00:01,000 --> 00:00:03,000\nSubtitle delivered successfully\n"

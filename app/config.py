@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # Diagnostic / Observability
     NINJASUBS_DEBUG_RANKING: bool = False
 
+    # Administrative secret used to protect privileged endpoints such as
+    # ``/cache/clear`` and authorized cache bypass.  When empty/None these
+    # privileged operations are *disabled* rather than publicly open.
+    # Loaded from the NINJASUBS_ADMIN_TOKEN environment variable.
+    NINJASUBS_ADMIN_TOKEN: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
