@@ -1,6 +1,8 @@
 """FastAPI application for Stremio Arabic Subtitles Addon."""
 
 import hashlib
+import hmac
+import html
 import json
 import logging
 import re
@@ -38,6 +40,7 @@ from app.services.aggregator import (
     format_informative_badge,
 )
 from app.services.cache import clear_subtitle_cache
+from app.services.credentials import credential_store
 from app.utils.ass_converter import convert_ass_to_srt_bytes
 from app.utils.cleaners import (
     CleanOptions,
@@ -163,6 +166,18 @@ def _build_manifest(config_str: str | None = None, request: Request | None = Non
     )
 
 
+def _html_attr(value: Any) -> str:
+    return html.escape(str(value) if value is not None else "", quote=True)
+
+def _html_text(value: Any) -> str:
+    return html.escape(str(value) if value is not None else "", quote=False)
+
+def _safe_json(value: Any) -> str:
+    s = json.dumps(value, ensure_ascii=False)
+    s = s.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    s = s.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return s
+
 def render_configure_html(request: Request, prefill_config: str | None = None) -> str:
     """
     Render the minimalist monochrome dark configuration page (Ethan Walker UI8 style) for NinjaSubs.
@@ -198,30 +213,28 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
     # User-selectable subtitle badge style (prefilled on the config page)
     # Fresh page (no prefill): new clean defaults — only core 5 enabled.
     _fresh_defaults = not prefill_config
-    initial_phase2_json = json.dumps(
-        {
-            "badge_parts": prefs.resolved_badge_parts,
-            "enable_subdl": prefs.enable_subdl,
-            "enable_subsource": prefs.enable_subsource,
-            "enable_opensubtitles": prefs.enable_opensubtitles,
-            "enable_yifysubtitles": prefs.enable_yifysubtitles,
-            "enable_subtitlecat": prefs.enable_subtitlecat,
-            "enable_rtl_fix": prefs.enable_rtl_fix,
-            "enable_ad_removal": prefs.enable_ad_removal,
-            "keep_translator_credits": prefs.keep_translator_credits,
-            "fix_encoding": prefs.fix_encoding,
-            "clean_tags": prefs.clean_tags,
-            "strip_colors": prefs.strip_colors,
-            "clean_spacing": False if _fresh_defaults else prefs.clean_spacing,
-            "clean_symbols": False if _fresh_defaults else prefs.clean_symbols,
-            "clean_commas": False if _fresh_defaults else prefs.clean_commas,
-            "clean_timing": False if _fresh_defaults else prefs.clean_timing,
-            "strip_hi": prefs.strip_hi,
-            "eastern_arabic_numerals": prefs.eastern_arabic_numerals,
-            "strip_diacritics": prefs.strip_diacritics,
-            "convert_ass_to_srt": prefs.convert_ass_to_srt,
-        }
-    )
+    initial_phase2_obj = {
+        "badge_parts": prefs.resolved_badge_parts,
+        "enable_subdl": prefs.enable_subdl,
+        "enable_subsource": prefs.enable_subsource,
+        "enable_opensubtitles": prefs.enable_opensubtitles,
+        "enable_yifysubtitles": prefs.enable_yifysubtitles,
+        "enable_subtitlecat": prefs.enable_subtitlecat,
+        "enable_rtl_fix": prefs.enable_rtl_fix,
+        "enable_ad_removal": prefs.enable_ad_removal,
+        "keep_translator_credits": prefs.keep_translator_credits,
+        "fix_encoding": prefs.fix_encoding,
+        "clean_tags": prefs.clean_tags,
+        "strip_colors": prefs.strip_colors,
+        "clean_spacing": False if _fresh_defaults else prefs.clean_spacing,
+        "clean_symbols": False if _fresh_defaults else prefs.clean_symbols,
+        "clean_commas": False if _fresh_defaults else prefs.clean_commas,
+        "clean_timing": False if _fresh_defaults else prefs.clean_timing,
+        "strip_hi": prefs.strip_hi,
+        "eastern_arabic_numerals": prefs.eastern_arabic_numerals,
+        "strip_diacritics": prefs.strip_diacritics,
+        "convert_ass_to_srt": prefs.convert_ass_to_srt,
+    }
 
     if prefill_config:
         pref_langs = [normalize_to_iso639_2(lang) for lang in prefs.languages] if prefs.languages else ["ara"]
@@ -263,15 +276,15 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
     if template_path.is_file():
         raw_html = template_path.read_text(encoding="utf-8")
         return (
-            raw_html.replace("{{base_url}}", base_url)
-            .replace("{{lan_ip}}", lan_ip)
-            .replace("{{lan_url}}", lan_url)
+            raw_html.replace("{{base_url}}", _html_attr(base_url))
+            .replace("{{lan_ip}}", _html_attr(lan_ip))
+            .replace("{{lan_url}}", _html_attr(lan_url))
             .replace("{{port}}", str(port))
-            .replace("{{initial_subdl}}", initial_subdl)
-            .replace("{{initial_subsource}}", initial_subsource)
-            .replace("{{initial_opensubtitles}}", initial_opensubtitles)
+            .replace("{{initial_subdl}}", _html_attr(initial_subdl))
+            .replace("{{initial_subsource}}", _html_attr(initial_subsource))
+            .replace("{{initial_opensubtitles}}", _html_attr(initial_opensubtitles))
             .replace("{{initial_exclude_hi}}", initial_exclude_hi)
-            .replace("{{initial_phase2_json}}", initial_phase2_json)
+            .replace("{{initial_phase2_json}}", _safe_json(initial_phase2_obj))
             .replace("{{language_options_html}}", language_options_html)
             .replace("{{env_banner_html}}", env_banner_html)
         )
@@ -280,13 +293,76 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
     return "<html><body>Configure page template missing</body></html>"
 
 
-@app.get("/api/verify/subdl")
-async def verify_subdl_endpoint(api_key: str | None = None):
-    """Real-time validation for Subdl API key."""
-    if not api_key or not api_key.strip():
+# ---------------------------------------------------------------------------
+# Administrative authorization helpers
+# ---------------------------------------------------------------------------
+def _get_admin_token() -> str:
+    """Return the configured admin token (empty when not configured)."""
+    token = getattr(settings, "NINJASUBS_ADMIN_TOKEN", "") or ""
+    return token.strip()
+
+
+def _constant_time_compare(a: str, b: str) -> bool:
+    """Compare two strings in constant time to avoid timing side-channels."""
+    if not a or not b:
+        return False
+    return hmac.compare_digest(a, b)
+
+
+def _check_admin(request: Request) -> bool:
+    """Return True when the request carries a valid admin token.
+
+    The token is read from the ``X-NinjaSubs-Admin-Token`` HTTP header only — it is
+    never accepted from a query parameter so it cannot leak into access logs.
+    """
+    configured = _get_admin_token()
+    if not configured:
+        return False
+    provided = request.headers.get("X-NinjaSubs-Admin-Token") or ""
+    return _constant_time_compare(configured, provided)
+
+
+def _admin_required(request: Request) -> None:
+    """Raise HTTPException 401/403 when the request is not authorized."""
+    configured = _get_admin_token()
+    if not configured:
+        raise HTTPException(
+            status_code=404,
+            detail="Administrative functionality is not configured on this server.",
+        )
+    provided = request.headers.get("X-NinjaSubs-Admin-Token") or ""
+    if not _constant_time_compare(configured, provided):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid or missing administrative token.",
+        )
+
+
+def _is_admin_request(request: Request) -> bool:
+    """Return True when the request carries a valid admin token."""
+    return _check_admin(request)
+
+
+# ---------------------------------------------------------------------------
+# Provider API-key verification endpoints (POST JSON only)
+# ---------------------------------------------------------------------------
+@app.post("/api/verify/subdl")
+async def verify_subdl_endpoint(request: Request):
+    """Real-time validation for Subdl API key via POST JSON body.
+
+    The API key is supplied in the request JSON body so it never appears in the
+    inbound request URL, browser history, or access logs.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    key = (payload.get("api_key") or "").strip()
+    if not key:
         return {"valid": False, "message": "API key is required"}
 
-    key = api_key.strip()
     global _http_client
     client = _http_client
     own_client = False
@@ -323,8 +399,8 @@ async def verify_subdl_endpoint(api_key: str | None = None):
         else:
             return {"valid": False, "message": f"Unexpected response (HTTP {resp.status_code})"}
     except Exception as e:
-        logger.warning(f"Subdl verification connection error: {e}")
-        return {"valid": False, "error": "Connection error", "message": str(e)}
+        logger.warning("Subdl verification connection error: %s", type(e).__name__)
+        return {"valid": False, "error": "Connection error", "message": "Connection error"}
     finally:
         if own_client:
             await client.aclose()
@@ -333,13 +409,26 @@ async def verify_subdl_endpoint(api_key: str | None = None):
 uvicorn_logger = logging.getLogger("uvicorn.error")
 
 
-@app.get("/api/verify/subsource")
-async def verify_subsource_endpoint(api_key: str | None = None):
-    """Diagnostic and multi-method validation for Subsource API key."""
-    if not api_key or not api_key.strip():
+@app.post("/api/verify/subsource")
+async def verify_subsource_endpoint(request: Request):
+    """Diagnostic and multi-method validation for Subsource API key via POST JSON.
+
+    The API key is supplied in the request JSON body so it never appears in the
+    inbound request URL. This implementation never logs the raw key, never
+    constructs secret-bearing URL strings, and never logs request headers that
+    contain credentials or upstream response bodies.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    key = (payload.get("api_key") or "").strip()
+    if not key:
         return {"valid": False, "message": "API key is required"}
 
-    key = api_key.strip()
+    # Headers carry the credential; they are never logged.
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
@@ -347,16 +436,18 @@ async def verify_subsource_endpoint(api_key: str | None = None):
         "Authorization": f"Bearer {key}",
     }
 
-    # Test candidate endpoints used by Subsource
-    test_urls = [
-        # Candidate 1: Subsource official API check
-        ("https://api.subsource.net/api/v1/subtitles", {"imdb_id": "tt0903747"}),
-        # Candidate 2: Direct query param authentication test
-        (f"https://api.subsource.net/api/v1/subtitles?apiKey={key}&imdb_id=tt0903747", None),
-        (f"https://api.subsource.net/api/v1/subtitles?api_key={key}&imdb_id=tt0903747", None),
-        # Candidate 3: Subsource search / user endpoint
+    # Candidate endpoints. Authentication is always delivered via request
+    # headers; query parameters are used only for non-secret search arguments.
+    # No candidate URL string contains the raw key.
+    test_candidates = [
+        # Candidate 1: Subsource official API check (auth via headers)
+        (
+            "https://api.subsource.net/api/v1/subtitles",
+            {"imdb_id": "tt0903747"},
+        ),
+        # Candidate 2: Subsource search / user endpoint (auth via headers)
         ("https://api.subsource.net/api/v1/user", None),
-        # Candidate 4: Movie search check
+        # Candidate 3: Movie search check (auth via headers)
         (
             "https://api.subsource.net/api/v1/movies/search",
             {"searchType": "imdb", "q": "tt0903747"},
@@ -364,21 +455,23 @@ async def verify_subsource_endpoint(api_key: str | None = None):
     ]
 
     async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-        last_status = None
-        last_body = ""
+        last_status: int | None = None
 
-        for url, params in test_urls:
+        for url, params in test_candidates:
             try:
                 resp = await client.get(url, headers=headers, params=params)
                 last_status = resp.status_code
-                last_body = resp.text[:200]
 
+                # Safe, non-secret diagnostic log: status + endpoint name only.
                 uvicorn_logger.info(
-                    f"[SubSource Check] Target: {url} -> Status: {resp.status_code} | Body: {last_body}"
+                    "[SubSource Check] Endpoint: %s -> Status: %s",
+                    url.rsplit("/", 1)[-1],
+                    resp.status_code,
                 )
 
                 # 200 OK means authenticated.
-                # 404 with JSON or empty data often means authenticated but no specific title match found
+                # 404 with JSON or empty data often means authenticated but no
+                # specific title match found.
                 if resp.status_code in (200, 404):
                     return {"valid": True}
 
@@ -387,47 +480,63 @@ async def verify_subsource_endpoint(api_key: str | None = None):
                     continue
 
             except Exception as e:
-                uvicorn_logger.error(f"[SubSource Check Error] {str(e)}")
-                last_body = str(e)
+                # Log only the exception type; never the exception string which
+                # may contain secret-bearing request URLs.
+                uvicorn_logger.error(
+                    "[SubSource Check Error] %s", type(e).__name__
+                )
 
         # If 401/403 across candidates, return invalid
         uvicorn_logger.warning(
-            f"[SubSource Final] Validation rejected with status {last_status}: {last_body}"
+            "[SubSource Final] Validation rejected with status %s", last_status
         )
         return {
             "valid": False,
             "status_code": last_status,
-            "error_snippet": last_body,
             "message": "Invalid API Key or unauthorized",
         }
 
 
-@app.get("/api/verify/opensubtitles")
-async def verify_opensubtitles_key(api_key: str | None = None):
-    """Real-time validation for OpenSubtitles API key via lightweight subtitle search."""
-    if not api_key or not api_key.strip():
+@app.post("/api/verify/opensubtitles")
+async def verify_opensubtitles_key(request: Request):
+    """Real-time validation for OpenSubtitles API key via lightweight subtitle search.
+
+    The API key is supplied in the request JSON body so it never appears in the
+    inbound request URL. Upstream response bodies are never logged.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    api_key = (payload.get("api_key") or "").strip()
+    if not api_key:
         return {"valid": False, "message": "API key is required"}
 
     headers = {
-        "Api-Key": api_key.strip(),
+        "Api-Key": api_key,
         "User-Agent": "StremioArabicSubs v1.0.0",
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
         try:
             resp = await client.get(
-                "https://api.opensubtitles.com/api/v1/subtitles?imdb_id=111161&languages=en",
+                "https://api.opensubtitles.com/api/v1/subtitles",
+                params={"imdb_id": "111161", "languages": "en"},
                 headers=headers,
             )
             if resp.status_code == 200:
                 return {"valid": True}
             logger.warning(
-                f"[OpenSubtitles Verify Fail] Status: {resp.status_code} | Body: {resp.text[:200]}"
+                "[OpenSubtitles Verify Fail] Status: %s", resp.status_code
             )
-            return {"valid": False, "status": resp.status_code, "detail": resp.text[:100]}
+            return {"valid": False, "status": resp.status_code}
         except Exception as e:
-            logger.warning(f"OpenSubtitles verification connection error: {e}")
-            return {"valid": False, "error": "Connection error", "message": str(e)}
+            logger.warning(
+                "OpenSubtitles verification connection error: %s", type(e).__name__
+            )
+            return {"valid": False, "error": "Connection error", "message": "Connection error"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -546,6 +655,8 @@ async def _fetch_subtitles_handler(
         or request.query_params.get("bypass_cache")
         or request.headers.get("x-bypass-cache")
     )
+    if bypass_cache and not _is_admin_request(request):
+        bypass_cache = False
 
     # Aggregate, rank, and cache subtitles from providers with in-memory TTLCache
     ranked_releases = await aggregate_subtitles(
@@ -609,6 +720,12 @@ async def _fetch_subtitles_handler(
             "lang": rel_lang,
         }
         cache_manager.store_metadata(sub_id, meta_dict)
+        # Store credentials in memory for this sub_id
+        await credential_store.store(sub_id, {
+            "subdl_key": prefs.subdl_key,
+            "subsource_key": prefs.subsource_key,
+            "opensubtitles_key": prefs.opensubtitles_key,
+        })
 
         # Resolve clean display language name (e.g. 'Arabic', 'English')
         lang_name = get_language_name(rel_lang, default="Arabic")
@@ -645,6 +762,14 @@ async def _fetch_subtitles_handler(
             m_fid = re.search(r"(\d+)", rel.download_url)
             file_id = m_fid.group(1) if m_fid else sub_id
             cache_manager.store_metadata(str(file_id), meta_dict)
+            await credential_store.store(
+                str(file_id),
+                {
+                    "subdl_key": prefs.subdl_key,
+                    "subsource_key": prefs.subsource_key,
+                    "opensubtitles_key": prefs.opensubtitles_key,
+                },
+            )
             sub_url = (
                 f"{base_url}/{config_str}/sub/opensubtitles/{file_id}.{sub_format}"
                 if config_str
@@ -754,6 +879,21 @@ async def get_configured_subtitles_with_extra(
     return await _fetch_subtitles_handler(
         media_type, media_id, request, config_str=config, extra=extra
     )
+
+# Administrative cache clear endpoint
+@app.get("/cache/clear")
+async def cache_clear_get(request: Request):
+    """GET on this path returns 405 Method Not Allowed."""
+    raise HTTPException(status_code=405, detail="Method not allowed")
+
+@app.post("/cache/clear")
+async def cache_clear_post(request: Request):
+    """Clear subtitle and metadata cache. Requires admin token."""
+    _admin_required(request)
+    clear_subtitle_cache()
+    cache_manager.clear_metadata()
+    await credential_store.clear()
+    return Response(status_code=200, content="Caches cleared")
 
 
 def srt_to_vtt(srt_bytes: bytes) -> bytes:
@@ -1099,9 +1239,11 @@ async def _serve_subtitle_handler(
     episode = meta.get("episode")
 
     # Determine user-specific API key for this subtitle
-    subdl_key = meta.get("subdl_key")
-    subsource_key = meta.get("subsource_key")
-    opensubtitles_key = meta.get("opensubtitles_key")
+    # Always use CredentialStore for ephemeral credentials; never recover keys from disk metadata.
+    cred_keys = await credential_store.get(target_id) or {}
+    subdl_key = cred_keys.get("subdl_key")
+    subsource_key = cred_keys.get("subsource_key")
+    opensubtitles_key = cred_keys.get("opensubtitles_key")
 
     # If config_str is provided on the URL, it can override or supply missing keys
     if config_str:
@@ -1315,13 +1457,16 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             convert_ass_enabled,
         )
 
-    # 2. Extract keys
-    api_key = ""
-    subsource_key = ""
+    # 2. Extract keys from credential store (first), then metadata, then config/params/env
+    cred_keys = await credential_store.get(str(file_id)) or {}
+    api_key = cred_keys.get("opensubtitles_key")
+    subsource_key = cred_keys.get("subsource_key")
     if config:
         cfg_prefs = parse_user_config(config)
-        api_key = cfg_prefs.opensubtitles_key
-        subsource_key = cfg_prefs.subsource_key
+        if not api_key:
+            api_key = cfg_prefs.opensubtitles_key
+        if not subsource_key:
+            subsource_key = cfg_prefs.subsource_key
     if not api_key:
         api_key = (
             request.query_params.get("opensubtitles_key")
@@ -1393,14 +1538,13 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             f"OpenSubtitles download_url failed/limit reached for file_id {file_id}. "
             f"Attempting fallback to Subsource for {meta.get('imdb_id')}..."
         )
-        effective_subsource_key = subsource_key or meta.get("subsource_key")
         fallback_bytes = await _fallback_download_subsource(
             imdb_id=meta["imdb_id"],
             media_type=meta.get("media_type")
             or ("series" if meta.get("season") is not None else "movie"),
             season=meta.get("season"),
             episode=meta.get("episode"),
-            subsource_key=effective_subsource_key,
+            subsource_key=subsource_key,
             target_filename=meta.get("target_filename") or meta.get("release_name"),
             lang=meta.get("lang", "ara"),
             client=_http_client,
@@ -1490,11 +1634,7 @@ async def health():
     }
 
 
-@app.api_route("/cache/clear", methods=["GET", "POST"])
-async def clear_cache_route():
-    """Explicit endpoint to invalidate and clear in-memory TTLCache."""
-    clear_subtitle_cache()
-    return {"status": "ok", "message": "In-memory TTLCache successfully cleared."}
+# The old unprotected /cache/clear endpoint has been replaced with admin-protected POST only endpoint defined above.
 
 
 @app.get("/diagnostics/ranking")

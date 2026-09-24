@@ -99,11 +99,27 @@ class LRUCacheManager:
             self._enforce_limits()
             return True
 
+    # Provider credential keys that must NEVER be written to persistent disk.
+    _SENSITIVE_METADATA_KEYS: frozenset[str] = frozenset(
+        {"subdl_key", "subsource_key", "opensubtitles_key"}
+    )
+
     def store_metadata(self, sub_id: str, metadata: dict[str, Any]) -> None:
-        """Store download metadata for on-demand retrieval."""
+        """Store download metadata for on-demand retrieval.
+
+        Provider API keys are stripped before persistence so that no raw
+        credentials are ever written to ``subs_cache/_meta/*.json``.  User-specific
+        credentials for on-demand downloads are held separately in an expiring
+        in-memory store (see ``app.services.credentials``).
+        """
+        safe_metadata = {
+            k: v
+            for k, v in metadata.items()
+            if k not in self._SENSITIVE_METADATA_KEYS
+        }
         meta_path = self.get_meta_path(sub_id)
         try:
-            meta_path.write_text(json.dumps(metadata), encoding="utf-8")
+            meta_path.write_text(json.dumps(safe_metadata), encoding="utf-8")
         except OSError as e:
             logger.warning(f"Failed to store metadata for {sub_id}: {e}")
 

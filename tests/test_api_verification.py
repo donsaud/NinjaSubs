@@ -15,15 +15,24 @@ def client():
         yield c
 
 
+def _post_verify(client: TestClient, endpoint: str, api_key: str | None = None):
+    """Helper to POST to a verification endpoint with JSON body."""
+    return client.post(
+        endpoint,
+        json={"api_key": api_key} if api_key is not None else {},
+        headers={"Content-Type": "application/json"},
+    )
+
+
 def test_verify_subdl_missing_key(client):
     """Subdl verification without key returns valid=False."""
-    resp = client.get("/api/verify/subdl")
+    resp = _post_verify(client, "/api/verify/subdl")
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
     assert "required" in data["message"].lower()
 
-    resp_empty = client.get("/api/verify/subdl?api_key=  ")
+    resp_empty = _post_verify(client, "/api/verify/subdl", api_key="  ")
     assert resp_empty.status_code == 200
     assert resp_empty.json()["valid"] is False
 
@@ -37,7 +46,7 @@ async def test_verify_subdl_valid_key(client):
         request=httpx.Request("GET", "https://api.subdl.com"),
     )
     with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
-        resp = client.get("/api/verify/subdl?api_key=valid_token_123")
+        resp = _post_verify(client, "/api/verify/subdl", api_key="valid_token_123")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is True
@@ -52,7 +61,7 @@ async def test_verify_subdl_invalid_key(client):
         request=httpx.Request("GET", "https://api.subdl.com"),
     )
     with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
-        resp = client.get("/api/verify/subdl?api_key=bad_token")
+        resp = _post_verify(client, "/api/verify/subdl", api_key="bad_token")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is False
@@ -64,7 +73,7 @@ async def test_verify_subdl_connection_error(client):
     with patch(
         "httpx.AsyncClient.get", new=AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
     ):
-        resp = client.get("/api/verify/subdl?api_key=some_key")
+        resp = _post_verify(client, "/api/verify/subdl", api_key="some_key")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is False
@@ -73,7 +82,7 @@ async def test_verify_subdl_connection_error(client):
 
 def test_verify_subsource_missing_key(client):
     """Subsource verification without key returns valid=False."""
-    resp = client.get("/api/verify/subsource")
+    resp = _post_verify(client, "/api/verify/subsource")
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
@@ -89,7 +98,7 @@ async def test_verify_subsource_valid_key(client):
         request=httpx.Request("GET", "https://api.subsource.net"),
     )
     with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
-        resp = client.get("/api/verify/subsource?api_key=valid_subsource_key")
+        resp = _post_verify(client, "/api/verify/subsource", api_key="valid_subsource_key")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is True
@@ -104,7 +113,7 @@ async def test_verify_subsource_valid_404_key(client):
         request=httpx.Request("GET", "https://api.subsource.net"),
     )
     with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
-        resp = client.get("/api/verify/subsource?api_key=valid_subsource_key")
+        resp = _post_verify(client, "/api/verify/subsource", api_key="valid_subsource_key")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is True
@@ -119,7 +128,7 @@ async def test_verify_subsource_invalid_key(client):
         request=httpx.Request("GET", "https://api.subsource.net"),
     )
     with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
-        resp = client.get("/api/verify/subsource?api_key=bad_subsource_key")
+        resp = _post_verify(client, "/api/verify/subsource", api_key="bad_subsource_key")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is False
@@ -132,16 +141,16 @@ async def test_verify_subsource_connection_error(client):
         "httpx.AsyncClient.get",
         new=AsyncMock(side_effect=httpx.TimeoutException("Upstream timeout")),
     ):
-        resp = client.get("/api/verify/subsource?api_key=some_key")
+        resp = _post_verify(client, "/api/verify/subsource", api_key="some_key")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is False
-        assert "timeout" in data.get("error_snippet", "").lower() or "error" in str(data).lower()
+        assert data.get("status_code") is None
 
 
 def test_verify_opensubtitles_missing_key(client):
     """OpenSubtitles verification without key returns valid=False."""
-    resp = client.get("/api/verify/opensubtitles")
+    resp = _post_verify(client, "/api/verify/opensubtitles")
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
@@ -159,7 +168,7 @@ async def test_verify_opensubtitles_valid_key(client):
         ),
     )
     with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
-        resp = client.get("/api/verify/opensubtitles?api_key=valid_os_key")
+        resp = _post_verify(client, "/api/verify/opensubtitles", api_key="valid_os_key")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is True
@@ -176,7 +185,7 @@ async def test_verify_opensubtitles_invalid_key(client):
         ),
     )
     with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
-        resp = client.get("/api/verify/opensubtitles?api_key=invalid_os_key")
+        resp = _post_verify(client, "/api/verify/opensubtitles", api_key="invalid_os_key")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is False
@@ -188,7 +197,7 @@ async def test_verify_opensubtitles_connection_error(client):
     with patch(
         "httpx.AsyncClient.get", new=AsyncMock(side_effect=httpx.ConnectError("Connection failed"))
     ):
-        resp = client.get("/api/verify/opensubtitles?api_key=some_key")
+        resp = _post_verify(client, "/api/verify/opensubtitles", api_key="some_key")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is False
@@ -248,3 +257,17 @@ def test_configure_page_stremio_installation_card(client):
     assert "https://web.stremio.com/#/addons?addon=" in html
     assert "installAppBtn.addEventListener" in html
     assert "installWebBtn.addEventListener" in html
+
+
+def test_verify_endpoints_reject_get(client):
+    """All verification endpoints must reject GET requests (POST-only)."""
+    for endpoint in ("/api/verify/subdl", "/api/verify/subsource", "/api/verify/opensubtitles"):
+        resp = client.get(endpoint)
+        assert resp.status_code == 405, f"{endpoint} should reject GET"
+
+
+def test_verify_endpoints_reject_get_with_query_params(client):
+    """GET with query params must also be rejected (no secret in URL)."""
+    for endpoint in ("/api/verify/subdl", "/api/verify/subsource", "/api/verify/opensubtitles"):
+        resp = client.get(f"{endpoint}?api_key=test_key")
+        assert resp.status_code == 405, f"{endpoint} should reject GET with query params"

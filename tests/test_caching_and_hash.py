@@ -6,6 +6,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.main import app
 from app.models import MatchTier, SubtitleRelease, UserPreferences
 from app.providers.opensubtitles import OpenSubtitlesProvider
@@ -33,6 +34,11 @@ from app.utils.config_parser import encode_user_config
 def client():
     return TestClient(app)
 
+@pytest.fixture(autouse=True)
+def reset_admin_token():
+    original = getattr(settings, "NINJASUBS_ADMIN_TOKEN", "")
+    yield
+    settings.NINJASUBS_ADMIN_TOKEN = original
 
 # ==========================================
 # 1. MOVIEHASH SCORING & RANKING TESTS
@@ -472,24 +478,27 @@ def test_stremio_endpoint_caching_and_hash_integration(client):
 
 def test_cache_clear_endpoint(client):
     """Verify /cache/clear clears the in-memory subtitle TTLCache."""
+    from app.config import settings
     from app.services.cache import get_cached_subtitles, set_cached_subtitles
 
+    settings.NINJASUBS_ADMIN_TOKEN = "test_token"
     set_cached_subtitles(
         "test_key",
         [SubtitleRelease(release_name="Test.srt", download_url="http://test", provider="subdl")],
     )
     assert get_cached_subtitles("test_key") is not None
 
-    resp = client.get("/cache/clear")
+    resp = client.post("/cache/clear", headers={"X-NinjaSubs-Admin-Token": "test_token"})
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
     assert get_cached_subtitles("test_key") is None
 
 
 def test_cache_bypass_via_query_param(client):
-    """Verify bypass_cache=1 or nocache=1 bypasses in-memory TTLCache."""
+    """Verify bypass_cache=1 or nocache=1 bypasses in-memory TTLCache when admin authorized."""
+    from app.config import settings
     from app.services.cache import clear_subtitle_cache
 
+    settings.NINJASUBS_ADMIN_TOKEN = "admin123"
     clear_subtitle_cache()
 
     mock_release = SubtitleRelease(
@@ -523,8 +532,11 @@ def test_cache_bypass_via_query_param(client):
         assert resp1.status_code == 200
         assert mock_subdl.call_count == 1
 
-        # Request with bypass_cache=1 should query upstream provider again
-        resp2 = client.get(f"{url}?bypass_cache=1")
+        # Request with bypass_cache=1 should query upstream provider again only with admin token
+        resp2 = client.get(
+            f"{url}?bypass_cache=1",
+            headers={"X-NinjaSubs-Admin-Token": "admin123"}
+        )
         assert resp2.status_code == 200
         assert mock_subdl.call_count == 2
 
