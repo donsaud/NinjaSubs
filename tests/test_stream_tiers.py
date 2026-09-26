@@ -7,10 +7,24 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.sync.aiostreams import AIOStreamsClient
+from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.embedded_strategy import EmbeddedStrategy
 from app.services.sync.hash_strategy import HashExactStrategy
 from app.services.sync.query import ReferenceQuery
 from app.services.sync.stream_hash import _opensubtitles_hash, fetch_stream_moviehash
+
+
+@pytest.fixture(autouse=True)
+def _isolated_reference_cache(tmp_path, monkeypatch):
+    """Keep strategy tests hermetic: redirect the default reference cache to tmp."""
+    original = ReferenceDiskCache.__init__
+
+    def __init__(self, root=None, **kwargs):
+        if root is None:
+            root = tmp_path / "refs"
+        original(self, root, **kwargs)
+
+    monkeypatch.setattr(ReferenceDiskCache, "__init__", __init__)
 
 
 # --------------------------------------------------------------------------- #
@@ -344,3 +358,97 @@ async def test_embedded_blocks_private_stream_url_when_disabled(monkeypatch, cap
     with caplog.at_level("WARNING"):
         assert await strategy.resolve(query) is None
     assert "blocked unsafe stream URL" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# stream_hash: HEAD 405 fallback to a zero-byte range GET
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_content_length_falls_back_on_head_405():
+    from app.services.sync.stream_hash import _content_length
+
+    class _Head405Client:
+        async def head(self, url, follow_redirects=True):
+            return _FakeResponse(405, b"", {})
+
+        async def get(self, url, headers=None, follow_redirects=True):
+            return _FakeResponse(206, b"\x00", {"content-range": "bytes 0-0/987654"})
+
+    assert await _content_length(_Head405Client(), "http://192.168.8.115:4000/x.mkv") == 987654
+
+
+@pytest.mark.asyncio
+async def test_fetch_stream_moviehash_survives_head_405(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.sync.stream_hash.is_safe_public_url", lambda url, **k: (True, "ok")
+    )
+    size = 200_000
+    first = b"A" * 65536
+    last = b"B" * 65536
+
+    class _Head405RangeClient(_RangeClient):
+        async def head(self, url, follow_redirects=True):
+            return _FakeResponse(405, b"", {})
+
+    client = _Head405RangeClient(size, first, last)
+    result = await fetch_stream_moviehash("https://cdn.example/movie.mkv", client)
+    assert result == (_opensubtitles_hash(first, last, size), size)
+
+
+# --------------------------------------------------------------------------- #
+# embedded extraction command flags
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_embedded_extract_command_is_remote_stream_optimized(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ALLOW_PRIVATE_STREAM_URLS", True)
+    calls = []
+
+    def fake_run(cmd, capture_output=True, timeout=None):
+        calls.append(cmd)
+        if cmd[0].endswith("ffprobe"):
+            return SimpleNamespace(returncode=0, stdout=_text_probe("eng"), stderr=b"")
+        srt = b"1\n00:00:01,000 --> 00:00:02,000\n" + (b"hi\n" * 600) + b"\n"
+        return SimpleNamespace(returncode=0, stdout=srt, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    strategy = EmbeddedStrategy(
+        ffprobe_path="/fake/ffprobe", ffmpeg_path="/fake/ffmpeg", timeout=2.0, min_bytes=100
+    )
+    query = ReferenceQuery(
+        imdb_id="tt1", media_type="movie", stream_url="http://192.168.8.115:4000/movie.mkv"
+    )
+    assert await strategy.resolve(query) is not None
+
+    cmd = next(c for c in calls if "ffmpeg" in c[0])
+    for flag, value in (
+        ("-nostdin", None),
+        ("-threads", "1"),
+        ("-analyzeduration", "10000000"),
+        ("-probesize", "10000000"),
+        ("-copyts", None),
+    ):
+        assert flag in cmd, flag
+        if value is not None:
+            assert cmd[cmd.index(flag) + 1] == value
+    assert cmd[cmd.index("-map") + 1] == "0:0"
+    assert cmd[cmd.index("-c:s") + 1] == "srt"
+    assert cmd[-1] == "-"
+
+
+@pytest.mark.asyncio
+async def test_content_length_prefers_content_range_on_partial_response():
+    """A 206 includes Content-Length of the chunk; Content-Range holds the total."""
+    from app.services.sync.stream_hash import _content_length
+
+    class _PartialClient:
+        async def head(self, url, follow_redirects=True):
+            return _FakeResponse(405, b"", {})
+
+        async def get(self, url, headers=None, follow_redirects=True):
+            return _FakeResponse(
+                206, b"\x00", {"content-length": "1", "content-range": "bytes 0-0/200000"}
+            )
+
+    assert await _content_length(_PartialClient(), "http://192.168.8.115:4000/x.mkv") == 200000

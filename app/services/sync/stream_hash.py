@@ -36,27 +36,48 @@ def _opensubtitles_hash(first: bytes, last: bytes, size: int) -> str:
     return f"{total & 0xFFFFFFFFFFFFFFFF:016x}"
 
 
+def _parse_content_range_total(value: str | None) -> int | None:
+    """Parse the total size from a ``Content-Range: bytes 0-0/12345`` header."""
+    if not value or "/" not in value:
+        return None
+    total = value.rsplit("/", 1)[-1].strip()
+    return int(total) if total.isdigit() else None
+
+
+def _header_length(headers) -> int | None:
+    # On a 206 response ``Content-Length`` is only the partial chunk size, so
+    # the total from ``Content-Range`` must win when present.
+    total = _parse_content_range_total(headers.get("content-range"))
+    if total is not None:
+        return total
+    length = headers.get("content-length")
+    if length and length.isdigit():
+        return int(length)
+    return None
+
+
 async def _content_length(client: httpx.AsyncClient, stream_url: str) -> int | None:
+    # Many debrid endpoints reject HEAD with 405; only trust a successful HEAD.
     try:
         head = await client.head(stream_url, follow_redirects=True)
-        length = head.headers.get("content-length")
-        if length and length.isdigit():
-            return int(length)
-        content_range = head.headers.get("content-range")
-        if content_range and "/" in content_range:
-            total = content_range.rsplit("/", 1)[-1]
-            if total.isdigit():
-                return int(total)
+        if head.status_code < 400:
+            size = _header_length(head.headers)
+            if size is not None:
+                return size
+        else:
+            logger.info(
+                "[reference] hash: HEAD returned %s -> using range probe",
+                head.status_code,
+            )
     except Exception as exc:  # noqa: BLE001 - best effort
-        logger.debug("[reference] hash: content-length probe failed: %s", exc)
-    # Fall back to a one-byte range probe.
+        logger.debug("[reference] hash: HEAD probe failed: %s", exc)
+    # Fall back to a zero-byte GET range request and read the total from
+    # Content-Range (``bytes 0-0/<total>``).
     try:
         resp = await client.get(stream_url, headers={"Range": "bytes=0-0"}, follow_redirects=True)
-        content_range = resp.headers.get("content-range")
-        if content_range and "/" in content_range:
-            total = content_range.rsplit("/", 1)[-1]
-            if total.isdigit():
-                return int(total)
+        size = _header_length(resp.headers)
+        if size is not None:
+            return size
     except Exception as exc:  # noqa: BLE001 - best effort
         logger.debug("[reference] hash: range probe failed: %s", exc)
     return None

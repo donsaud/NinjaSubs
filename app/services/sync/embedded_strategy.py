@@ -183,7 +183,12 @@ class EmbeddedStrategy:
         command = [
             ffmpeg,
             "-v", "error",
+            "-nostdin",
+            "-threads", "1",
+            "-analyzeduration", "10000000",
+            "-probesize", "10000000",
             "-rw_timeout", "8000000",
+            "-copyts",
             "-i", stream_url,
             "-map", f"0:{index}",
             "-c:s", "srt",
