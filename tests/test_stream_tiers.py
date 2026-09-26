@@ -495,7 +495,7 @@ async def test_hash_strategy_accepts_multi_language_hash_match():
 
 
 # --------------------------------------------------------------------------- #
-# Embedded extraction: -t cap, 5.0s timeout, partial fallback
+# Embedded extraction: -t cap, 8.0s timeout, partial fallback
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_embedded_extraction_uses_t_cap_and_timeout(monkeypatch):
@@ -513,21 +513,23 @@ async def test_embedded_extraction_uses_t_cap_and_timeout(monkeypatch):
         return SimpleNamespace(returncode=0, stdout=srt, stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    # extract_timeout defaults to 5.0 for slow remote/USENET streams.
+    # extract_timeout defaults to 8.0 for slow remote/USENET streams.
     strategy = EmbeddedStrategy(
         ffprobe_path="/fake/ffprobe",
         ffmpeg_path="/fake/ffmpeg",
         timeout=2.0,
         min_bytes=100,
     )
-    assert strategy.extract_timeout == 5.0
+    assert strategy.extract_timeout == 8.0
     query = ReferenceQuery(
         imdb_id="tt1", media_type="movie", stream_url="http://192.168.8.115:4000/movie.mkv"
     )
     assert await strategy.resolve(query) is not None
     cmd = captured["cmd"]
+    # ``-t 900`` is an *output* option: it must come after ``-i`` on HTTP MKV.
+    assert cmd.index("-t") > cmd.index("-i")
     assert cmd[cmd.index("-t") + 1] == "900"
-    assert captured["timeout"] == 5.0
+    assert captured["timeout"] == 8.0
     # Low-latency demux flags requested for HTTP/WebDAV streams.
     assert "+nobuffer+fastseek" in cmd
     assert cmd[cmd.index("-fflags") + 1] == "+nobuffer+fastseek"
@@ -550,7 +552,7 @@ async def test_embedded_extraction_uses_partial_output_on_timeout(monkeypatch):
         ffprobe_path="/fake/ffprobe",
         ffmpeg_path="/fake/ffmpeg",
         timeout=2.0,
-        extract_timeout=5.0,
+        extract_timeout=8.0,
         min_bytes=100,
     )
     query = ReferenceQuery(

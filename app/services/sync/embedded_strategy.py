@@ -50,7 +50,7 @@ class EmbeddedStrategy:
         ffprobe_path: str | None = None,
         ffmpeg_path: str | None = None,
         timeout: float = 15.0,
-        extract_timeout: float = 5.0,
+        extract_timeout: float = 8.0,
         min_bytes: int = _MIN_REFERENCE_BYTES,
         cache: ReferenceDiskCache | None = None,
     ) -> None:
@@ -199,9 +199,11 @@ class EmbeddedStrategy:
             "-analyzeduration", "10000000",
             "-probesize", "10000000",
             "-rw_timeout", "8000000",
-            "-t", "900",
             "-copyts",
             "-i", stream_url,
+            # ``-t`` must come *after* ``-i`` (output option): before the input
+            # it triggers seeking problems on remote HTTP MKV streams.
+            "-t", "900",
             "-map", f"0:{index}",
             "-c:s", "srt",
             "-f", "srt",
