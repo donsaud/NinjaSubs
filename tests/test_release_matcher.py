@@ -206,6 +206,21 @@ def test_extract_target_filename_from_extra():
     assert extract_target_filename("") is None
 
 
+def test_extract_target_filename_recovers_scene_parent_from_obfuscated_path():
+    from app.services.ranking import extract_stream_params
+
+    path = (
+        "Suits.S01E01.Pilot.Part.1.2.1080p.NF.WEB-DL.DDP5.1.H.264-playWEB/"
+        "e4WcFo4Tz5J8PoFwiBfP880XsBuHk4dS.mkv"
+    )
+    assert (
+        extract_stream_params(path)["filename"]
+        == "Suits.S01E01.Pilot.Part.1.2.1080p.NF.WEB-DL.DDP5.1.H.264-playWEB"
+    )
+    # A plain informative basename is still returned unchanged.
+    assert extract_stream_params("Movie.2024.1080p.mkv")["filename"] == "Movie.2024.1080p.mkv"
+
+
 def test_matching_group_and_source_guarantees_minimum_85_percent():
     """Verify that any release with matching group and source scores >= 85%."""
     target = "Gladiator.2000.1080p.BluRay.x264-SPARKS.mkv"

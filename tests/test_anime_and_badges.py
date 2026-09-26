@@ -683,9 +683,10 @@ async def test_endpoint_strips_trailing_hex_hashes_dynamically(client):
 
         # Ensure item.id and item.url are valid and intact
         sub_url = subs[0]["url"]
-        assert "/sub/" in sub_url
-        assert sub_url.endswith(".srt")
-        sub_id = sub_url.split("/sub/")[-1].replace(".srt", "")
+        sub_path = sub_url.split("?", 1)[0]
+        assert "/sub/" in sub_path
+        assert sub_path.endswith(".srt")
+        sub_id = sub_path.split("/sub/")[-1].replace(".srt", "")
         meta = cache_manager.get_metadata(sub_id)
         assert meta is not None
         assert (

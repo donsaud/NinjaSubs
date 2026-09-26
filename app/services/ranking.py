@@ -713,7 +713,12 @@ def extract_stream_params(
                         params["video_size"] = val
         else:
             if not params["filename"] and re.search(r"(?i)\.(mkv|mp4|avi|ts|m2ts|webm)$", decoded):
-                params["filename"] = decoded.split("/")[-1].strip(" '\"")
+                # Preserve a meaningful parent folder when the basename is an
+                # obfuscated debrid hash (e.g. ``Scene.Release.Name/hash.mkv``).
+                from app.services.sync.matching import prefer_meaningful_release_name
+
+                stripped = decoded.strip(" '\"")
+                params["filename"] = prefer_meaningful_release_name(stripped) or stripped
 
     return params
 

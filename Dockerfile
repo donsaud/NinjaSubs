@@ -19,6 +19,16 @@ RUN groupadd --gid 10001 appuser && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install the static `alass` subtitle synchronizer (Rust, pre-compiled linux64),
+# ffprobe/ffmpeg for Tier-2 embedded subtitle track probing/extraction, and
+# bsdtar (libarchive-tools) for RAR/7z/tar reference-subtitle archives.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates ffmpeg libarchive-tools && \
+    curl -fsSL -o /usr/local/bin/alass \
+        https://github.com/kaegi/alass/releases/download/v2.0.0/alass-linux64 && \
+    chmod +x /usr/local/bin/alass && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Copy application source code
 COPY app/ /app/app/
 

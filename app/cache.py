@@ -8,9 +8,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from cachetools import TTLCache
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# A failed download/extraction is retried by Stremio; remember it briefly so a
+# broken upstream entry cannot trigger a full provider fan-out on every retry.
+_FAILURE_TTL_SECONDS = 600
 
 
 class LRUCacheManager:
@@ -30,13 +36,22 @@ class LRUCacheManager:
         self.max_files = max_files
         self.meta_dir = self.cache_dir / "_meta"
         self._lock = asyncio.Lock()
+        # Short-TTL negative cache for sub_ids whose upstream archive proved
+        # unusable (all providers failed), keyed by sub_id.
+        self._failed: TTLCache[str, str] = TTLCache(maxsize=4096, ttl=_FAILURE_TTL_SECONDS)
 
         # Ensure directories exist
+        self.ensure_dirs()
+
+    def ensure_dirs(self) -> bool:
+        """Create the cache + metadata directories if missing (idempotent)."""
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             self.meta_dir.mkdir(parents=True, exist_ok=True)
+            return True
         except OSError as e:
-            logger.error(f"Failed to create cache directory {self.cache_dir}: {e}")
+            logger.error(f"Failed to create cache directories under {self.cache_dir}: {e}")
+            return False
 
     def get_subtitle_path(self, sub_id: str) -> Path:
         """Return path for a given subtitle ID."""
@@ -73,12 +88,20 @@ class LRUCacheManager:
     async def save_subtitle(self, sub_id: str, data: bytes) -> bool:
         """
         Atomically save subtitle file to disk and trigger LRU cleanup.
+
+        Empty/whitespace payloads are refused so an invalid archive extraction
+        can never be persisted and replayed on the next request.
         """
+        if not data or not data.strip():
+            logger.warning(f"Refusing to cache empty subtitle payload for {sub_id}")
+            return False
+
         file_path = self.get_subtitle_path(sub_id)
         tmp_path = file_path.with_suffix(".srt.tmp")
 
         async with self._lock:
             try:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path.write_bytes(data)
                 tmp_path.replace(file_path)
                 now = time.time()
@@ -103,6 +126,9 @@ class LRUCacheManager:
         """Store download metadata for on-demand retrieval."""
         meta_path = self.get_meta_path(sub_id)
         try:
+            # A fresh/re-mounted cache volume can be missing ``_meta``; recreate
+            # it so metadata writes never fail with ENOENT.
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
             meta_path.write_text(json.dumps(metadata), encoding="utf-8")
         except OSError as e:
             logger.warning(f"Failed to store metadata for {sub_id}: {e}")
@@ -129,6 +155,20 @@ class LRUCacheManager:
                         pass
         except Exception as e:
             logger.warning(f"Failed to clear metadata cache directory {self.meta_dir}: {e}")
+
+    def mark_failed(self, sub_id: str) -> None:
+        """Remember (short TTL) that a sub_id's upstream archive was unusable."""
+        self._failed[sub_id] = "1"
+
+    def is_failed(self, sub_id: str) -> bool:
+        """True when sub_id recently failed download/extraction (retry guard)."""
+        return sub_id in self._failed
+
+    def clear_failed(self, sub_id: str) -> None:
+        self._failed.pop(sub_id, None)
+
+    def clear_failures(self) -> None:
+        self._failed.clear()
 
     def _enforce_limits(self) -> None:
         """

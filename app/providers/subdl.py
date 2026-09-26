@@ -1,6 +1,7 @@
 """Subdl API provider integration."""
 
 import logging
+import time
 
 import httpx
 
@@ -11,6 +12,41 @@ from app.utils.language import get_subdl_lang_code, normalize_to_iso639_2
 from app.utils.uploader import extract_uploader
 
 logger = logging.getLogger("uvicorn.error")
+
+
+class SubdlCircuitBreaker:
+    """Process-wide cooldown after SubDL rate-limits (HTTP 429).
+
+    Once tripped, every SubDL entry point fast-bypasses for ``cooldown``
+    seconds without firing a network request, so a client retry storm cannot
+    keep hammering an already rate-limited upstream. Other providers are
+    unaffected and remain the fallback.
+    """
+
+    def __init__(self, cooldown: float = 60.0) -> None:
+        self.cooldown = cooldown
+        self._open_until = 0.0
+
+    def trip(self) -> None:
+        self._open_until = time.monotonic() + self.cooldown
+        logger.warning(
+            "Subdl circuit breaker tripped (HTTP 429); skipping SubDL for %.0fs",
+            self.cooldown,
+        )
+
+    def is_open(self) -> bool:
+        return time.monotonic() < self._open_until
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self._open_until - time.monotonic())
+
+    def reset(self) -> None:
+        self._open_until = 0.0
+
+
+# Module-level singleton shared by every SubdlProvider instance.
+SUBDL_BREAKER = SubdlCircuitBreaker()
 
 
 class SubdlProvider(BaseSubtitleProvider):
@@ -42,6 +78,13 @@ class SubdlProvider(BaseSubtitleProvider):
             logger.warning(
                 "Subdl API key is not configured. Subdl requires an API key for queries. "
                 "Configure SUBDL_API_KEY via environment variable or user config link."
+            )
+            return []
+
+        if SUBDL_BREAKER.is_open():
+            logger.info(
+                "Subdl circuit breaker open (%.0fs remaining); bypassing SubDL search",
+                SUBDL_BREAKER.remaining,
             )
             return []
 
@@ -98,6 +141,7 @@ class SubdlProvider(BaseSubtitleProvider):
 
                 if resp.status_code == 429:
                     logger.warning("Subdl API rate limit reached (HTTP 429).")
+                    SUBDL_BREAKER.trip()
                     break
 
                 if resp.status_code != 200:
@@ -255,6 +299,13 @@ class SubdlProvider(BaseSubtitleProvider):
         """
         Download subtitle archive (.zip or .srt) from Subdl.
         """
+        if SUBDL_BREAKER.is_open():
+            logger.info(
+                "Subdl circuit breaker open (%.0fs remaining); bypassing SubDL download",
+                SUBDL_BREAKER.remaining,
+            )
+            return None
+
         effective_key = (api_key or settings.SUBDL_API_KEY or "").strip()
         headers = {
             "User-Agent": "StremioArabicSubs/1.0.0",
@@ -281,6 +332,7 @@ class SubdlProvider(BaseSubtitleProvider):
                 return None
             if resp.status_code == 429:
                 logger.warning("Subdl download rate limit reached (HTTP 429).")
+                SUBDL_BREAKER.trip()
                 return None
             logger.warning(f"Subdl download returned HTTP {resp.status_code} for {download_ref}")
             return None

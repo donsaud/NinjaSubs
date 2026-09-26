@@ -11,6 +11,7 @@ import httpx
 from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
+from app.services.sync.matching import _season_number
 from app.utils.language import get_subsource_lang_name, normalize_to_iso639_2
 from app.utils.uploader import extract_uploader
 
@@ -25,6 +26,16 @@ def _mask_key(val: str) -> str:
     if len(v) <= 8:
         return "***"
     return f"{v[:4]}...{v[-4:]}"
+
+
+def _coerce_file_list(value: Any) -> list[str]:
+    """Normalise the SubSource ``files`` field, which may be a count (int), a
+    filename string, or a list of filenames."""
+    if isinstance(value, list | tuple | set):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        return [value]
+    return []
 
 
 def _matches_series_episode(item: dict[str, Any], season: int, episode: int, raw_name: str) -> bool:
@@ -67,7 +78,7 @@ def _matches_series_episode(item: dict[str, Any], season: int, episode: int, raw
         candidates.extend([str(x) for x in rel_info if x])
     elif isinstance(rel_info, str) and rel_info:
         candidates.append(rel_info)
-    for k in ("release_name", "releaseName", "name", "release"):
+    for k in ("raw_name", "release_name", "releaseName", "name", "release"):
         val = item.get(k)
         if val and isinstance(val, str):
             candidates.append(val)
@@ -80,6 +91,22 @@ def _matches_series_episode(item: dict[str, Any], season: int, episode: int, raw
     has_specific_indicator = False
     for r_name in candidates:
         r_lower = r_name.lower()
+
+        # a0) Strict season tag (season packs like "Dexter.S01"/"Season One"):
+        # must match the requested season, including worded numbers.
+        detected_season = _season_number(r_name)
+        if detected_season is not None:
+            has_specific_indicator = True
+            if detected_season != target_s:
+                return False
+
+        # a0b) Combined ``8x01`` season+episode notation.
+        m_sxe = re.search(r"(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)", r_lower)
+        if m_sxe:
+            has_specific_indicator = True
+            if int(m_sxe.group(1)) == target_s and int(m_sxe.group(2)) == target_e:
+                return True
+            continue
 
         # a) Standard SxxExx / SeXX.EpXX
         m_se = re.search(
@@ -171,32 +198,58 @@ class SubSourceService:
         imdb_id: str,
         title: str | None = None,
         year: int | None = None,
+        season: int | None = None,
     ) -> int | None:
         """
         Step 1: Resolve internal SubSource movieId using IMDb ID or text title search.
         Tries candidate query parameters on /movies/search.
+
+        TV series are catalogued per season (one movieId per season page), so
+        when ``season`` is given the entry matching that season is preferred;
+        otherwise the first entry is used (legacy behaviour).
         """
         endpoint = f"{self.BASE_URL}/movies/search"
 
-        def _extract_id(data: Any) -> int | None:
+        def _collect_entries(data: Any) -> list[dict]:
+            found: list[dict] = []
             if isinstance(data, dict):
-                for id_key in ("movieId", "movie_id", "id", "_id"):
-                    if data.get(id_key) is not None:
-                        try:
-                            return int(data[id_key])
-                        except (ValueError, TypeError):
-                            pass
+                if any(data.get(id_key) is not None for id_key in ("movieId", "movie_id", "id", "_id")):
+                    found.append(data)
                 for nested_key in ("data", "movies", "results"):
                     if nested_key in data:
-                        found = _extract_id(data[nested_key])
-                        if found is not None:
-                            return found
+                        found.extend(_collect_entries(data[nested_key]))
             elif isinstance(data, list):
                 for item in data:
-                    found = _extract_id(item)
-                    if found is not None:
-                        return found
+                    found.extend(_collect_entries(item))
+            return found
+
+        def _entry_id(entry: dict) -> int | None:
+            for id_key in ("movieId", "movie_id", "id", "_id"):
+                if entry.get(id_key) is not None:
+                    try:
+                        return int(entry[id_key])
+                    except (ValueError, TypeError):
+                        pass
             return None
+
+        def _entry_season(entry: dict) -> int | None:
+            for season_key in ("season", "seasonNumber", "season_number"):
+                if entry.get(season_key) is not None:
+                    try:
+                        return int(entry[season_key])
+                    except (ValueError, TypeError):
+                        pass
+            return None
+
+        def _select_movie_id(data: Any) -> int | None:
+            entries = [entry for entry in _collect_entries(data) if _entry_id(entry) is not None]
+            if not entries:
+                return None
+            if season is not None:
+                for entry in entries:
+                    if _entry_season(entry) == season:
+                        return _entry_id(entry)
+            return _entry_id(entries[0])
 
         # 1. Primary lookup: direct IMDb ID query
         imdb_params = {"searchType": "imdb", "imdb": imdb_id}
@@ -218,7 +271,7 @@ class SubSourceService:
             if resp.status_code == 200:
                 try:
                     data = resp.json()
-                    mid = _extract_id(data)
+                    mid = _select_movie_id(data)
                     if mid:
                         logger.info(
                             f"[SubSource Movie Search] Successfully resolved movieId={mid} for '{imdb_id}'"
@@ -259,7 +312,7 @@ class SubSourceService:
                 if resp.status_code == 200:
                     try:
                         data = resp.json()
-                        mid = _extract_id(data)
+                        mid = _select_movie_id(data)
                         if mid:
                             logger.info(
                                 f"[SubSource Movie Search] Successfully resolved movieId={mid} via text fallback for '{title}'"
@@ -310,9 +363,11 @@ class SubSourceService:
                 f"[SubSource Request] Outbound URL: {subtitles_endpoint} | Sanitized Headers: {sanitized_headers}"
             )
 
-            # Step 1: Resolve internal SubSource movieId using IMDb ID
+            # Step 1: Resolve internal SubSource movieId using IMDb ID.
+            # Series are catalogued per season, so the requested season picks
+            # its own page (e.g. Dexter S08 -> the season-8 movieId).
             movie_id = await self.resolve_movie_id(
-                client=client, imdb_id=imdb_id, title=title, year=year
+                client=client, imdb_id=imdb_id, title=title, year=year, season=season
             )
 
             async def _fetch_pages(base_params: dict[str, Any]) -> list[Any]:
@@ -518,7 +573,7 @@ class SubSourceService:
                             or item.get("downloadUrl")
                             or f"/subtitles/{sub_id}/download",
                             "hearing_impaired": is_hi,
-                            "files": item.get("files") or [],
+                            "files": _coerce_file_list(item.get("files")),
                             "uploader": uploader,
                         }
                     )
@@ -662,7 +717,7 @@ class SubsourceProvider(BaseSubtitleProvider):
                     raw_release = raw_release[:-4]
 
                 # Determine subtitle format (.ass, .ssa, .vtt, .srt)
-                files_list = item.get("files") or []
+                files_list = _coerce_file_list(item.get("files"))
                 raw_lower = raw_release.lower()
                 if raw_lower.endswith(".ass") or any(
                     str(f).lower().endswith(".ass") for f in files_list

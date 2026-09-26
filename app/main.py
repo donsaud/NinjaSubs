@@ -1,5 +1,6 @@
 """FastAPI application for Stremio Arabic Subtitles Addon."""
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -19,9 +20,11 @@ from app.cache import cache_manager
 from app.config import settings
 from app.extractor import (
     SubtitleExtractionError,
-    extract_srt_from_zip,
+    detect_archive_kind,
+    extract_subtitle_from_archive,
     is_ass_subtitle,
     is_vtt_subtitle,
+    looks_like_subtitle,
     transcode_to_utf8,
 )
 from app.models import Manifest, SubtitleItem, SubtitlesResponse, UserPreferences
@@ -38,6 +41,16 @@ from app.services.aggregator import (
     format_informative_badge,
 )
 from app.services.cache import clear_subtitle_cache
+from app.services.sync.embedded_strategy import EmbeddedStrategy
+from app.services.sync.external_strategy import ExternalExactStrategy
+from app.services.sync.hash_strategy import HashExactStrategy
+from app.services.sync.matching import (
+    is_informative_release_name,
+    prefer_meaningful_release_name,
+)
+from app.services.sync.orchestrator import SyncOrchestrator
+from app.services.sync_cache import SyncCache
+from app.services.sync_service import SubtitleSyncService
 from app.utils.ass_converter import convert_ass_to_srt_bytes
 from app.utils.cleaners import (
     CleanOptions,
@@ -54,6 +67,7 @@ from app.utils.network import get_base_url, get_local_lan_ip, is_local_or_contai
 from app.utils.parser import parse_stremio_id
 from app.utils.release_matcher import (
     extract_stream_params,
+    sanitize_release_name,
 )
 from app.utils.rtl import fix_rtl_punctuation_bytes
 
@@ -66,6 +80,16 @@ logger = logging.getLogger("stremio_arabic_subs")
 # Global HTTP client container for connection pooling and lifecycle management
 _http_client: httpx.AsyncClient | None = None
 
+# Subtitle auto-sync (alass) service + 24h result cache.
+_sync_service = SubtitleSyncService()
+_sync_cache = SyncCache()
+
+# Application-scoped sync orchestrator. A single instance is hoisted to the
+# process so its ``_inflight`` map actually coalesces concurrent identical
+# requests — a per-request instance left that map always empty.
+_app_orchestrator: SyncOrchestrator | None = None
+_app_orchestrator_client: httpx.AsyncClient | None = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -74,6 +98,8 @@ async def lifespan(app: FastAPI):
     # Invalidate and clear in-memory TTLCache and metadata cache on container restart / startup
     clear_subtitle_cache()
     cache_manager.clear_metadata()
+    cache_manager.clear_failures()
+    cache_manager.ensure_dirs()
     logger.info("Cleared in-memory subtitle TTLCache and metadata cache on application startup/restart.")
 
     logger.info("Initializing connection pool httpx.AsyncClient (<100MB footprint)...")
@@ -87,10 +113,17 @@ async def lifespan(app: FastAPI):
         headers={"User-Agent": "StremioArabicSubs/1.0.0"},
         follow_redirects=True,
     )
-    yield
-    logger.info("Closing httpx.AsyncClient...")
-    if _http_client:
-        await _http_client.aclose()
+    _init_sync_orchestrator()
+    await _sync_cache.connect()
+    try:
+        yield
+    finally:
+        if _app_orchestrator is not None:
+            await _app_orchestrator.close()
+        logger.info("Closing httpx.AsyncClient...")
+        if _http_client:
+            await _http_client.aclose()
+        await _sync_cache.close()
 
 
 app = FastAPI(
@@ -177,10 +210,6 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
     # prefer the auto-detected LAN URL so links work on external devices (Android TV, etc.).
     base_url = lan_url if is_local_or_container_host(req_host) else get_base_url(request)
 
-    subdl_env_set = bool(settings.SUBDL_API_KEY.strip())
-    subsource_env_set = bool(settings.SUBSOURCE_API_KEY.strip())
-    opensubtitles_env_set = bool(settings.OPENSUBTITLES_API_KEY.strip())
-
     if prefill_config:
         prefs = parse_user_config(prefill_config)
     else:
@@ -220,6 +249,7 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
             "eastern_arabic_numerals": prefs.eastern_arabic_numerals,
             "strip_diacritics": prefs.strip_diacritics,
             "convert_ass_to_srt": prefs.convert_ass_to_srt,
+            "auto_sync": prefs.auto_sync,
         }
     )
 
@@ -243,22 +273,6 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
             )
     language_options_html = "\n                    ".join(options_html)
 
-    env_banner_html = ""
-    if subdl_env_set or subsource_env_set or opensubtitles_env_set:
-        env_banner_html = f"""
-        <div class="flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-[#141619] border border-[#22262b] text-xs">
-            <div class="flex items-center gap-2">
-                <span class="h-2 w-2 rounded-full bg-emerald-400"></span>
-                <span class="font-medium text-white">Server Defaults Active</span>
-            </div>
-            <div class="text-[#8b929a] font-mono text-[11px]">
-                Subdl: {'&#10004; Configured' if subdl_env_set else '&#9888; Not Set'} &bull;
-                Subsource: {'&#10004; Configured' if subsource_env_set else '&#9888; Not Set'} &bull;
-                OpenSubtitles: {'&#10004; Configured' if opensubtitles_env_set else '&#9888; Not Set'}
-            </div>
-        </div>
-        """
-
     template_path = Path(__file__).parent / "templates" / "configure.html"
     if template_path.is_file():
         raw_html = template_path.read_text(encoding="utf-8")
@@ -273,7 +287,6 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
             .replace("{{initial_exclude_hi}}", initial_exclude_hi)
             .replace("{{initial_phase2_json}}", initial_phase2_json)
             .replace("{{language_options_html}}", language_options_html)
-            .replace("{{env_banner_html}}", env_banner_html)
         )
 
     # Fallback to in-code template if file is unexpectedly unavailable
@@ -538,6 +551,7 @@ async def _fetch_subtitles_handler(
     target_filename = stream_params.get("filename")
     video_hash = stream_params.get("video_hash")
     video_size = stream_params.get("video_size")
+    stream_url = request.query_params.get("stream_url") or request.query_params.get("streamUrl")
 
     # Check if cache bypass requested via query params or headers
     bypass_cache = bool(
@@ -607,6 +621,13 @@ async def _fetch_subtitles_handler(
             "subsource_key": prefs.subsource_key,
             "opensubtitles_key": prefs.opensubtitles_key,
             "lang": rel_lang,
+            "uploader": getattr(rel, "uploader", "") or "",
+            "hearing_impaired": bool(getattr(rel, "hearing_impaired", False)),
+            "video_hash": video_hash,
+            "video_size": video_size,
+            "stream_url": stream_url,
+            "title": title,
+            "year": year,
         }
         cache_manager.store_metadata(sub_id, meta_dict)
 
@@ -656,6 +677,21 @@ async def _fetch_subtitles_handler(
                 if config_str
                 else f"{base_url}/sub/{sub_id}.{sub_format}"
             )
+
+        # Embed media context so the serve route can auto-sync on demand even when
+        # the in-memory search metadata is unavailable (e.g. after a restart).
+        context_qs = _subtitle_context_query(
+            parsed.imdb_id,
+            media_type,
+            season,
+            episode,
+            meta_dict.get("target_filename"),
+            video_hash,
+            video_size,
+            stream_url=stream_url,
+        )
+        if context_qs:
+            sub_url = f"{sub_url}?{context_qs}"
 
         subtitle_items.append(
             SubtitleItem(
@@ -772,6 +808,70 @@ def srt_to_vtt(srt_bytes: bytes) -> bytes:
         return srt_bytes
 
 
+def _canonical_release_name(value: Any) -> str:
+    """Canonicalize a release name for cross-provider equivalence checks."""
+    cleaned = sanitize_release_name(str(value or ""))
+    cleaned = re.sub(r"[\W_]+", " ", cleaned, flags=re.UNICODE).casefold()
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _canonical_uploader(value: Any) -> str:
+    """Canonicalize an uploader username for cross-provider equivalence checks."""
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def _candidate_release_name(candidate: Any) -> str:
+    if isinstance(candidate, dict):
+        return str(candidate.get("release_name") or "")
+    return str(getattr(candidate, "release_name", "") or "")
+
+
+def _candidate_uploader(candidate: Any) -> str:
+    if isinstance(candidate, dict):
+        return str(candidate.get("uploader") or "")
+    return str(getattr(candidate, "uploader", "") or "")
+
+
+def _candidate_hearing_impaired(candidate: Any) -> bool | None:
+    if isinstance(candidate, dict):
+        value = candidate.get("hearing_impaired")
+    else:
+        value = getattr(candidate, "hearing_impaired", None)
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _is_exact_fallback_release(
+    requested_name: Any,
+    requested_uploader: Any,
+    requested_hearing_impaired: bool | None,
+    candidate: Any,
+) -> bool:
+    """Check whether a SubSource candidate is the same release as requested.
+
+    Release names must match exactly after sanitization. Uploaders must match
+    when both sides supply a usable username; HI status must match when both
+    sides supply it. Missing uploader/HI metadata does not by itself reject an
+    otherwise exact release-name match.
+    """
+    wanted = _canonical_release_name(requested_name)
+    found = _canonical_release_name(_candidate_release_name(candidate))
+    if not wanted or not found or wanted != found:
+        return False
+
+    wanted_uploader = _canonical_uploader(requested_uploader)
+    found_uploader = _canonical_uploader(_candidate_uploader(candidate))
+    if wanted_uploader and found_uploader and wanted_uploader != found_uploader:
+        return False
+
+    if requested_hearing_impaired is not None:
+        found_hearing_impaired = _candidate_hearing_impaired(candidate)
+        if found_hearing_impaired is not None and bool(requested_hearing_impaired) != found_hearing_impaired:
+            return False
+    return True
+
+
 async def _fallback_download_subsource(
     imdb_id: str,
     media_type: str = "series",
@@ -781,8 +881,17 @@ async def _fallback_download_subsource(
     target_filename: str | None = None,
     lang: str = "ara",
     client: httpx.AsyncClient | None = None,
+    requested_release_name: Any | None = None,
+    requested_uploader: Any | None = None,
+    requested_hearing_impaired: bool | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> bytes | None:
-    """Fallback mechanism to download and transcode subtitle from Subsource when primary provider fails."""
+    """Download an exact-equivalent subtitle from Subsource when primary provider fails.
+
+    The fallback never substitutes a merely similar or highest-rated release for
+    the requested subtitle. It returns bytes only for the same sanitized release
+    name (and, when known, the same uploader/HI status).
+    """
     effective_key = (subsource_key or getattr(settings, "SUBSOURCE_API_KEY", "") or "").strip()
     if not effective_key:
         logger.warning("Cannot perform Subsource fallback: no Subsource API key available.")
@@ -795,8 +904,6 @@ async def _fallback_download_subsource(
         return None
 
     try:
-        from app.services.subtitle_matcher import rank_subtitles
-
         provider = SubsourceProvider(client)
         is_series = (str(media_type).lower() in ("series", "tv", "anime")) or (
             season is not None and episode is not None
@@ -817,23 +924,37 @@ async def _fallback_download_subsource(
             logger.warning(f"[Subsource Fallback] No subtitles found by Subsource for {imdb_id}")
             return None
 
-        # Rank candidate releases against target_filename if available
-        if target_filename or episode is not None:
-            ranked = rank_subtitles(
-                video_filename=target_filename,
-                subtitles=releases,
-                preferred_languages=[lang],
-                discard_mismatches=False,
-                season=season,
-                episode=episode,
+        # Only an exact-equivalent release may stand in for the requested subtitle.
+        # This prevents every failed SubDL ID from collapsing onto SubSource's
+        # highest-rated generic file for the same episode.
+        if not _canonical_release_name(requested_release_name):
+            logger.warning(
+                "[Subsource Fallback] Missing requested release identity; refusing generic substitution."
             )
-            candidates = ranked if ranked else releases
-        else:
-            candidates = releases
+            return None
+        exact_matches = [
+            release
+            for release in releases
+            if _is_exact_fallback_release(
+                requested_release_name,
+                requested_uploader,
+                requested_hearing_impaired,
+                release,
+            )
+        ]
+        if not exact_matches:
+            logger.warning(
+                "[Subsource Fallback] No exact-equivalent release for %r (uploader=%r) among %d SubSource candidate(s).",
+                requested_release_name,
+                requested_uploader,
+                len(releases),
+            )
+            return None
 
-        best_release = candidates[0]
+        best_release = exact_matches[0]
         logger.info(
-            f"[Subsource Fallback] Selected best release: '{best_release.release_name}' ({best_release.download_url})"
+            f"[Subsource Fallback] Selected exact-equivalent release: '{best_release.release_name}' "
+            f"(uploader={best_release.uploader!r}, {best_release.download_url})"
         )
 
         raw_data = await provider.download_archive(best_release.download_url, api_key=effective_key)
@@ -841,16 +962,40 @@ async def _fallback_download_subsource(
             logger.warning("[Subsource Fallback] Downloaded archive content is empty")
             return None
 
-        if raw_data[:4] == b"PK\x03\x04":
-            srt_bytes = extract_srt_from_zip(
+        if detect_archive_kind(raw_data):
+            srt_bytes = extract_subtitle_from_archive(
                 raw_data,
                 target_filename=target_filename or best_release.release_name,
                 season=season,
                 episode=episode,
+                lang=lang,
             )
         else:
-            srt_bytes = transcode_to_utf8(raw_data)
+            srt_bytes = transcode_to_utf8(raw_data, lang=lang)
 
+        # Never accept a binary/HTML/non-subtitle payload as a subtitle.
+        if not looks_like_subtitle(srt_bytes):
+            logger.warning(
+                "[Subsource Fallback] Payload for %r is not a valid subtitle; refusing",
+                best_release.release_name,
+            )
+            return None
+
+        # Bind this payload to the actually downloaded SubSource file so cache
+        # entries cannot later masquerade as the original provider's subtitle.
+        if meta is not None:
+            meta.update(
+                {
+                    "provider": "subsource",
+                    "download_url": best_release.download_url,
+                    "release_name": best_release.release_name,
+                    "uploader": getattr(best_release, "uploader", "") or "",
+                    "hearing_impaired": bool(getattr(best_release, "hearing_impaired", False)),
+                    "fallback_provider": "subsource",
+                    "fallback_download_url": best_release.download_url,
+                    "fallback_release_name": best_release.release_name,
+                }
+            )
         return srt_bytes
     except Exception as e:
         logger.error(f"[Subsource Fallback] Exception during fallback download: {e}", exc_info=True)
@@ -884,6 +1029,224 @@ def _clean_options_from_query(query_params: Any) -> CleanOptions:
             raw = query_params.get(name, "1" if default else "0")
             values[name] = str(raw).lower() not in ("0", "false", "no")
     return CleanOptions(**values)
+
+
+def _subtitle_context_query(
+    imdb_id: Any,
+    media_type: Any,
+    season: Any,
+    episode: Any,
+    filename: Any,
+    video_hash: Any = None,
+    video_size: Any = None,
+    stream_url: Any = None,
+) -> str:
+    """Encode media context into the subtitle URL so the serve route can sync."""
+    params: dict[str, str] = {}
+    if imdb_id:
+        params["imdb"] = str(imdb_id)
+    if media_type:
+        params["type"] = str(media_type)
+    if season not in (None, ""):
+        params["season"] = str(season)
+    if episode not in (None, ""):
+        params["episode"] = str(episode)
+    if filename:
+        params["filename"] = str(filename)
+    if video_hash:
+        params["videohash"] = str(video_hash)
+    if video_size not in (None, ""):
+        params["videosize"] = str(video_size)
+    if stream_url:
+        params["stream_url"] = str(stream_url)
+    return urllib.parse.urlencode(params)
+
+
+def _media_context_from_request(request: Request) -> dict[str, Any]:
+    """Extract media context query params attached to a subtitle URL."""
+    params = request.query_params
+    context: dict[str, Any] = {}
+    for key, target in (
+        ("imdb", "imdb_id"),
+        ("type", "media_type"),
+        ("media_type", "media_type"),
+        ("season", "season"),
+        ("episode", "episode"),
+        ("filename", "target_filename"),
+        ("name", "target_filename"),
+        ("videohash", "video_hash"),
+        ("video_hash", "video_hash"),
+        ("videosize", "video_size"),
+        ("video_size", "video_size"),
+        ("stream_url", "stream_url"),
+        ("streamUrl", "stream_url"),
+    ):
+        value = params.get(key)
+        if value and target not in context:
+            context[target] = value
+    for int_key in ("season", "episode"):
+        if int_key in context:
+            try:
+                context[int_key] = int(context[int_key])
+            except (TypeError, ValueError):
+                context.pop(int_key, None)
+    return context
+
+
+def _merge_sync_meta(meta: dict | None, context: dict | None) -> dict:
+    """Combine cached search metadata with URL media context for sync matching."""
+    merged = dict(meta) if meta else {}
+    context = context or {}
+    for key in (
+        "imdb_id",
+        "media_type",
+        "season",
+        "episode",
+        "target_filename",
+        "video_hash",
+        "video_size",
+        "stream_url",
+    ):
+        if context.get(key) not in (None, "") and (
+            key in ("media_type", "season", "episode", "target_filename", "video_hash", "video_size", "stream_url")
+            or merged.get(key) in (None, "")
+        ):
+            merged[key] = context[key]
+    merged.setdefault("lang", merged.get("lang") or "ara")
+
+    # Debrid/Usenet proxies expose an obfuscated basename inside a directory
+    # that carries the real scene name. Resolve the meaningful segment for both
+    # edition matching and cache fingerprinting, preferring whichever of the
+    # cached/context filenames is informative, then the stream URL's path.
+    meaningful = ""
+    for candidate in (merged.get("target_filename"), context.get("target_filename")):
+        resolved = prefer_meaningful_release_name(candidate)
+        if is_informative_release_name(resolved):
+            meaningful = resolved
+            break
+    if not meaningful:
+        stream_path = urllib.parse.urlparse(str(merged.get("stream_url") or "")).path
+        derived = prefer_meaningful_release_name(stream_path)
+        if is_informative_release_name(derived):
+            meaningful = derived
+    if meaningful:
+        merged["target_filename"] = meaningful
+    return merged
+
+
+def _sync_meta_for_user(meta: dict | None, context: dict | None, prefs: UserPreferences | None) -> dict:
+    """Use the current request's credentials even when the raw subtitle is cached."""
+    merged = _merge_sync_meta(meta, context)
+    if prefs is not None:
+        for name in ("subdl_key", "subsource_key", "opensubtitles_key"):
+            merged[name] = getattr(prefs, name) or ""
+    return merged
+
+
+async def _sync_subtitle_for_response(
+    payload: bytes, meta: dict | None, context: dict | None, target_id: str,
+    prefs: UserPreferences | None, auto_sync: bool, convert_ass: bool,
+) -> bytes:
+    if not convert_ass and is_ass_subtitle(payload):
+        # alass emits SRT; keep the user's native ASS styling preference.
+        return payload
+    return await _maybe_sync_subtitle(
+        payload, _sync_meta_for_user(meta, context, prefs), target_id, auto_sync
+    )
+
+
+def _build_sync_orchestrator() -> SyncOrchestrator | None:
+    """Construct the sync orchestrator: hash, embedded, then exact external.
+
+    Tier 1 is the OpenSubtitles video-hash lookup; Tier 2 extracts an
+    embedded English track when a stream URL is supplied; Tier 3 resolves an
+    external reference only on an exact team/edition tree verdict. Anything
+    unconfirmed aborts to the original subtitle.
+    """
+    if _http_client is None:
+        return None
+    return SyncOrchestrator(
+        hash_strategy=HashExactStrategy(OpenSubtitlesProvider(_http_client)),
+        embedded_strategy=EmbeddedStrategy(),
+        external_strategy=ExternalExactStrategy(
+            subdl_provider=SubdlProvider(_http_client),
+            subsource_provider=SubsourceProvider(_http_client),
+        ),
+        sync_service=_sync_service,
+        sync_cache=_sync_cache,
+    )
+
+
+def _init_sync_orchestrator() -> SyncOrchestrator | None:
+    """Build and cache the process-wide orchestrator during startup."""
+    global _app_orchestrator, _app_orchestrator_client
+    _app_orchestrator = _build_sync_orchestrator()
+    _app_orchestrator_client = _http_client
+    return _app_orchestrator
+
+
+def _get_sync_orchestrator() -> SyncOrchestrator | None:
+    """Return the shared orchestrator, rebuilding only if the client changed.
+
+    Keeping one instance alive is what makes ``_inflight`` single-flight work;
+    rebuilding on client swap preserves test isolation when ``_http_client`` is
+    patched.
+    """
+    global _app_orchestrator, _app_orchestrator_client
+    if _http_client is None:
+        return None
+    if _app_orchestrator is None or _app_orchestrator_client is not _http_client:
+        return _init_sync_orchestrator()
+    return _app_orchestrator
+
+
+def _consume_background_sync(task: "asyncio.Task[bytes]") -> None:
+    """Retrieve a detached background sync result so it can warm the cache."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:  # pragma: no cover - defensive
+        logger.debug("[sync] background sync finished with error: %s", exc)
+
+
+async def _maybe_sync_subtitle(
+    sub_bytes: bytes, meta: dict, target_id: str, auto_sync: bool = False
+) -> bytes:
+    """
+    Best-effort synchronization of an Arabic subtitle against a reference.
+
+    Requires BOTH the server-level ``ENABLE_SUBTITLE_SYNC`` flag and the user's
+    ``auto_sync`` preference. The inline wait is bounded by
+    ``SYNC_TOTAL_REQUEST_BUDGET`` seconds so a slow provider/alass run can never
+    blow past the player's ~8-12s subtitle timeout: on expiry the original bytes
+    are served immediately while the detached task keeps running to populate the
+    ``final_sub`` cache for subsequent requests.
+    """
+    orchestrator = _get_sync_orchestrator()
+    if orchestrator is None:
+        logger.warning("[sync] skipped: HTTP client unavailable, cannot resolve reference")
+        return sub_bytes
+
+    budget = float(getattr(settings, "SYNC_TOTAL_REQUEST_BUDGET", 7.5))
+    task = asyncio.ensure_future(
+        orchestrator.evaluate_and_sync(sub_bytes, meta, target_id, auto_sync=auto_sync)
+    )
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+    except TimeoutError:
+        logger.warning(
+            "[sync] request budget %.1fs exceeded -> serving original; "
+            "sync continues in background to warm the cache",
+            budget,
+        )
+        task.add_done_callback(_consume_background_sync)
+        return sub_bytes
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[sync] evaluation failed (%s) -> serving original", exc)
+        return sub_bytes
 
 
 def _run_subtitle_optimization_pipeline(
@@ -933,11 +1296,16 @@ def _build_subtitle_response(
     eastern_arabic_numerals: bool = False,
     strip_diacritics: bool = False,
     convert_ass: bool = True,
+    auto_sync: bool = False,
 ) -> Response:
     """Construct HTTP response preserving exact original subtitle format (pass-through)."""
     # 1. Ingestion/normalization: legacy encoding first, then convert ASS/SSA into a
     #    standard intermediate SRT so all later (SRT-only) optimizations apply.
     options = clean_options or CleanOptions()
+    cache_control = (
+        "private, no-cache" if auto_sync and settings.ENABLE_SUBTITLE_SYNC
+        else "public, max-age=86400"
+    )
     if options.fix_encoding:
         sub_bytes = fix_subtitle_encoding_bytes(sub_bytes)
 
@@ -967,7 +1335,7 @@ def _build_subtitle_response(
             content=sub_bytes,
             media_type="text/x-ssa; charset=utf-8",
             headers={
-                "Cache-Control": "public, max-age=86400",
+                "Cache-Control": cache_control,
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Headers": "*",
                 "Content-Disposition": _format_content_disposition(release_name, ext),
@@ -980,7 +1348,7 @@ def _build_subtitle_response(
             content=vtt_bytes,
             media_type="text/vtt; charset=utf-8",
             headers={
-                "Cache-Control": "public, max-age=86400",
+                "Cache-Control": cache_control,
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Headers": "*",
                 "Content-Disposition": _format_content_disposition(release_name, "vtt"),
@@ -992,7 +1360,7 @@ def _build_subtitle_response(
             content=sub_bytes,
             media_type="application/x-subrip; charset=utf-8",
             headers={
-                "Cache-Control": "public, max-age=86400",
+                "Cache-Control": cache_control,
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Headers": "*",
                 "Content-Disposition": _format_content_disposition(release_name, "srt"),
@@ -1005,11 +1373,14 @@ async def _serve_subtitle_handler(
     config_str: str | None = None,
     req_format: str | None = None,
     is_vtt: bool = False,
+    media_context: dict | None = None,
 ) -> Response:
     """Serve extracted subtitle (.srt / .ass / .ssa / .vtt) with UTF-8 encoding and caching headers."""
     global _http_client
     if _http_client is None:
         raise HTTPException(status_code=503, detail="HTTP client is not initialized")
+
+    media_context = media_context or {}
 
     # Per-user subtitle processing preferences (default: enabled)
     rtl_fix_enabled = True
@@ -1020,6 +1391,8 @@ async def _serve_subtitle_handler(
     eastern_numerals_enabled = False
     strip_diacritics_enabled = False
     convert_ass_enabled = True
+    auto_sync_enabled = False
+    cfg_prefs = None
     if config_str:
         try:
             cfg_prefs = parse_user_config(config_str)
@@ -1031,6 +1404,7 @@ async def _serve_subtitle_handler(
             eastern_numerals_enabled = cfg_prefs.eastern_arabic_numerals
             strip_diacritics_enabled = cfg_prefs.strip_diacritics
             convert_ass_enabled = cfg_prefs.convert_ass_to_srt
+            auto_sync_enabled = cfg_prefs.auto_sync
         except Exception:
             rtl_fix_enabled = True
             ad_removal_enabled = True
@@ -1040,6 +1414,7 @@ async def _serve_subtitle_handler(
             eastern_numerals_enabled = False
             strip_diacritics_enabled = False
             convert_ass_enabled = True
+            auto_sync_enabled = False
 
     # URL-decode incoming sub_id in case player encoded spaces/brackets (%5B...%5D)
     clean_sub_id = urllib.parse.unquote(sub_id).strip()
@@ -1073,6 +1448,10 @@ async def _serve_subtitle_handler(
     if cached_content:
         meta = cache_manager.get_metadata(target_id)
         release_name = meta.get("release_name", target_id) if meta else target_id
+        cached_content = await _sync_subtitle_for_response(
+            cached_content, meta, media_context, target_id, cfg_prefs,
+            auto_sync_enabled, convert_ass_enabled,
+        )
         return _build_subtitle_response(
             cached_content,
             release_name,
@@ -1085,12 +1464,25 @@ async def _serve_subtitle_handler(
             eastern_numerals_enabled,
             strip_diacritics_enabled,
             convert_ass_enabled,
+            auto_sync=auto_sync_enabled,
+        )
+
+    # Failed recently (broken upstream archive): short-circuit before any
+    # provider fan-out so client retries cannot spam SubDL/SubSource.
+    if cache_manager.is_failed(target_id):
+        logger.warning(
+            "Subtitle #%s marked unavailable after a recent failure; skipping provider fetch",
+            target_id,
+        )
+        raise HTTPException(
+            status_code=502, detail="Subtitle unavailable (recent extraction failure)"
         )
 
     # 2. Cache miss: retrieve metadata for on-demand fetch
     meta = cache_manager.get_metadata(target_id)
     if not meta:
         raise HTTPException(status_code=404, detail="Subtitle metadata not found or expired")
+    meta = _sync_meta_for_user(meta, media_context, cfg_prefs)
 
     provider_name = meta.get("provider")
     download_url = meta.get("download_url")
@@ -1138,66 +1530,130 @@ async def _serve_subtitle_handler(
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider_name}")
 
-    if not raw_archive:
-        # Fallback to Subsource if primary provider failed (e.g. Subdl 429 daily limit)
-        if meta.get("imdb_id") and provider_name != "subsource":
-            logger.warning(
-                f"Primary provider '{provider_name}' failed to deliver archive for #{target_id}. "
-                f"Attempting fallback to Subsource for {meta.get('imdb_id')}..."
-            )
-            fallback_bytes = await _fallback_download_subsource(
-                imdb_id=meta["imdb_id"],
-                media_type=meta.get("media_type") or ("series" if season is not None else "movie"),
-                season=season,
-                episode=episode,
-                subsource_key=subsource_key,
-                target_filename=meta.get("target_filename") or release_name,
-                lang=meta.get("lang", "ara"),
-                client=_http_client,
-            )
-            if fallback_bytes:
-                logger.info(
-                    f"Fallback to Subsource succeeded for #{target_id} ({len(fallback_bytes)} bytes)"
-                )
-                await cache_manager.save_subtitle(target_id, fallback_bytes)
-                return _build_subtitle_response(
-                    fallback_bytes,
-                    release_name,
-                    detected_format,
-                    rtl_fix_enabled,
-                    ad_removal_enabled,
-                    keep_credits_enabled,
-                    clean_options,
-                    strip_hi_enabled,
-                    eastern_numerals_enabled,
-                    strip_diacritics_enabled,
-                    convert_ass_enabled,
-                )
+    async def _fallback_or_none() -> Response | None:
+        """Serve an exact-equivalent SubSource substitute, or ``None`` on a miss.
 
+        Used whenever the primary provider yields no usable payload: a failed
+        download or a ZIP with no recognized subtitle file. The substitute is
+        only cached once it has actually resolved.
+        """
+        if not meta.get("imdb_id") or provider_name == "subsource":
+            return None
+        logger.warning(
+            "Primary provider '%s' delivered no usable subtitle for #%s. "
+            "Attempting fallback to Subsource for %s...",
+            provider_name,
+            target_id,
+            meta.get("imdb_id"),
+        )
+        fallback_bytes = await _fallback_download_subsource(
+            imdb_id=meta["imdb_id"],
+            media_type=meta.get("media_type") or ("series" if season is not None else "movie"),
+            season=season,
+            episode=episode,
+            subsource_key=subsource_key,
+            target_filename=meta.get("target_filename") or release_name,
+            lang=meta.get("lang", "ara"),
+            client=_http_client,
+            requested_release_name=release_name,
+            requested_uploader=meta.get("uploader"),
+            requested_hearing_impaired=meta.get("hearing_impaired"),
+            meta=meta,
+        )
+        if not fallback_bytes:
+            return None
+        logger.info(
+            "Fallback to Subsource succeeded for #%s (%d bytes)", target_id, len(fallback_bytes)
+        )
+        cache_manager.store_metadata(target_id, meta)
+        await cache_manager.save_subtitle(target_id, fallback_bytes)
+        cache_manager.clear_failed(target_id)
+        fallback_bytes = await _sync_subtitle_for_response(
+            fallback_bytes, meta, media_context, target_id, cfg_prefs,
+            auto_sync_enabled, convert_ass_enabled,
+        )
+        return _build_subtitle_response(
+            fallback_bytes,
+            meta.get("release_name", release_name),
+            detected_format,
+            rtl_fix_enabled,
+            ad_removal_enabled,
+            keep_credits_enabled,
+            clean_options,
+            strip_hi_enabled,
+            eastern_numerals_enabled,
+            strip_diacritics_enabled,
+            convert_ass_enabled,
+            auto_sync=auto_sync_enabled,
+        )
+
+    if not raw_archive:
+        # A download failure may be transient (429/network): do NOT negative-cache
+        # it, so the next retry can still recover.
+        fallback_response = await _fallback_or_none()
+        if fallback_response is not None:
+            return fallback_response
         raise HTTPException(
             status_code=502, detail="Failed to download subtitle from upstream provider"
         )
 
-    # 4. In-memory ZIP extraction & transcoding
+    # 4. Archive extraction & transcoding. A malformed archive, or one that
+    # holds no recognized subtitle file, must never surface as a 500 or be
+    # cached: fall back to SubSource, else return a clean 502.
     try:
-        if raw_archive[:4] == b"PK\x03\x04":
-            srt_bytes = extract_srt_from_zip(
+        if detect_archive_kind(raw_archive):
+            srt_bytes = extract_subtitle_from_archive(
                 raw_archive,
                 target_filename=release_name,
                 season=season,
                 episode=episode,
+                lang=meta.get("lang"),
             )
         else:
-            srt_bytes = transcode_to_utf8(raw_archive)
+            srt_bytes = transcode_to_utf8(raw_archive, lang=meta.get("lang"))
     except SubtitleExtractionError as e:
-        logger.error(f"ZIP extraction error for #{target_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to unpack subtitle: {e}") from e
+        logger.warning("Archive extraction failed for #%s: %s", target_id, e)
+        fallback_response = await _fallback_or_none()
+        if fallback_response is not None:
+            return fallback_response
+        cache_manager.mark_failed(target_id)
+        raise HTTPException(
+            status_code=502, detail=f"Subtitle archive contained no usable subtitle: {e}"
+        ) from e
     except Exception as e:
-        logger.error(f"Unexpected error extracting subtitle #{target_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal subtitle extraction error") from e
+        logger.error("Unexpected error extracting subtitle #%s: %s", target_id, e)
+        fallback_response = await _fallback_or_none()
+        if fallback_response is not None:
+            return fallback_response
+        cache_manager.mark_failed(target_id)
+        raise HTTPException(
+            status_code=502, detail="Failed to unpack subtitle archive"
+        ) from e
+
+    # An empty OR non-subtitle payload (binary archive, HTML error page, or a
+    # provider notice) is as useless as a failed extraction and must not be cached.
+    if not looks_like_subtitle(srt_bytes):
+        logger.warning(
+            "Extracted subtitle #%s is not a valid subtitle payload -> treating as invalid",
+            target_id,
+        )
+        fallback_response = await _fallback_or_none()
+        if fallback_response is not None:
+            return fallback_response
+        cache_manager.mark_failed(target_id)
+        raise HTTPException(
+            status_code=502, detail="Subtitle archive contained no usable subtitle"
+        )
 
     # 5. Save to local LRU disk cache (triggers auto-cleanup if >1GB or >500 files)
     await cache_manager.save_subtitle(target_id, srt_bytes)
+    cache_manager.clear_failed(target_id)
+
+    # 5b. Optional auto-sync against a trusted reference (best-effort, strict timeout).
+    srt_bytes = await _sync_subtitle_for_response(
+        srt_bytes, meta, media_context, target_id, cfg_prefs,
+        auto_sync_enabled, convert_ass_enabled,
+    )
 
     # 6. Serve with appropriate headers preserving native subtitle format
     return _build_subtitle_response(
@@ -1212,6 +1668,7 @@ async def _serve_subtitle_handler(
         eastern_numerals_enabled,
         strip_diacritics_enabled,
         convert_ass_enabled,
+        auto_sync=auto_sync_enabled,
     )
 
 
@@ -1241,6 +1698,8 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
     eastern_numerals_enabled = False
     strip_diacritics_enabled = False
     convert_ass_enabled = True
+    auto_sync_enabled = False
+    cfg_prefs = None
     if config:
         try:
             cfg_prefs = parse_user_config(config)
@@ -1252,6 +1711,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             eastern_numerals_enabled = cfg_prefs.eastern_arabic_numerals
             strip_diacritics_enabled = cfg_prefs.strip_diacritics
             convert_ass_enabled = cfg_prefs.convert_ass_to_srt
+            auto_sync_enabled = cfg_prefs.auto_sync
         except Exception:
             rtl_fix_enabled = True
             ad_removal_enabled = True
@@ -1261,6 +1721,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             eastern_numerals_enabled = False
             strip_diacritics_enabled = False
             convert_ass_enabled = True
+            auto_sync_enabled = False
     else:
         if "enable_rtl_fix" in request.query_params:
             rtl_fix_enabled = request.query_params.get("enable_rtl_fix", "1").lower() not in (
@@ -1296,11 +1757,18 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             ).lower() not in ("0", "false", "no")
         clean_options = _clean_options_from_query(request.query_params)
 
+    async def _sync_payload(payload: bytes, meta: dict | None) -> bytes:
+        return await _sync_subtitle_for_response(
+            payload, meta, _media_context_from_request(request), str(file_id), cfg_prefs,
+            auto_sync_enabled, convert_ass_enabled,
+        )
+
     # 1. Check local disk cache first
     cached_content = await cache_manager.get_subtitle(str(file_id))
     if cached_content:
         meta = cache_manager.get_metadata(str(file_id))
         release_name = meta.get("release_name", file_id) if meta else file_id
+        cached_content = await _sync_payload(cached_content, meta)
         return _build_subtitle_response(
             cached_content,
             release_name,
@@ -1313,6 +1781,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             eastern_numerals_enabled,
             strip_diacritics_enabled,
             convert_ass_enabled,
+            auto_sync=auto_sync_enabled,
         )
 
     # 2. Extract keys
@@ -1359,8 +1828,11 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             if dl_resp.status_code == 200 and dl_resp.content:
                 meta = cache_manager.get_metadata(str(file_id))
                 release_name = meta.get("release_name", file_id) if meta else file_id
-                sub_bytes = transcode_to_utf8(dl_resp.content)
+                sub_bytes = transcode_to_utf8(
+                    dl_resp.content, lang=(meta.get("lang") if meta else None)
+                )
                 await cache_manager.save_subtitle(str(file_id), sub_bytes)
+                sub_bytes = await _sync_payload(sub_bytes, meta)
                 return _build_subtitle_response(
                     sub_bytes,
                     release_name,
@@ -1373,6 +1845,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
                     eastern_numerals_enabled,
                     strip_diacritics_enabled,
                     convert_ass_enabled,
+                    auto_sync=auto_sync_enabled,
                 )
             else:
                 logger.warning(
@@ -1404,12 +1877,18 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             target_filename=meta.get("target_filename") or meta.get("release_name"),
             lang=meta.get("lang", "ara"),
             client=_http_client,
+            requested_release_name=meta.get("release_name"),
+            requested_uploader=meta.get("uploader"),
+            requested_hearing_impaired=meta.get("hearing_impaired"),
+            meta=meta,
         )
         if fallback_bytes:
             logger.info(
                 f"OpenSubtitles fallback succeeded for file_id {file_id} ({len(fallback_bytes)} bytes)"
             )
+            cache_manager.store_metadata(str(file_id), meta)
             await cache_manager.save_subtitle(str(file_id), fallback_bytes)
+            fallback_bytes = await _sync_payload(fallback_bytes, meta)
             return _build_subtitle_response(
                 fallback_bytes,
                 meta.get("release_name", file_id),
@@ -1422,57 +1901,74 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
                 eastern_numerals_enabled,
                 strip_diacritics_enabled,
                 convert_ass_enabled,
+                auto_sync=auto_sync_enabled,
             )
 
     raise HTTPException(status_code=404, detail="Subtitle link expired or limit reached")
 
 
 @app.api_route("/sub/{sub_id}.srt", methods=["GET", "HEAD"])
-async def serve_subtitle(sub_id: str):
+async def serve_subtitle(sub_id: str, request: Request):
     """Serve subtitle as SRT (direct)."""
-    return await _serve_subtitle_handler(sub_id, req_format="srt")
+    return await _serve_subtitle_handler(
+        sub_id, req_format="srt", media_context=_media_context_from_request(request)
+    )
 
 
 @app.api_route("/sub/{sub_id}.ass", methods=["GET", "HEAD"])
-async def serve_subtitle_ass(sub_id: str):
+async def serve_subtitle_ass(sub_id: str, request: Request):
     """Serve subtitle as native ASS (direct)."""
-    return await _serve_subtitle_handler(sub_id, req_format="ass")
+    return await _serve_subtitle_handler(
+        sub_id, req_format="ass", media_context=_media_context_from_request(request)
+    )
 
 
 @app.api_route("/sub/{sub_id}.ssa", methods=["GET", "HEAD"])
-async def serve_subtitle_ssa(sub_id: str):
+async def serve_subtitle_ssa(sub_id: str, request: Request):
     """Serve subtitle as native SSA (direct)."""
-    return await _serve_subtitle_handler(sub_id, req_format="ssa")
+    return await _serve_subtitle_handler(
+        sub_id, req_format="ssa", media_context=_media_context_from_request(request)
+    )
 
 
 @app.api_route("/sub/{sub_id}.vtt", methods=["GET", "HEAD"])
-async def serve_subtitle_vtt(sub_id: str):
+async def serve_subtitle_vtt(sub_id: str, request: Request):
     """Serve subtitle as WebVTT (direct)."""
-    return await _serve_subtitle_handler(sub_id, req_format="vtt")
+    return await _serve_subtitle_handler(
+        sub_id, req_format="vtt", media_context=_media_context_from_request(request)
+    )
 
 
 @app.api_route("/{config}/sub/{sub_id}.srt", methods=["GET", "HEAD"])
-async def serve_configured_subtitle(config: str, sub_id: str):
+async def serve_configured_subtitle(config: str, sub_id: str, request: Request):
     """Serve subtitle as SRT (user-configured route)."""
-    return await _serve_subtitle_handler(sub_id, config_str=config, req_format="srt")
+    return await _serve_subtitle_handler(
+        sub_id, config_str=config, req_format="srt", media_context=_media_context_from_request(request)
+    )
 
 
 @app.api_route("/{config}/sub/{sub_id}.ass", methods=["GET", "HEAD"])
-async def serve_configured_subtitle_ass(config: str, sub_id: str):
+async def serve_configured_subtitle_ass(config: str, sub_id: str, request: Request):
     """Serve subtitle as native ASS (user-configured route)."""
-    return await _serve_subtitle_handler(sub_id, config_str=config, req_format="ass")
+    return await _serve_subtitle_handler(
+        sub_id, config_str=config, req_format="ass", media_context=_media_context_from_request(request)
+    )
 
 
 @app.api_route("/{config}/sub/{sub_id}.ssa", methods=["GET", "HEAD"])
-async def serve_configured_subtitle_ssa(config: str, sub_id: str):
+async def serve_configured_subtitle_ssa(config: str, sub_id: str, request: Request):
     """Serve subtitle as native SSA (user-configured route)."""
-    return await _serve_subtitle_handler(sub_id, config_str=config, req_format="ssa")
+    return await _serve_subtitle_handler(
+        sub_id, config_str=config, req_format="ssa", media_context=_media_context_from_request(request)
+    )
 
 
 @app.api_route("/{config}/sub/{sub_id}.vtt", methods=["GET", "HEAD"])
-async def serve_configured_subtitle_vtt(config: str, sub_id: str):
+async def serve_configured_subtitle_vtt(config: str, sub_id: str, request: Request):
     """Serve subtitle as WebVTT (user-configured route)."""
-    return await _serve_subtitle_handler(sub_id, config_str=config, req_format="vtt")
+    return await _serve_subtitle_handler(
+        sub_id, config_str=config, req_format="vtt", media_context=_media_context_from_request(request)
+    )
 
 
 @app.get("/health")

@@ -47,6 +47,7 @@ def encode_user_config(
     eastern_arabic_numerals: bool = False,
     strip_diacritics: bool = False,
     convert_ass_to_srt: bool = True,
+    auto_sync: bool = False,
 ) -> str:
     """
     Encode user configuration into a URL-safe base64 string matching community addons.
@@ -110,6 +111,8 @@ def encode_user_config(
         payload["strip_diacritics"] = True
     if convert_ass_to_srt is False:
         payload["convert_ass_to_srt"] = False
+    if auto_sync:
+        payload["auto_sync"] = True
 
     if badge_parts is not None:
         resolved_parts = normalize_badge_parts(badge_parts)
@@ -162,6 +165,7 @@ def parse_user_config(
     eastern_arabic_numerals: bool = False
     strip_diacritics: bool = False
     convert_ass_to_srt: bool = True
+    auto_sync: bool = False
 
     def _as_bool(value: Any, default: bool = True) -> bool:
         if value is None:
@@ -305,6 +309,10 @@ def parse_user_config(
                         data.get("convert_ass_to_srt", data.get("convertAssToSrt")),
                         True,
                     )
+                if "auto_sync" in data or "autoSync" in data:
+                    auto_sync = _as_bool(
+                        data.get("auto_sync", data.get("autoSync")), False
+                    )
         except Exception as e:
             logger.debug(f"Base64 JSON decode skipped for config string: {e}")
 
@@ -402,6 +410,8 @@ def parse_user_config(
                     convert_ass_to_srt = _as_bool(
                         parsed_qs["convert_ass_to_srt"][0], True
                     )
+                if "auto_sync" in parsed_qs:
+                    auto_sync = _as_bool(parsed_qs["auto_sync"][0], False)
             except Exception:
                 pass
 
@@ -489,4 +499,5 @@ def parse_user_config(
         eastern_arabic_numerals=eastern_arabic_numerals,
         strip_diacritics=strip_diacritics,
         convert_ass_to_srt=convert_ass_to_srt,
+        auto_sync=auto_sync,
     )

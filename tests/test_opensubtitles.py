@@ -478,7 +478,8 @@ async def test_opensubtitles_stremio_endpoint_integration(client):
         # Label format: [{score}%] [OpenSubtitles] {cleaned_release_name}
         assert "[OpenSubtitles]" in sub["title"]
         assert sub["lang"] == "ara"
-        assert sub["url"].endswith("/sub/opensubtitles/99999.srt")
+        # URL may carry media-context query params for auto-sync.
+        assert "/sub/opensubtitles/99999.srt" in sub["url"]
 
 
 @pytest.mark.asyncio
@@ -688,3 +689,391 @@ async def test_head_and_options_requests(client):
         resp_sub = client.head("/subtitles/series/tt9288030:1:1.json")
         assert resp_sub.status_code == 200
         assert "HEAD" in resp_sub.headers["access-control-allow-methods"]
+
+
+def test_exact_fallback_release_matching():
+    from types import SimpleNamespace
+
+    from app.main import _is_exact_fallback_release
+
+    requested = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
+    assert _is_exact_fallback_release(
+        requested,
+        " Ahmed ",
+        False,
+        SimpleNamespace(
+            release_name="Sopranos S01E03 1080p WEB-DL DD5.1 H.264-BS",
+            uploader="ahmed",
+            hearing_impaired=False,
+        ),
+    ) is True
+    assert _is_exact_fallback_release(
+        requested,
+        "Ahmed",
+        False,
+        SimpleNamespace(
+            release_name="Sopranos.S01E11.1080p.WEB-DL.srt",
+            uploader="Ahmed",
+            hearing_impaired=False,
+        ),
+    ) is False
+    assert _is_exact_fallback_release(
+        requested,
+        "Ahmed",
+        False,
+        SimpleNamespace(
+            release_name=requested,
+            uploader="SomeoneElse",
+            hearing_impaired=False,
+        ),
+    ) is False
+    assert _is_exact_fallback_release("", "Ahmed", False, SimpleNamespace(release_name=requested)) is False
+
+
+@pytest.mark.asyncio
+async def test_subsource_fallback_refuses_generic_release():
+    from app.main import _fallback_download_subsource
+
+    requested_name = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
+    download_calls: list[str] = []
+
+    class _GenericSubsource:
+        async def search_subtitles(self, **kwargs):
+            return [
+                SubtitleRelease(
+                    release_name="Sopranos 1-11.srt",
+                    download_url="https://subsource.test/generic.zip",
+                    provider="subsource",
+                    lang="ara",
+                    uploader="generic-uploader",
+                )
+            ]
+
+        async def download_archive(self, download_ref, api_key=None):
+            download_calls.append(download_ref)
+            raise AssertionError("generic fallback must not be downloaded")
+
+    meta: dict = {"release_name": requested_name, "uploader": "Ahmed"}
+    with patch("app.main.SubsourceProvider", new=lambda client: _GenericSubsource()):
+        result = await _fallback_download_subsource(
+            imdb_id="tt0141842",
+            media_type="series",
+            season=1,
+            episode=3,
+            subsource_key="test_subsource_key",
+            target_filename=requested_name,
+            lang="ara",
+            client=object(),
+            requested_release_name=requested_name,
+            requested_uploader="Ahmed",
+            requested_hearing_impaired=False,
+            meta=meta,
+        )
+    assert result is None
+    assert download_calls == []
+    assert "fallback_download_url" not in meta
+
+
+@pytest.mark.asyncio
+async def test_subsource_fallback_uses_exact_equivalent_release():
+    from app.main import _fallback_download_subsource
+
+    requested_name = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
+    exact_srt = b"1\n00:00:01,000 --> 00:00:04,000\nExact equivalent\n"
+    download_calls: list[str] = []
+
+    class _ExactSubsource:
+        async def search_subtitles(self, **kwargs):
+            return [
+                SubtitleRelease(
+                    release_name="Sopranos 1-11.srt",
+                    download_url="https://subsource.test/generic.zip",
+                    provider="subsource",
+                    lang="ara",
+                    uploader="generic-uploader",
+                ),
+                SubtitleRelease(
+                    release_name="Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS",
+                    download_url="https://subsource.test/exact.srt",
+                    provider="subsource",
+                    lang="ara",
+                    uploader="Ahmed",
+                ),
+            ]
+
+        async def download_archive(self, download_ref, api_key=None):
+            download_calls.append(download_ref)
+            assert download_ref == "https://subsource.test/exact.srt"
+            return exact_srt
+
+    meta: dict = {"release_name": requested_name, "uploader": "Ahmed"}
+    with patch("app.main.SubsourceProvider", new=lambda client: _ExactSubsource()):
+        result = await _fallback_download_subsource(
+            imdb_id="tt0141842",
+            media_type="series",
+            season=1,
+            episode=3,
+            subsource_key="test_subsource_key",
+            target_filename=requested_name,
+            lang="ara",
+            client=object(),
+            requested_release_name=requested_name,
+            requested_uploader="Ahmed",
+            requested_hearing_impaired=False,
+            meta=meta,
+        )
+    assert result == exact_srt
+    assert download_calls == ["https://subsource.test/exact.srt"]
+    assert meta["provider"] == "subsource"
+    assert meta["download_url"] == "https://subsource.test/exact.srt"
+    assert meta["fallback_download_url"] == "https://subsource.test/exact.srt"
+    assert meta["uploader"] == "Ahmed"
+
+
+@pytest.mark.asyncio
+async def test_subdl_stream_without_exact_subsource_match_returns_502(client):
+    """A failed SubDL ID must fail alone rather than receive a generic SubSource file."""
+    sub_id = "subdl_no_exact_match"
+    requested_name = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
+    cache_manager.store_metadata(
+        sub_id,
+        {
+            "sub_id": sub_id,
+            "imdb_id": "tt0141842",
+            "media_type": "series",
+            "provider": "subdl",
+            "download_url": "https://subdl.com/sub/fake.zip",
+            "release_name": requested_name,
+            "season": 1,
+            "episode": 3,
+            "subdl_key": "test_subdl_key",
+            "subsource_key": "test_subsource_key",
+            "lang": "ara",
+            "uploader": "Ahmed",
+        },
+    )
+
+    class _GenericSubsource:
+        async def search_subtitles(self, **kwargs):
+            return [
+                SubtitleRelease(
+                    release_name="Sopranos 1-11.srt",
+                    download_url="https://subsource.test/generic.zip",
+                    provider="subsource",
+                    lang="ara",
+                    uploader="generic-uploader",
+                )
+            ]
+
+        async def download_archive(self, download_ref, api_key=None):
+            raise AssertionError("generic fallback must not be downloaded")
+
+    with (
+        patch(
+            "app.providers.subdl.SubdlProvider.download_archive",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("app.main.SubsourceProvider", new=lambda client: _GenericSubsource()),
+        patch(
+            "app.cache.cache_manager.get_subtitle",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.cache.cache_manager.save_subtitle",
+            new=AsyncMock(),
+        ) as mock_save,
+    ):
+        resp = client.get(f"/sub/{sub_id}.srt")
+        assert resp.status_code == 502
+        assert mock_save.await_count == 0
+
+
+def _zip_of(files: dict) -> bytes:
+    """Build an in-memory ZIP from {name: str|bytes}."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content.encode("utf-8") if isinstance(content, str) else content)
+    return buf.getvalue()
+
+
+def _store_subdl_meta(sub_id: str) -> None:
+    cache_manager.store_metadata(
+        sub_id,
+        {
+            "sub_id": sub_id,
+            "imdb_id": "tt9288030",
+            "media_type": "series",
+            "provider": "subdl",
+            "download_url": "https://subdl.com/sub/bad.zip",
+            "release_name": "Reacher.S01E01.1080p.WEB-DL",
+            "season": 1,
+            "episode": 1,
+            "subdl_key": "test_subdl_key",
+            "subsource_key": "test_subsource_key",
+            "lang": "ara",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_subdl_invalid_zip_returns_502_not_500(client):
+    """A ZIP with no recognized subtitle falls back, then returns 502 (never 500)."""
+    sub_id = "subdl_invalid_zip_0001"
+    _store_subdl_meta(sub_id)
+    bad_zip = _zip_of({"info.nfo": "no subs here", "cover.jpg": b"\xff\xd8\xff"})
+
+    with (
+        patch(
+            "app.providers.subdl.SubdlProvider.download_archive",
+            new=AsyncMock(return_value=bad_zip),
+        ),
+        patch(
+            "app.main._fallback_download_subsource",
+            new=AsyncMock(return_value=None),
+        ) as mock_fallback,
+        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
+        patch(
+            "app.cache.cache_manager.save_subtitle", new=AsyncMock(return_value=True)
+        ) as mock_save,
+    ):
+        resp = client.get(f"/sub/{sub_id}.srt")
+
+    assert resp.status_code == 502
+    assert resp.status_code != 500
+    assert "no usable subtitle" in resp.json()["detail"].lower()
+    mock_fallback.assert_called_once()
+    # The invalid archive must never be persisted.
+    mock_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_subdl_invalid_zip_falls_back_to_subsource(client):
+    """A valid-but-empty ZIP triggers the SubSource fallback and serves it."""
+    sub_id = "subdl_invalid_zip_0002"
+    _store_subdl_meta(sub_id)
+    bad_zip = _zip_of({"info.nfo": "nothing useful"})
+    fake_arabic = b"1\n00:00:01,000 --> 00:00:03,000\n\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7\n"
+
+    with (
+        patch(
+            "app.providers.subdl.SubdlProvider.download_archive",
+            new=AsyncMock(return_value=bad_zip),
+        ),
+        patch(
+            "app.main._fallback_download_subsource",
+            new=AsyncMock(return_value=fake_arabic),
+        ) as mock_fallback,
+        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
+        patch(
+            "app.cache.cache_manager.save_subtitle", new=AsyncMock(return_value=True)
+        ) as mock_save,
+    ):
+        resp = client.get(f"/sub/{sub_id}.srt")
+
+    assert resp.status_code == 200
+    assert resp.content == fake_arabic
+    mock_fallback.assert_called_once()
+    # Only the resolved fallback payload is cached.
+    mock_save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cache_refuses_empty_subtitle(tmp_path):
+    """Empty/whitespace payloads are never persisted (invalid archive guard)."""
+    from app.cache import LRUCacheManager
+
+    manager = LRUCacheManager(cache_dir=str(tmp_path), max_bytes=10000, max_files=5)
+    assert await manager.save_subtitle("empty", b"") is False
+    assert await manager.save_subtitle("blank", b"   \n\t") is False
+    assert await manager.get_subtitle("empty") is None
+
+
+@pytest.mark.asyncio
+async def test_failed_sub_id_short_circuits_retries(client):
+    """A broken upstream archive is hit once; retries are answered from the failure cache."""
+    sub_id = "subdl_broken_retry_0001"
+    _store_subdl_meta(sub_id)
+    bad_zip = _zip_of({"Suits.S01.720p.Web-DL.ReEnc-DeeJayAhmed.txt": "notice"})
+    download = AsyncMock(return_value=bad_zip)
+
+    with (
+        patch("app.providers.subdl.SubdlProvider.download_archive", new=download),
+        patch(
+            "app.main._fallback_download_subsource", new=AsyncMock(return_value=None)
+        ),
+        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
+    ):
+        first = client.get(f"/sub/{sub_id}.srt")
+        assert first.status_code == 502
+        assert cache_manager.is_failed(sub_id) is True
+
+        second = client.get(f"/sub/{sub_id}.srt")
+        assert second.status_code == 502
+        assert "recent extraction failure" in second.json()["detail"]
+
+    # Two retries, but the upstream archive was only fetched once.
+    assert download.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_extract_error_reports_archive_members():
+    """The extraction error must name the archive members for diagnosis."""
+    from app.extractor import SubtitleExtractionError, extract_srt_from_zip
+
+    zip_bytes = _zip_of({"Suits.S01.720p.Web-DL.ReEnc-DeeJayAhmed.txt": "notice"})
+    with pytest.raises(SubtitleExtractionError, match="No valid subtitle files") as excinfo:
+        extract_srt_from_zip(zip_bytes)
+    assert "Suits.S01.720p.Web-DL.ReEnc-DeeJayAhmed.txt" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_serve_rejects_non_subtitle_payload(client):
+    """A raw (non-archive) HTML/notice body must never be cached or served."""
+    sub_id = "subdl_non_subtitle_0001"
+    _store_subdl_meta(sub_id)
+    html = b"<html><body>upstream error</body></html>"
+    with (
+        patch(
+            "app.providers.subdl.SubdlProvider.download_archive",
+            new=AsyncMock(return_value=html),
+        ),
+        patch("app.main._fallback_download_subsource", new=AsyncMock(return_value=None)),
+        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
+        patch(
+            "app.cache.cache_manager.save_subtitle", new=AsyncMock(return_value=True)
+        ) as mock_save,
+    ):
+        resp = client.get(f"/sub/{sub_id}.srt")
+    assert resp.status_code == 502
+    mock_save.assert_not_called()
+    assert cache_manager.is_failed(sub_id) is True
+
+
+@pytest.mark.asyncio
+async def test_serve_extracts_rar_archive(client, monkeypatch):
+    """A RAR archive (DVDRip packs) is extracted, not served as binary."""
+    sub_id = "subdl_rar_0001"
+    _store_subdl_meta(sub_id)
+    srt = "1\n00:00:01,000 --> 00:00:02,000\nhello rar\n"
+    monkeypatch.setattr(
+        "app.extractor._extract_nonzip_members",
+        lambda raw, kind: [("fl-itw-xvid-cd2.srt", srt.encode("utf-8"))],
+    )
+    with (
+        patch(
+            "app.providers.subdl.SubdlProvider.download_archive",
+            new=AsyncMock(return_value=b"Rar!\x1a\x07\x00fake"),
+        ),
+        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
+        patch(
+            "app.cache.cache_manager.save_subtitle", new=AsyncMock(return_value=True)
+        ) as mock_save,
+    ):
+        resp = client.get(f"/sub/{sub_id}.srt")
+    assert resp.status_code == 200
+    assert b"hello rar" in resp.content
+    mock_save.assert_called_once()

@@ -7,6 +7,7 @@ import pytest
 
 from app.extractor import (
     SubtitleExtractionError,
+    decode_subtitle_bytes,
     extract_srt_from_zip,
     is_zip_slip_attempt,
     transcode_to_utf8,
@@ -164,3 +165,112 @@ def test_extract_ass_preserves_format_without_conversion():
     transcoded = transcode_to_utf8(ass_content.encode("utf-8"))
     assert is_ass_subtitle(transcoded) is True
     assert "[V4+ Styles]" in transcoded.decode("utf-8")
+
+
+def test_arabic_cp1256_with_stray_byte_keeps_arabic_readable():
+    """A legacy cp1256 file with an undecodable byte must not become latin mojibake."""
+    arabic_text = "1\n00:00:01,000 --> 00:00:05,000\nأهلاً وسهلاً بكم\n"
+    raw = bytearray(arabic_text.encode("cp1256"))
+    raw[10] = 0x81  # byte outside the cp1256 repertoire
+    out = decode_subtitle_bytes(bytes(raw), lang="ara")
+    assert "أهلاً وسهلاً بكم" in out
+    assert "Ã" not in out and "ã" not in out
+    # Strict clean UTF-8 output with no trace of the bad byte.
+    out.encode("utf-8")
+    assert "\x81" not in out
+
+
+def test_arabic_broken_utf8_is_repaired_not_mojibake():
+    """Mostly-valid UTF-8 with one corrupt byte keeps its Arabic text (single �)."""
+    arabic_text = "1\n00:00:01,000 --> 00:00:05,000\nمرحبا بك في الحلقة\n"
+    raw = bytearray(arabic_text.encode("utf-8"))
+    raw[30] = 0xFF
+    out = decode_subtitle_bytes(bytes(raw), lang="ara")
+    assert out.count("�") == 1
+    assert "مرحبا بك في الحلقة"[:6] in out
+    out.encode("utf-8")
+
+
+def test_arabic_utf16_bom_is_decoded():
+    """UTF-16LE payloads with a BOM decode instead of becoming latin garbage."""
+    arabic_text = "1\n00:00:01,000 --> 00:00:05,000\nمرحبا\n"
+    out = decode_subtitle_bytes(arabic_text.encode("utf-16"), lang="ara")
+    assert "مرحبا" in out
+
+
+def test_unknown_lang_keeps_legacy_single_byte_order():
+    """Without an Arabic language hint the historic cp1256-first order is kept."""
+    arabic_text = "1\n00:00:01,000 --> 00:00:05,000\nأهلاً\n"
+    assert decode_subtitle_bytes(arabic_text.encode("cp1256")) == arabic_text
+    assert transcode_to_utf8(arabic_text.encode("cp1256")).decode("utf-8") == arabic_text
+
+
+def test_extract_cp1256_zip_member_with_arabic_lang():
+    """ZIP members in legacy encodings decode to readable Arabic with lang hint."""
+    arabic_text = "1\n00:00:01,000 --> 00:00:05,000\nترجمة عربية\n"
+    zip_bytes = create_mock_zip({"movie.srt": arabic_text.encode("cp1256")})
+    assert extract_srt_from_zip(zip_bytes, lang="ara").decode("utf-8") == arabic_text
+
+
+def test_fix_encoding_with_arabic_lang_repairs_broken_utf8():
+    """Serve-time encoding fix honours the Arabic decoding order."""
+    from app.utils.cleaners import fix_subtitle_encoding_bytes
+
+    arabic_text = "1\n00:00:01,000 --> 00:00:05,000\nمرحبا بك\n"
+    raw = bytearray(arabic_text.encode("utf-8"))
+    raw[30] = 0xFF
+    out = fix_subtitle_encoding_bytes(bytes(raw), lang="ara").decode("utf-8")
+    assert out.count("�") == 1
+    assert "مرحبا" in out
+
+
+def test_detect_archive_kind():
+    from app.extractor import detect_archive_kind
+
+    assert detect_archive_kind(b"PK\x03\x04rest") == "zip"
+    assert detect_archive_kind(b"Rar!\x1a\x07\x00rest") == "rar"
+    assert detect_archive_kind(b"Rar!\x1a\x07\x01\x00rest") == "rar"
+    assert detect_archive_kind(b"7z\xbc\xaf\x27\x1crest") == "7z"
+    assert detect_archive_kind(b"\x00" * 257 + b"ustar\x00rest") == "tar"
+    assert detect_archive_kind(b"\x1f\x8brest") == "gzip"
+    assert detect_archive_kind(b"1\n00:00:01,000 --> 00:00:02,000\nhi\n") is None
+    assert detect_archive_kind(b"") is None
+
+
+def test_looks_like_subtitle():
+    from app.extractor import looks_like_subtitle
+
+    assert looks_like_subtitle(b"1\n00:00:01,000 --> 00:00:02,000\nhi\n") is True
+    assert looks_like_subtitle(b"WEBVTT\n\n00:00.000 --> 00:01.000\nhi") is True
+    assert looks_like_subtitle(b"[Script Info]\nDialogue: 0,0:00:01.00,0:00:02.00,Default\n") is True
+    assert looks_like_subtitle(b"<html><body>upstream error</body></html>") is False
+    assert looks_like_subtitle(b"Rar!\x1a\x07\x00binarygarbage") is False
+    assert looks_like_subtitle(b"Subtitle notice text only") is False
+    assert looks_like_subtitle(b"") is False
+
+
+def test_extract_subtitle_from_archive_rar(monkeypatch):
+    from app.extractor import extract_subtitle_from_archive
+
+    srt = "1\n00:00:01,000 --> 00:00:02,000\nhello rar\n"
+    monkeypatch.setattr(
+        "app.extractor._extract_nonzip_members",
+        lambda raw, kind: [("fl-itw-xvid-cd2.srt", srt.encode("utf-8"))],
+    )
+    out = extract_subtitle_from_archive(b"Rar!\x1a\x07\x00fake")
+    assert "hello rar" in out.decode("utf-8")
+
+
+def test_extract_subtitle_from_archive_rar_without_subtitles(monkeypatch):
+    from app.extractor import extract_subtitle_from_archive
+
+    monkeypatch.setattr("app.extractor._extract_nonzip_members", lambda raw, kind: [])
+    with pytest.raises(SubtitleExtractionError, match="No valid subtitle files"):
+        extract_subtitle_from_archive(b"Rar!\x1a\x07\x00fake")
+
+
+def test_extract_subtitle_from_archive_unknown_format_raises():
+    from app.extractor import extract_subtitle_from_archive
+
+    with pytest.raises(SubtitleExtractionError, match="Unrecognised archive format"):
+        extract_subtitle_from_archive(b"not-an-archive")

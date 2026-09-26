@@ -110,7 +110,26 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 - **Fix Display Timing**: Clamps micro-overlaps (< 500ms) between consecutive cues to stop player flickering (e.g. `00:00:01,000 --> 00:00:03,000` & `00:00:02,800 --> 00:00:05,000` → clamped to `00:00:02,800`).
 - **Convert ASS/SSA subtitles to SRT**: Enhances playback stability on Android TV (ExoPlayer) by converting ASS/SSA to SRT while retaining primary text colors and fixing Arabic RTL alignment.
 
+### Auto-Sync Subtitles
+
+Auto-sync is an optional, best-effort timing correction for Arabic subtitles.
+Set `ENABLE_SUBTITLE_SYNC=true` in `.env`, restart the service, then enable
+**Auto-Sync Subtitles** in your addon configuration. Docker includes `alass`,
+`ffmpeg`, and `ffprobe`; a local Python installation needs those executables
+available on `PATH` or configured through `.env`.
+
+The addon looks for an English reference using a video hash, an embedded track
+when the client supplies a stream URL, or a matching external release. If no
+usable reference is available, alignment fails, or the request exceeds its
+7.5-second sync budget, it serves the original subtitle. A timed-out sync can
+finish in the background for the next request. Native ASS/SSA is preserved
+without alignment when **Convert ASS/SSA subtitles to SRT** is disabled.
+
+See [the autosync audit](docs/internal-reports/AUTOSYNC_AUDIT.md) for fixes,
+verification, and remaining limitations.
+
 ### Subtitle Badge Customizer
+
 Customizes how subtitle tracks appear inside the Stremio or Nuvio player interface, allowing you to toggle and reorder metadata tags to match your preference:
 
 * **Match Score (`[100%]`)** — Displays the filename matching accuracy score against the playing video stream.

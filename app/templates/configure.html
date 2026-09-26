@@ -250,6 +250,7 @@
             display: flex;
             align-items: center;
             gap: 2px;
+            margin-top: 24px;
             margin-bottom: 20px;
             padding: 0;
             position: static;
@@ -837,7 +838,7 @@
     <div class="relative z-10 pointer-events-auto mx-auto w-full max-w-2xl px-4 sm:px-6 py-8 sm:py-12 pb-16 overflow-x-hidden">
 
         <!-- Header & Branding -->
-        <header class="relative flex flex-col items-start border-b border-zinc-800/60 pb-6 mb-8">
+        <header class="relative flex flex-col items-start border-b border-zinc-800/60 pb-6 mb-0">
             <img src="/static/logo.png" alt="NinjaSubs" class="h-14 md:h-16 w-auto object-contain select-none self-start">
             <p class="mt-3 text-sm text-zinc-400 font-normal leading-relaxed text-left max-w-xl">Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization.</p>
             <a href="https://github.com/donsaud/NinjaSubs"
@@ -851,8 +852,6 @@
                 </svg>
             </a>
         </header>
-
-        {{env_banner_html}}
 
         <!-- Wizard progress bar -->
         <nav class="wizard-progress" aria-label="Configuration steps">
@@ -1100,6 +1099,17 @@
 
                     <!-- Section D: Text Formatting & Timing -->
                     <div class="pref-group-label">Text Formatting &amp; Timing</div>
+
+                    <div id="autoSyncRow" class="pref-row">
+                        <div class="min-w-0">
+                            <label for="autoSync" class="pref-label">Auto-Sync Subtitles</label>
+                            <p class="pref-desc">Automatically syncs subtitle timing to match your video stream perfectly.</p>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="autoSync" class="peer sr-only">
+                            <span class="toggle-track"></span>
+                        </label>
+                    </div>
 
                     <div class="pref-row">
                         <div class="min-w-0">
@@ -1565,6 +1575,10 @@
             if (convertAssToggle && typeof initialPrefs.convert_ass_to_srt === "boolean") {
                 convertAssToggle.checked = initialPrefs.convert_ass_to_srt;
             }
+            const autoSyncToggle = document.getElementById("autoSync");
+            if (autoSyncToggle && typeof initialPrefs.auto_sync === "boolean") {
+                autoSyncToggle.checked = initialPrefs.auto_sync;
+            }
             const stripDiacriticsToggle = document.getElementById("stripDiacritics");
             if (
                 stripDiacriticsToggle &&
@@ -1760,6 +1774,10 @@
             // Default is on: serialize only when the user disables it.
             if (!convertAssEnabled) configObj.convert_ass_to_srt = false;
 
+            const autoSyncToggle = document.getElementById("autoSync");
+            const autoSyncEnabled = autoSyncToggle ? autoSyncToggle.checked : false;
+            if (autoSyncEnabled) configObj.auto_sync = true;
+
             const stripHiToggle = document.getElementById("stripHiLabels");
             const stripHiEnabled = stripHiToggle ? stripHiToggle.checked : false;
             // Standalone preference, independent of HI track exclusion.
@@ -1780,7 +1798,7 @@
                 !yifyEnabled || !catEnabled || !rtlEnabled || !adEnabled ||
                 !creditsEnabled || cleanFlagsNonDefault ||
                 easternNumeralsEnabled || stripDiacriticsEnabled ||
-                stripHiEnabled || !convertAssEnabled ||
+                stripHiEnabled || !convertAssEnabled || autoSyncEnabled ||
                 !subdlEnabled || !subsourceEnabled || !opensubtitlesEnabled;
 
             if (!hasAnyPreference) {
@@ -2135,6 +2153,7 @@
             "easternArabicNumerals",
             "stripDiacritics",
             "convertAssToSrt",
+            "autoSync",
             "stripHiLabels",
         ].forEach((id) => {
             const el = document.getElementById(id);

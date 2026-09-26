@@ -22,15 +22,28 @@ services:
       - ADDON_BASE_URL=${ADDON_BASE_URL:-}
       - LAN_IP=${LAN_IP:-}
       - HOST_IP=${HOST_IP:-}
+      # Optional subtitle auto-sync (alass) + Redis result cache
+      - ENABLE_SUBTITLE_SYNC=${ENABLE_SUBTITLE_SYNC:-false}
+      - REDIS_URL=${REDIS_URL:-}
+      - ALASS_PATH=${ALASS_PATH:-alass}
+      - ALASS_TIMEOUT_SECONDS=${ALASS_TIMEOUT_SECONDS:-10}
+      - ALASS_MAX_CONCURRENT_SYNCS=${ALASS_MAX_CONCURRENT_SYNCS:-1}
+      - SYNC_TOTAL_REQUEST_BUDGET=${SYNC_TOTAL_REQUEST_BUDGET:-7.5}
+      - SYNC_REQUIRE_EXACT_MATCH=${SYNC_REQUIRE_EXACT_MATCH:-true}
+      - FFPROBE_PATH=${FFPROBE_PATH:-ffprobe}
+      - FFMPEG_PATH=${FFMPEG_PATH:-ffmpeg}
+      - REFERENCE_CACHE_DIR=${REFERENCE_CACHE_DIR:-/app/cache/references}
+      - REFERENCE_CACHE_TTL_SECONDS=${REFERENCE_CACHE_TTL_SECONDS:-2592000}
       # LRU Cache bounds (Max 1GB / 500 files)
       - CACHE_DIR=/app/cache
       - CACHE_MAX_BYTES=1073741824
       - CACHE_MAX_FILES=500
-    # Strict resource bounds: runs smoothly under 100MB RAM
+    # Strict resource bounds: runs smoothly under 100MB RAM. CPU raised to give
+    # `alass` headroom for full-length film alignment matrices.
     deploy:
       resources:
         limits:
-          cpus: '0.5'
+          cpus: '1.0'
           memory: 150M
         reservations:
           memory: 50M

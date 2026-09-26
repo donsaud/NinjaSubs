@@ -281,22 +281,20 @@ class CleanOptions:
         )
 
 
-def fix_subtitle_encoding_bytes(content: bytes) -> bytes:
+def fix_subtitle_encoding_bytes(content: bytes, lang: str | None = None) -> bytes:
     """
     Decode legacy-encoded subtitle bytes and re-encode as clean UTF-8.
 
     Tries ``utf-8`` (BOM-aware), ``cp1256`` (Windows Arabic), ``iso-8859-6``
-    (ISO Arabic) and finally ``cp1252`` (with replacement) so no byte sequence
-    ever raises.
+    (ISO Arabic) and finally a ``replace`` fallback so no byte sequence ever
+    raises. Pass ``lang="ara"`` for Arabic-aware decoding (UTF-8 repair step
+    plus cp1256-biased final fallback).
     """
     if not content:
         return content
-    for encoding in _ENCODING_FALLBACKS:
-        try:
-            return content.decode(encoding).encode("utf-8")
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return content.decode("cp1252", errors="replace").encode("utf-8")
+    from app.extractor import decode_subtitle_bytes
+
+    return decode_subtitle_bytes(content, lang=lang).encode("utf-8")
 
 
 def strip_arabic_diacritics(content: str) -> str:

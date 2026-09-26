@@ -27,19 +27,47 @@ def disable_keyless_scraper_providers(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def default_sync_strict_mode(monkeypatch):
+    """Pin the reference decision policy to strict for deterministic tests.
+
+    The developer's local ``.env`` may set ``SYNC_REQUIRE_EXACT_MATCH=false``;
+    tests that exercise relaxed behavior set it explicitly themselves.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def reset_subdl_circuit_breaker():
+    """Reset the process-wide SubDL breaker so a 429 in one test cannot
+    fast-bypass SubDL in later tests."""
+    from app.providers.subdl import SUBDL_BREAKER
+
+    SUBDL_BREAKER.reset()
+    yield
+    SUBDL_BREAKER.reset()
+
+
+@pytest.fixture(autouse=True)
 def reset_in_memory_cache():
-    """Reset in-memory subtitle aggregation cache between tests."""
+    """Reset in-memory subtitle aggregation + failure caches between tests."""
     try:
+        from app.cache import cache_manager
         from app.services.cache import clear_subtitle_cache
 
         clear_subtitle_cache()
+        cache_manager.clear_failures()
     except ImportError:
         pass
     yield
     try:
+        from app.cache import cache_manager
         from app.services.cache import clear_subtitle_cache
 
         clear_subtitle_cache()
+        cache_manager.clear_failures()
     except ImportError:
         pass
 

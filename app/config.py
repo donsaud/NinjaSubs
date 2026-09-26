@@ -39,6 +39,29 @@ class Settings(BaseSettings):
     # Diagnostic / Observability
     NINJASUBS_DEBUG_RANKING: bool = False
 
+    # Subtitle auto-synchronization (alass) & result cache
+    ENABLE_SUBTITLE_SYNC: bool = False
+    ALASS_PATH: str = "alass"
+    ALASS_TIMEOUT_SECONDS: float = 10.0
+    ALASS_MAX_CONCURRENT_SYNCS: int = 1
+    REDIS_URL: str | None = None
+    # Hard inline budget for sync during a player request. ExoPlayer drops
+    # subtitles after ~8-12s, so past this we serve the original and let the
+    # (still-running) sync warm the cache for the next request.
+    SYNC_TOTAL_REQUEST_BUDGET: float = 7.5
+
+    # Persistent English-reference disk cache (30 days) for the sync pipeline.
+    REFERENCE_CACHE_DIR: str | None = None
+    REFERENCE_CACHE_TTL_SECONDS: float = 2592000.0  # 30 days
+
+    # Reference decision policy: fail closed unless the tree confirms the
+    # exact team/edition. Relax only to tolerate unknown edition markers.
+    SYNC_REQUIRE_EXACT_MATCH: bool = True
+
+    # Embedded-track reference extraction (Tier 2): ffprobe/ffmpeg binaries.
+    FFPROBE_PATH: str = "ffprobe"
+    FFMPEG_PATH: str = "ffmpeg"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -47,3 +70,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Activate secret redaction for every log record as early as possible: all
+# providers import this module, so outbound ``httpx`` URL logs get scrubbed.
+from app.utils.log_redaction import install_log_redaction  # noqa: E402
+
+install_log_redaction()

@@ -202,3 +202,11 @@ def test_opensubtitles_language_mapping():
     assert get_opensubtitles_lang_code("deu") == "de"
     assert get_opensubtitles_lang_code("fas") == "fa"
     assert get_opensubtitles_lang_code("ar") == "ar"
+
+
+def test_auto_sync_config_roundtrip_and_backward_compat():
+    """auto_sync defaults to False, round-trips, and is absent-safe for old URLs."""
+    assert parse_user_config(encode_user_config()).auto_sync is False
+    assert parse_user_config(encode_user_config(auto_sync=True)).auto_sync is True
+    # Legacy/absent value defaults to False.
+    assert parse_user_config("subdl=k1").auto_sync is False

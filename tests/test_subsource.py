@@ -812,3 +812,114 @@ def test_matches_series_episode():
     assert _matches_series_episode({"season": 1, "episode": 2}, target_s, target_e, "")
     assert not _matches_series_episode({"season": 1, "episode": 5}, target_s, target_e, "")
     assert not _matches_series_episode({"season": 2, "episode": 2}, target_s, target_e, "")
+
+
+def test_coerce_file_list_handles_non_iterable_shapes():
+    """SubSource `files` may be an int count (12); mapping must not crash."""
+    from app.providers.subsource import _coerce_file_list
+
+    assert _coerce_file_list(12) == []
+    assert _coerce_file_list(None) == []
+    assert _coerce_file_list("movie.srt") == ["movie.srt"]
+    assert _coerce_file_list(["a.srt", "b.ass"]) == ["a.srt", "b.ass"]
+
+
+def test_matches_series_episode_rejects_wrong_season_pack():
+    from app.providers.subsource import _matches_series_episode
+
+    assert _matches_series_episode(
+        {"raw_name": "Dexter.S01.2006.BluRay.x265"}, 8, 1, "Dexter.S01.2006.BluRay.x265"
+    ) is False
+    assert _matches_series_episode(
+        {"raw_name": "Dexter.S08E01.1080p"}, 8, 1, ""
+    ) is True
+    assert _matches_series_episode(
+        {"raw_name": "Dexter.8x01.1080p"}, 8, 1, ""
+    ) is True
+
+
+def test_matches_series_episode_rejects_worded_wrong_season():
+    from app.providers.subsource import _matches_series_episode
+
+    assert _matches_series_episode(
+        {"raw_name": "Dexter Season One.srt"}, 8, 1, ""
+    ) is False
+    assert _matches_series_episode({"raw_name": "Dexter.S08E01.srt"}, 8, 1, "") is True
+    assert _matches_series_episode({"raw_name": "Dexter Season Eight.srt"}, 8, 1, "") is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_movie_id_prefers_requested_season():
+    """Per-season catalogs: an S08 query must resolve the season-8 movieId."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+
+    def side_effect(url, params=None, headers=None, timeout=None):
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.text = '{"data": [{"movieId": 30944}, {"movieId": 30945}]}'
+        resp.json.return_value = {
+            "data": [
+                {"movieId": 30944, "title": "Dexter", "season": 1},
+                {"movieId": 30945, "title": "Dexter", "season": 8},
+            ]
+        }
+        return resp
+
+    mock_client.get.side_effect = side_effect
+    service = SubSourceService("test_key_123")
+    assert await service.resolve_movie_id(client=mock_client, imdb_id="tt0773262", season=8) == 30945
+    # No season requested, or no matching season: legacy first-entry behaviour.
+    assert await service.resolve_movie_id(client=mock_client, imdb_id="tt0773262") == 30944
+    assert await service.resolve_movie_id(client=mock_client, imdb_id="tt0773262", season=99) == 30944
+
+
+@pytest.mark.asyncio
+async def test_subsource_series_queries_season_specific_movie_id():
+    """End to end: S08E01 search hits the season-8 page and keeps S08E01 releases."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+
+    def side_effect(url, params=None, headers=None, timeout=None):
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        if "movies/search" in url:
+            resp.text = '{"data": [{"movieId": 30944}, {"movieId": 30945}]}'
+            resp.json.return_value = {
+                "data": [
+                    {"movieId": 30944, "title": "Dexter", "season": 1},
+                    {"movieId": 30945, "title": "Dexter", "season": 8},
+                ]
+            }
+        else:
+            resp.text = '{"subtitles": []}'
+            resp.json.return_value = {
+                "subtitles": [
+                    {
+                        "subtitleId": "s08e01",
+                        "releaseInfo": ["Dexter.S08E01.1080p.BluRay.x264-GRP"],
+                        "season": 8,
+                        "episode": 1,
+                        "hearingImpaired": False,
+                        "language": "English",
+                    },
+                    {
+                        "subtitleId": "s08e02",
+                        "releaseInfo": ["Dexter.S08E02.1080p.BluRay.x264-GRP"],
+                        "season": 8,
+                        "episode": 2,
+                        "hearingImpaired": False,
+                        "language": "English",
+                    },
+                ]
+            }
+        return resp
+
+    mock_client.get.side_effect = side_effect
+    provider = SubsourceProvider(mock_client)
+    subs = await provider.search_subtitles(
+        imdb_id="tt0773262", is_series=True, season=8, episode=1,
+        api_key="key", languages=["eng"],
+    )
+    assert len(subs) == 1
+    assert "S08E01" in subs[0].release_name
+    sub_calls = [c for c in mock_client.get.call_args_list if c[0][0].endswith("/subtitles")]
+    assert sub_calls and sub_calls[0][1]["params"]["movieId"] == 30945

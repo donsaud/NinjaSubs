@@ -762,3 +762,20 @@ def test_configured_manifest_preserves_phase2_config(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["id"] == "org.ninjasubs.addon"
+
+
+def test_configure_page_shows_auto_sync_toggle(client):
+    """The experimental auto-sync preference is exposed in the configure UI."""
+    body = client.get("/configure").text
+    assert 'id="autoSync"' in body
+    assert "Auto-Sync Subtitles" in body
+    assert "(Experimental)" not in body.split('for="autoSync"')[1].split("</label>")[0]
+    assert '"auto_sync": false' in body
+    assert "Automatically syncs subtitle timing to match your video stream perfectly." in body
+
+    # Relocated: first option under "Text Formatting & Timing", not the Arabic section.
+    arabic = body.index("ARABIC SUBTITLE OPTIMIZATION")
+    formatting = body.index("Text Formatting &amp; Timing")
+    autosync = body.index('id="autoSyncRow"')
+    clean_tags = body.index('for="cleanTags"')
+    assert arabic < formatting < autosync < clean_tags

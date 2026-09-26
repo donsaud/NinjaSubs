@@ -248,3 +248,22 @@ def test_configure_page_stremio_installation_card(client):
     assert "https://web.stremio.com/#/addons?addon=" in html
     assert "installAppBtn.addEventListener" in html
     assert "installWebBtn.addEventListener" in html
+
+
+def test_configure_page_has_no_server_defaults_banner(client):
+    """The 'Server Defaults Active' banner is removed; wizard navigation stays intact."""
+    resp = client.get("/configure")
+    assert resp.status_code == 200
+    html = resp.text
+
+    # Banner and its placeholder are gone.
+    assert "Server Defaults Active" not in html
+    assert "{{env_banner_html}}" not in html
+
+    # Three-step wizard navigation is still present and wired.
+    assert 'class="wizard-progress"' in html
+    assert 'data-step-target="1"' in html
+    assert 'data-step-target="2"' in html
+    assert 'data-step-target="3"' in html
+    for label in ("Providers", "Preferences", "Install"):
+        assert label in html
