@@ -97,12 +97,15 @@ class SyncOrchestrator:
         self._inflight_lock = asyncio.Lock()
 
     def _strategies(self) -> list[tuple[str, Any]]:
-        # Tier 1 (embedded track), Tier 2 (stream MovieHash), Tier 3 (external
-        # team/edition match). Anything unconfirmed aborts below.
+        # Fast, reliable network tiers first so a sync can finish inside the
+        # player's request budget: external (SubDL/SubSource) then stream
+        # MovieHash. The embedded track needs several seconds of remote demux
+        # (8s cap), so it runs LAST — it can only realistically warm the cache
+        # in the background after the inline budget expires.
         return [
-            ("embedded", self._embedded_strategy),
-            ("hash-exact", self._hash_strategy),
             ("external exact-match", self._external_strategy),
+            ("hash-exact", self._hash_strategy),
+            ("embedded", self._embedded_strategy),
         ]
 
     async def _maybe_resolve_stream_url(self, query: ReferenceQuery) -> None:
