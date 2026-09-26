@@ -425,6 +425,7 @@ async def test_embedded_extract_command_is_remote_stream_optimized(monkeypatch):
     for flag, value in (
         ("-nostdin", None),
         ("-threads", "1"),
+        ("-fflags", "+nobuffer+fastseek"),
         ("-analyzeduration", "10000000"),
         ("-probesize", "10000000"),
         ("-copyts", None),
@@ -494,7 +495,7 @@ async def test_hash_strategy_accepts_multi_language_hash_match():
 
 
 # --------------------------------------------------------------------------- #
-# Embedded extraction: -t cap, 2.5s timeout, partial fallback
+# Embedded extraction: -t cap, 5.0s timeout, partial fallback
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_embedded_extraction_uses_t_cap_and_timeout(monkeypatch):
@@ -512,19 +513,24 @@ async def test_embedded_extraction_uses_t_cap_and_timeout(monkeypatch):
         return SimpleNamespace(returncode=0, stdout=srt, stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    # extract_timeout defaults to 5.0 for slow remote/USENET streams.
     strategy = EmbeddedStrategy(
         ffprobe_path="/fake/ffprobe",
         ffmpeg_path="/fake/ffmpeg",
         timeout=2.0,
-        extract_timeout=2.5,
         min_bytes=100,
     )
+    assert strategy.extract_timeout == 5.0
     query = ReferenceQuery(
         imdb_id="tt1", media_type="movie", stream_url="http://192.168.8.115:4000/movie.mkv"
     )
     assert await strategy.resolve(query) is not None
-    assert captured["cmd"][captured["cmd"].index("-t") + 1] == "900"
-    assert captured["timeout"] == 2.5
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("-t") + 1] == "900"
+    assert captured["timeout"] == 5.0
+    # Low-latency demux flags requested for HTTP/WebDAV streams.
+    assert "+nobuffer+fastseek" in cmd
+    assert cmd[cmd.index("-fflags") + 1] == "+nobuffer+fastseek"
 
 
 @pytest.mark.asyncio
@@ -544,7 +550,7 @@ async def test_embedded_extraction_uses_partial_output_on_timeout(monkeypatch):
         ffprobe_path="/fake/ffprobe",
         ffmpeg_path="/fake/ffmpeg",
         timeout=2.0,
-        extract_timeout=2.5,
+        extract_timeout=5.0,
         min_bytes=100,
     )
     query = ReferenceQuery(

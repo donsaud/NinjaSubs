@@ -50,7 +50,7 @@ class EmbeddedStrategy:
         ffprobe_path: str | None = None,
         ffmpeg_path: str | None = None,
         timeout: float = 15.0,
-        extract_timeout: float = 2.5,
+        extract_timeout: float = 5.0,
         min_bytes: int = _MIN_REFERENCE_BYTES,
         cache: ReferenceDiskCache | None = None,
     ) -> None:
@@ -195,6 +195,7 @@ class EmbeddedStrategy:
             "-v", "error",
             "-nostdin",
             "-threads", "1",
+            "-fflags", "+nobuffer+fastseek",
             "-analyzeduration", "10000000",
             "-probesize", "10000000",
             "-rw_timeout", "8000000",
