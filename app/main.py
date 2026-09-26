@@ -41,6 +41,7 @@ from app.services.aggregator import (
     format_informative_badge,
 )
 from app.services.cache import clear_subtitle_cache
+from app.services.sync.aiostreams import AIOStreamsClient
 from app.services.sync.embedded_strategy import EmbeddedStrategy
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.hash_strategy import HashExactStrategy
@@ -1165,13 +1166,26 @@ def _build_sync_orchestrator() -> SyncOrchestrator | None:
     """
     if _http_client is None:
         return None
+    aiostreams = None
+    aiostreams_url = (getattr(settings, "AIOSTREAMS_URL", None) or "").strip()
+    if aiostreams_url:
+        aiostreams = AIOStreamsClient(
+            _http_client,
+            aiostreams_url,
+            timeout=float(getattr(settings, "AIOSTREAMS_TIMEOUT", 1.2)),
+        )
     return SyncOrchestrator(
-        hash_strategy=HashExactStrategy(OpenSubtitlesProvider(_http_client)),
+        hash_strategy=HashExactStrategy(
+            OpenSubtitlesProvider(_http_client),
+            client=_http_client,
+            stream_hash_timeout=float(getattr(settings, "STREAM_HASH_TIMEOUT", 1.5)),
+        ),
         embedded_strategy=EmbeddedStrategy(),
         external_strategy=ExternalExactStrategy(
             subdl_provider=SubdlProvider(_http_client),
             subsource_provider=SubsourceProvider(_http_client),
         ),
+        aiostreams=aiostreams,
         sync_service=_sync_service,
         sync_cache=_sync_cache,
     )

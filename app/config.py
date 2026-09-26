@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     FFPROBE_PATH: str = "ffprobe"
     FFMPEG_PATH: str = "ffmpeg"
 
+    # Internal AIOStreams bridge (optional): resolves a direct stream URL from
+    # the playing filename so the embedded/MovieHash tiers have something to
+    # probe. e.g. http://aiostreams:3000 or http://aiostreams:3000/<token>
+    AIOSTREAMS_URL: str | None = None
+    AIOSTREAMS_TIMEOUT: float = 1.2
+
+    # Remote stream MovieHash probe: two 64 KiB range fetches, bounded budget.
+    STREAM_HASH_TIMEOUT: float = 1.5
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -32,6 +32,8 @@ services:
       - SYNC_REQUIRE_EXACT_MATCH=${SYNC_REQUIRE_EXACT_MATCH:-true}
       - FFPROBE_PATH=${FFPROBE_PATH:-ffprobe}
       - FFMPEG_PATH=${FFMPEG_PATH:-ffmpeg}
+      # Internal AIOStreams bridge (optional) for embedded/MovieHash tiers.
+      - AIOSTREAMS_URL=${AIOSTREAMS_URL:-}
       - REFERENCE_CACHE_DIR=${REFERENCE_CACHE_DIR:-/app/cache/references}
       - REFERENCE_CACHE_TTL_SECONDS=${REFERENCE_CACHE_TTL_SECONDS:-2592000}
       # LRU Cache bounds (Max 1GB / 500 files)

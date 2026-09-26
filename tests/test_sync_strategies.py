@@ -182,25 +182,26 @@ async def test_orchestrator_gates_skip_strategies(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_prefers_hash_and_caches(monkeypatch):
+async def test_orchestrator_prefers_embedded_then_hash_and_caches(monkeypatch):
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     reference = BIG_REF.decode()
+    # Tier order is embedded -> hash -> external: the embedded tier wins.
     orch = _orchestrator(
-        hash_strategy=_FakeStrategy(reference),
-        embedded_strategy=_FakeStrategy("should-not-be-used"),
+        embedded_strategy=_FakeStrategy(reference),
+        hash_strategy=_FakeStrategy("should-not-be-used"),
     )
     out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert b"synced" in out
-    assert orch._hash_strategy.calls == 1
-    assert orch._embedded_strategy.calls == 0
+    assert orch._embedded_strategy.calls == 1
+    assert orch._hash_strategy.calls == 0
     assert orch._sync_service.calls == 1
 
     # A warm result is served before reference resolution or alass.
     orch2 = _orchestrator(
-        hash_strategy=_FakeStrategy("x"),
         embedded_strategy=_FakeStrategy("x"),
+        hash_strategy=_FakeStrategy("x"),
         sync_cache=orch._sync_cache,
     )
     out2 = await orch2.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
@@ -210,7 +211,7 @@ async def test_orchestrator_prefers_hash_and_caches(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_falls_through_to_embedded_then_aborts(monkeypatch, caplog):
+async def test_orchestrator_uses_embedded_tier_first(monkeypatch, caplog):
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
@@ -218,7 +219,7 @@ async def test_orchestrator_falls_through_to_embedded_then_aborts(monkeypatch, c
     with caplog.at_level("INFO"):
         out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert b"synced" in out
-    assert orch._hash_strategy.calls == 1 and orch._embedded_strategy.calls == 1
+    assert orch._embedded_strategy.calls == 1 and orch._hash_strategy.calls == 0
 
     # No deterministic tier delivers: original served with the abort message.
     orch = _orchestrator()

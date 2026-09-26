@@ -35,11 +35,15 @@ class HashExactStrategy:
         opensubtitles_provider=None,
         *,
         timeout: float = 6.0,
+        stream_hash_timeout: float = 1.5,
+        client=None,
         min_bytes: int = _MIN_REFERENCE_BYTES,
         cache: ReferenceDiskCache | None = None,
     ) -> None:
         self._provider = opensubtitles_provider
+        self._client = client
         self.timeout = timeout
+        self.stream_hash_timeout = stream_hash_timeout
         self.min_bytes = min_bytes
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
 
@@ -57,12 +61,26 @@ class HashExactStrategy:
             return cached
         if self._provider is None:
             return ResolvedReference(None)
+
         video_hash = (query.video_hash or "").strip()
+        video_size = query.video_size
+        if not video_hash and query.stream_url and self._client is not None:
+            # No client-supplied hash: compute the OpenSubtitles MovieHash from
+            # the stream itself (two 64 KiB range requests, bounded timeout).
+            from app.services.sync.stream_hash import fetch_stream_moviehash
+
+            computed = await fetch_stream_moviehash(
+                query.stream_url, self._client, timeout=self.stream_hash_timeout
+            )
+            if computed is not None:
+                video_hash, video_size = computed
         if not video_hash:
-            logger.info("[reference] hash strategy skipped: no video hash supplied")
+            logger.info("[reference] hash strategy skipped: no video hash (client or computed)")
             return ResolvedReference(None)
         try:
-            text = await asyncio.wait_for(self._run(query, video_hash), self.timeout)
+            text = await asyncio.wait_for(
+                self._run(query, video_hash, video_size), self.timeout
+            )
         except TimeoutError:
             logger.warning("[reference] hash strategy timed out after %.1fs", self.timeout)
             return ResolvedReference(None)
@@ -70,7 +88,7 @@ class HashExactStrategy:
             return ResolvedReference(None)
         return ResolvedReference(text, kind="hash")
 
-    async def _run(self, query: ReferenceQuery, video_hash: str) -> str | None:
+    async def _run(self, query: ReferenceQuery, video_hash: str, video_size) -> str | None:
         api_key = query.api_keys.get("opensubtitles")
         try:
             releases = await self._provider.search_subtitles(
@@ -83,7 +101,7 @@ class HashExactStrategy:
                 api_key=api_key,
                 languages=list(query.languages),
                 video_hash=video_hash,
-                video_size=query.video_size,
+                video_size=video_size,
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("[reference] hash search failed: %s", exc)

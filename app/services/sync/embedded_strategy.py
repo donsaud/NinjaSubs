@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 _MIN_REFERENCE_BYTES = 5120
 _ENGLISH_TAGS = frozenset({"eng", "en"})
+# Only text subtitle codecs can be converted to SRT; image-based tracks
+# (PGS/VobSub/DVB) are unusable as a reference and must fall through to the
+# MovieHash tier.
+_TEXT_SUBTITLE_CODECS = frozenset(
+    {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text", "hdmv_text_subtitle"}
+)
 
 
 class EmbeddedStrategy:
@@ -137,7 +143,7 @@ class EmbeddedStrategy:
             "-probesize", "4000000",
             "-analyzeduration", "8000000",
             "-select_streams", "s",
-            "-show_entries", "stream=index:stream_tags=language",
+            "-show_entries", "stream=index,codec_name:stream_tags=language",
             "-of", "json",
             stream_url,
         ]
@@ -159,8 +165,14 @@ class EmbeddedStrategy:
         for stream in payload.get("streams", []) or []:
             tags = stream.get("tags") or {}
             language = str(tags.get("language") or "").strip().lower()
-            if language in _ENGLISH_TAGS and isinstance(stream.get("index"), int):
-                return int(stream["index"])
+            codec = str(stream.get("codec_name") or "").strip().lower()
+            if language in _ENGLISH_TAGS and codec in _TEXT_SUBTITLE_CODECS:
+                if isinstance(stream.get("index"), int):
+                    return int(stream["index"])
+            elif language in _ENGLISH_TAGS:
+                logger.info(
+                    "[reference] embedded strategy: skipping image-based %s track", codec or "?"
+                )
         return None
 
     async def _extract_track(self, ffmpeg: str, stream_url: str, index: int) -> bytes | None:

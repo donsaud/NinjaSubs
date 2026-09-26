@@ -83,25 +83,51 @@ class SyncOrchestrator:
         hash_strategy: Any | None = None,
         embedded_strategy: Any | None = None,
         external_strategy: Any | None = None,
+        aiostreams: Any | None = None,
         sync_service: Any | None = None,
         sync_cache: Any | None = None,
     ) -> None:
         self._hash_strategy = hash_strategy
         self._embedded_strategy = embedded_strategy
         self._external_strategy = external_strategy
+        self._aiostreams = aiostreams
         self._sync_service = sync_service
         self._sync_cache = sync_cache
         self._inflight: dict[str, asyncio.Future] = {}
         self._inflight_lock = asyncio.Lock()
 
     def _strategies(self) -> list[tuple[str, Any]]:
-        # Tier 1 (deterministic hash), Tier 2 (embedded track), Tier 3
-        # (external exact team/edition match). Tier 4 aborts below.
+        # Tier 1 (embedded track), Tier 2 (stream MovieHash), Tier 3 (external
+        # team/edition match). Anything unconfirmed aborts below.
         return [
-            ("hash-exact", self._hash_strategy),
             ("embedded", self._embedded_strategy),
+            ("hash-exact", self._hash_strategy),
             ("external exact-match", self._external_strategy),
         ]
+
+    async def _maybe_resolve_stream_url(self, query: ReferenceQuery) -> None:
+        """Ask the internal AIOStreams instance for a probeable stream URL.
+
+        Skipped when the client already supplied one. Any failure (unreachable,
+        timeout, no match) is swallowed so the pipeline falls through to the
+        external tier.
+        """
+        if self._aiostreams is None or (query.stream_url or "").strip():
+            return
+        try:
+            url = await self._aiostreams.resolve_stream_url(
+                query.imdb_id,
+                query.media_type,
+                query.target_filename,
+                season=query.season,
+                episode=query.episode,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.info("[sync] AIOStreams resolution failed: %s", exc)
+            return
+        if url:
+            query.stream_url = url
+            logger.info("[sync] AIOStreams resolved a direct stream URL for probing")
 
     def _build_query(self, meta: dict) -> ReferenceQuery:
         return ReferenceQuery(
@@ -240,6 +266,7 @@ class SyncOrchestrator:
             return sub_bytes
 
         query = self._build_query(meta)
+        await self._maybe_resolve_stream_url(query)
         resolved = ResolvedReference(None)
         for strategy_name, strategy in self._strategies():
             if strategy is None:
