@@ -126,6 +126,7 @@ class _FakeSyncService:
         self.kinds: list[str] = []
         self.flags: list[tuple] = []
         self.relaxed: list[bool] = []
+        self.partial: list[bool] = []
 
     async def sync_async(
         self,
@@ -135,11 +136,13 @@ class _FakeSyncService:
         is_series=False,
         source_confirmed=False,
         relaxed=False,
+        reference_partial=False,
     ):
         self.calls += 1
         self.kinds.append(decision_kind)
         self.flags.append((is_series, source_confirmed))
         self.relaxed.append(relaxed)
+        self.partial.append(reference_partial)
         assert "reference line" in reference
         return "1\n00:00:09,000 --> 00:00:10,000\nsynced\n"
 

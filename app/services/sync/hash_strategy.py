@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 _MIN_REFERENCE_BYTES = 5120
 
+# A MovieHash match is a byte-exact 1:1 timeline match regardless of the
+# subtitle's language, so accept any major release language as a timing
+# reference (alass only needs the reference's cue timings).
+_HASH_REFERENCE_LANGUAGES = ("en", "es", "fr", "de", "it")
+
 
 class HashExactStrategy:
     """Hash-exact reference acquisition via OpenSubtitles moviehash lookup."""
@@ -103,7 +108,7 @@ class HashExactStrategy:
                 title=query.title,
                 year=query.year,
                 api_key=api_key,
-                languages=list(query.languages),
+                languages=list(_HASH_REFERENCE_LANGUAGES),
                 video_hash=video_hash,
                 video_size=video_size,
             )
@@ -111,21 +116,24 @@ class HashExactStrategy:
             logger.warning("[reference] hash search failed: %s", exc)
             return None
 
-        matches = [
-            rel
-            for rel in (releases or [])
-            if bool(getattr(rel, "is_hash_match", False))
-            and str(getattr(rel, "lang", "") or "").lower().startswith("en")
-        ]
+        # Any ``moviehash_match`` is a byte-exact timeline match; language is
+        # irrelevant for a timing reference. Rank: non-HI first, English next,
+        # then OpenSubtitles' own order.
+        matches = [rel for rel in (releases or []) if bool(getattr(rel, "is_hash_match", False))]
         if not matches:
-            logger.info("[reference] hash strategy: no hash-confirmed English subtitle")
+            logger.info("[reference] hash strategy: no hash-confirmed subtitle")
             return None
-        # Prefer a non-HI track; timing is identical either way for a hash match.
-        matches.sort(key=lambda rel: bool(getattr(rel, "hearing_impaired", False)))
+        matches.sort(
+            key=lambda rel: (
+                bool(getattr(rel, "hearing_impaired", False)),
+                0 if str(getattr(rel, "lang", "") or "").lower().startswith("en") else 1,
+            )
+        )
         best = matches[0]
         logger.info(
-            "[reference] hash strategy: confirmed %r via opensubtitles",
+            "[reference] hash strategy: confirmed %r (lang=%s) via opensubtitles",
             getattr(best, "release_name", "?"),
+            getattr(best, "lang", "?"),
         )
         try:
             raw = await self._provider.download_archive(best.download_url, api_key=api_key)

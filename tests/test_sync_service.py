@@ -723,3 +723,20 @@ def test_sync_logs_first_cue_before_alass(monkeypatch, caplog):
     with caplog.at_level("INFO"):
         SubtitleSyncService().sync(SRT, SRT, decision_kind="edition")
     assert "first cue before alass" in caplog.text
+
+
+def test_timeline_rejection_partial_reference_skips_duration():
+    """A sampled-prefix reference (first 15 min) must not be rejected on runtime."""
+    from app.services.sync_service import _timeline_rejection
+
+    target = _span_srt(30, 9000.0)  # ~150 min target
+    ref = _span_srt(30, 900.0)  # ~15 min sampled prefix
+    assert (
+        _timeline_rejection(target, ref, decision_kind="embedded", relaxed=False) is not None
+    )
+    assert (
+        _timeline_rejection(
+            target, ref, decision_kind="embedded", relaxed=False, reference_partial=True
+        )
+        is None
+    )

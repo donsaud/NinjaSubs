@@ -258,14 +258,19 @@ def _timeline_rejection(
     decision_kind: str,
     relaxed: bool,
     source_confirmed: bool = False,
+    reference_partial: bool = False,
 ) -> str | None:
     """Return a rejection reason when target/reference timelines cannot match.
 
     Multi-signal pre-alass gate: percentile runtime (as before), plus — for
     best-effort ``edition`` references only, where no exact cut is proven —
     a cue-count sanity ratio and a season-pack/multi-episode reset detector.
-    Relaxed fallbacks tighten the runtime band further.
+    Relaxed fallbacks tighten the runtime band further. A ``reference_partial``
+    (sampled prefix, e.g. the first 15 min of an embedded track) is exempt from
+    the runtime/cue-count gates because its end is intentionally truncated.
     """
+    if reference_partial:
+        return None
     target_duration = _percentile_cue_end_ms(target_srt) / 1000.0
     ref_duration = _percentile_cue_end_ms(reference) / 1000.0
     if ref_duration >= _FILM_RUNTIME_SECONDS:
@@ -449,6 +454,7 @@ class SubtitleSyncService:
         is_series: bool = False,
         source_confirmed: bool = False,
         relaxed: bool = False,
+        reference_partial: bool = False,
     ) -> str | None:
         """
         Return the synced target SRT, or ``None`` on any failure.
@@ -498,6 +504,7 @@ class SubtitleSyncService:
             decision_kind=decision_kind,
             relaxed=relaxed,
             source_confirmed=source_confirmed,
+            reference_partial=reference_partial,
         )
         if rejection is not None:
             logger.warning(
@@ -606,7 +613,7 @@ class SubtitleSyncService:
                     peak,
                     spread,
                 )
-                if decision_kind == "edition":
+                if decision_kind == "edition" or reference_partial:
                     if is_series and source_confirmed:
                         # Broadcast/retail recap cut: allow a large uniform shift.
                         if abs(peak) > self.MAX_ALLOWED_RECAP_SHIFT:
@@ -664,12 +671,13 @@ class SubtitleSyncService:
         is_series: bool = False,
         source_confirmed: bool = False,
         relaxed: bool = False,
+        reference_partial: bool = False,
     ) -> str | None:
         """Non-blocking wrapper around :meth:`sync` for use in async routes."""
         async with self._semaphore:
             worker = asyncio.create_task(asyncio.to_thread(
                 self.sync, target_srt, reference_srt, decision_kind,
-                is_series, source_confirmed, relaxed,
+                is_series, source_confirmed, relaxed, reference_partial,
             ))
             try:
                 return await asyncio.shield(worker)

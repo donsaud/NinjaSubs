@@ -452,3 +452,132 @@ async def test_content_length_prefers_content_range_on_partial_response():
             )
 
     assert await _content_length(_PartialClient(), "http://192.168.8.115:4000/x.mkv") == 200000
+
+
+# --------------------------------------------------------------------------- #
+# Hash strategy: accept major-language hash matches
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_hash_strategy_accepts_multi_language_hash_match():
+    from app.models import SubtitleRelease
+
+    payload = ("1\n00:00:01,000 --> 00:00:02,000\n" + ("ref line\n" * 800) + "\n").encode()
+
+    class _Prov:
+        def __init__(self):
+            self.calls = []
+
+        async def search_subtitles(self, **kwargs):
+            self.calls.append(kwargs)
+            return [
+                SubtitleRelease(
+                    release_name="Movie.2024.Spanish.srt",
+                    download_url="http://os/movie",
+                    provider="opensubtitles",
+                    lang="spa",
+                    is_hash_match=True,
+                )
+            ]
+
+        async def download_archive(self, url, api_key=None):
+            return payload
+
+    prov = _Prov()
+    strategy = HashExactStrategy(prov)
+    query = ReferenceQuery(
+        imdb_id="tt1", media_type="movie", video_hash="51b3392cbbf534e0", video_size=123
+    )
+    resolved = await strategy.resolve_with_provenance(query)
+    assert resolved.kind == "hash" and resolved.text
+    langs = prov.calls[0]["languages"]
+    assert "en" in langs and "es" in langs and "fr" in langs
+
+
+# --------------------------------------------------------------------------- #
+# Embedded extraction: -t cap, 2.5s timeout, partial fallback
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_embedded_extraction_uses_t_cap_and_timeout(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ALLOW_PRIVATE_STREAM_URLS", True)
+    captured = {}
+
+    def fake_run(cmd, capture_output=True, timeout=None):
+        if cmd[0].endswith("ffprobe"):
+            return SimpleNamespace(returncode=0, stdout=_text_probe("eng"), stderr=b"")
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        srt = b"1\n00:00:01,000 --> 00:00:02,000\n" + (b"hi\n" * 600) + b"\n"
+        return SimpleNamespace(returncode=0, stdout=srt, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    strategy = EmbeddedStrategy(
+        ffprobe_path="/fake/ffprobe",
+        ffmpeg_path="/fake/ffmpeg",
+        timeout=2.0,
+        extract_timeout=2.5,
+        min_bytes=100,
+    )
+    query = ReferenceQuery(
+        imdb_id="tt1", media_type="movie", stream_url="http://192.168.8.115:4000/movie.mkv"
+    )
+    assert await strategy.resolve(query) is not None
+    assert captured["cmd"][captured["cmd"].index("-t") + 1] == "900"
+    assert captured["timeout"] == 2.5
+
+
+@pytest.mark.asyncio
+async def test_embedded_extraction_uses_partial_output_on_timeout(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ALLOW_PRIVATE_STREAM_URLS", True)
+
+    def fake_run(cmd, capture_output=True, timeout=None):
+        if cmd[0].endswith("ffprobe"):
+            return SimpleNamespace(returncode=0, stdout=_text_probe("eng"), stderr=b"")
+        partial = b"1\n00:00:01,000 --> 00:00:02,000\n" + (b"hi\n" * 400) + b"\n"
+        raise subprocess.TimeoutExpired(cmd, timeout, output=partial)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    strategy = EmbeddedStrategy(
+        ffprobe_path="/fake/ffprobe",
+        ffmpeg_path="/fake/ffmpeg",
+        timeout=2.0,
+        extract_timeout=2.5,
+        min_bytes=100,
+    )
+    query = ReferenceQuery(
+        imdb_id="tt1", media_type="movie", stream_url="http://192.168.8.115:4000/movie.mkv"
+    )
+    resolved = await strategy.resolve_with_provenance(query)
+    assert resolved.text is not None
+    assert resolved.kind == "embedded" and resolved.partial is True
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_marks_embedded_reference_partial(monkeypatch):
+    from app.config import settings as app_settings
+    from app.services.sync.orchestrator import SyncOrchestrator
+    from app.services.sync.query import ResolvedReference
+    from app.services.sync_cache import SyncCache
+
+    monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
+
+    class _Emb:
+        async def resolve_with_provenance(self, query):
+            return ResolvedReference(BIG_REF.decode(), kind="embedded", partial=True)
+
+    class _Sync:
+        def __init__(self):
+            self.partial = []
+
+        async def sync_async(self, *args, **kwargs):
+            self.partial.append(kwargs.get("reference_partial"))
+            return "1\n00:00:03,000 --> 00:00:04,000\nsynced\n"
+
+    sync = _Sync()
+    orch = SyncOrchestrator(embedded_strategy=_Emb(), sync_service=sync, sync_cache=SyncCache())
+    meta = {"imdb_id": "tt1", "media_type": "movie", "lang": "ara", "target_filename": "Movie.mkv"}
+    await orch.evaluate_and_sync(_arabic_bytes(), meta, "t", True)
+    assert sync.partial == [True]

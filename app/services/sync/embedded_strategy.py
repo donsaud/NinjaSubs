@@ -50,12 +50,14 @@ class EmbeddedStrategy:
         ffprobe_path: str | None = None,
         ffmpeg_path: str | None = None,
         timeout: float = 15.0,
+        extract_timeout: float = 2.5,
         min_bytes: int = _MIN_REFERENCE_BYTES,
         cache: ReferenceDiskCache | None = None,
     ) -> None:
         self._ffprobe_path = ffprobe_path
         self._ffmpeg_path = ffmpeg_path
         self.timeout = timeout
+        self.extract_timeout = extract_timeout
         self.min_bytes = min_bytes
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
 
@@ -109,7 +111,9 @@ class EmbeddedStrategy:
             return ResolvedReference(None)
         if text is None:
             return ResolvedReference(None)
-        return ResolvedReference(text, kind="embedded")
+        # Extracted only the first ~15 min of the media, so the reference is a
+        # sampled prefix: mark it partial so duration gates don't reject it.
+        return ResolvedReference(text, kind="embedded", partial=True)
 
     async def _run(
         self, query: ReferenceQuery, stream_url: str, ffprobe: str, ffmpeg: str
@@ -179,7 +183,13 @@ class EmbeddedStrategy:
         return None
 
     async def _extract_track(self, ffmpeg: str, stream_url: str, index: int) -> bytes | None:
-        """Extract one subtitle stream to SRT bytes (stdout)."""
+        """Extract one subtitle stream to SRT bytes (stdout).
+
+        Reads only the first ~15 minutes of the media (``-t 900``) with a
+        strict subprocess timeout, so a 20 GB remote stream is never read to
+        EOF. If the timeout fires, whatever cues ffmpeg already emitted are
+        used as a partial/sampled reference.
+        """
         command = [
             ffmpeg,
             "-v", "error",
@@ -188,6 +198,7 @@ class EmbeddedStrategy:
             "-analyzeduration", "10000000",
             "-probesize", "10000000",
             "-rw_timeout", "8000000",
+            "-t", "900",
             "-copyts",
             "-i", stream_url,
             "-map", f"0:{index}",
@@ -197,9 +208,17 @@ class EmbeddedStrategy:
         ]
         try:
             completed = await asyncio.to_thread(
-                subprocess.run, command, capture_output=True, timeout=self.timeout
+                subprocess.run, command, capture_output=True, timeout=self.extract_timeout
             )
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        except subprocess.TimeoutExpired as exc:
+            partial = bytes(exc.stdout or b"")
+            logger.warning(
+                "[reference] embedded extraction hit the %.1fs cap -> using %d partial bytes",
+                self.extract_timeout,
+                len(partial),
+            )
+            return partial or None
+        except OSError as exc:
             logger.warning("[reference] embedded extraction failed: %s", exc)
             return None
         if completed.returncode != 0 or not completed.stdout:

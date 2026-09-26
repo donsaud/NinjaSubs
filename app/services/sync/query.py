@@ -77,3 +77,7 @@ class ResolvedReference:
     kind: str = "abort"
     bluray_match: bool = False
     candidate: str = ""
+    # A sampled/partial reference (e.g. only the first 15 min extracted from a
+    # remote stream). Its end runtime is deliberately shorter than the target,
+    # so duration-mismatch gates must not reject it.
+    partial: bool = False

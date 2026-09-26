@@ -312,6 +312,11 @@ class SyncOrchestrator:
         relaxed = decision_kind == "edition" and not is_informative_release_name(
             meta.get("target_filename") or meta.get("release_name")
         )
+        # Embedded references are sampled prefixes (first ~15 min), so their
+        # end runtime is intentionally short: exempt them from duration gates.
+        reference_partial = decision_kind == "embedded" or bool(
+            getattr(resolved, "partial", False)
+        )
         synced = await self._sync_service.sync_async(
             target_text,
             reference,
@@ -319,6 +324,7 @@ class SyncOrchestrator:
             is_series=query.is_series,
             source_confirmed=resolved.bluray_match,
             relaxed=relaxed,
+            reference_partial=reference_partial,
         )
         if not synced:
             logger.warning("[sync] alass returned no output -> serving original subtitle")
