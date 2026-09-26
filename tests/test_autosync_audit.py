@@ -273,7 +273,7 @@ async def test_autosync_response_can_be_refetched_after_background_alignment(mon
     monkeypatch.setattr(main.cache_manager, "get_metadata", lambda _: _meta())
     monkeypatch.setattr(main, "_maybe_sync_subtitle", AsyncMock(return_value=_srt().encode()))
     response = await main._serve_subtitle_handler("t", config_str=config)
-    assert response.headers["cache-control"] == "private, no-cache"
+    assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"
 
 
 @pytest.mark.asyncio

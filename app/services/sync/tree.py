@@ -29,6 +29,7 @@ from app.services.sync.matching import (
     _sources_compatible,
     candidate_episode_number,
     looks_like_season_pack,
+    reference_group_rank,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a runtime cycle
@@ -113,14 +114,14 @@ def _edition_sort_key(
     target_source: str | None,
     target_res: str | None,
     episode: int | None,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     """Rank an edition candidate for the *best reference*, not just validity.
 
     Preference: known source matching the target (BluRay/REMUX family) over
-    unknown; single episode over a whole-season/complete pack; explicitly
-    tagged matching episode over untagged; exact resolution; then UHD/REMUX.
-    This makes a BluRay encode sibling beat an unknown-source season pack when
-    the playing stream is BluRay.
+    unknown; scene retail encode over micro-rip/repack (bumpers preserved, so
+    the timeline matches the disc master); single episode over a
+    whole-season/complete pack; explicitly tagged matching episode over
+    untagged; exact resolution; then UHD/REMUX.
     """
     candidate_source = _source_kind(rel_name)
     if target_source and candidate_source:
@@ -129,6 +130,7 @@ def _edition_sort_key(
         source_rank = 1  # unknown source: usable but less certain
     else:
         source_rank = 0
+    group_rank = reference_group_rank(rel_name)
     pack = 1 if looks_like_season_pack(rel_name) else 0
     explicit_episode = (
         0
@@ -136,7 +138,7 @@ def _edition_sort_key(
         else 1
     )
     exact_res, uhd = _edition_rank(rel_name, target_res)
-    return (source_rank, pack, explicit_episode, exact_res, uhd)
+    return (source_rank, group_rank, pack, explicit_episode, exact_res, uhd)
 
 
 def _edition_ok(

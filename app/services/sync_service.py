@@ -513,6 +513,15 @@ class SubtitleSyncService:
             len(reference),
             effective_timeout,
         )
+        # Raw first-cue offset before alignment: makes a wrong-cut reference
+        # obvious (a seconds-level gap is an intro offset; minutes is a cut).
+        target_first = _cue_starts_ms(target_srt, limit=1)
+        reference_first = _cue_starts_ms(reference, limit=1)
+        logger.info(
+            "[sync] first cue before alass: target=%s reference=%s",
+            f"{target_first[0] / 1000.0:.2f}s" if target_first else "n/a",
+            f"{reference_first[0] / 1000.0:.2f}s" if reference_first else "n/a",
+        )
 
         ref_file = tgt_file = out_file = None
         try:
@@ -536,8 +545,10 @@ class SubtitleSyncService:
                 ref_file,
                 tgt_file,
                 out_file,
+                # Upstream alass default for movies: a small penalty fragments
+                # the timeline into unnecessary splits.
                 "--split-penalty",
-                "0.5",
+                "7.0",
             ]
             logger.info("[sync] executing: %s", " ".join(command))
             started = time.monotonic()

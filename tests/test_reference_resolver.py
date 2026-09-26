@@ -1535,3 +1535,32 @@ def test_tree_season_pack_usable_for_later_episode():
     decision = decide(candidates, query, strict=False)
     assert decision.kind == "edition"
     assert "Season.1" in decision.release.release_name
+
+
+def test_reference_group_rank_prefers_retail_encodes():
+    from app.services.sync.matching import reference_group_rank
+
+    assert reference_group_rank("Into the Wild 2007 BluRay.1080p.DTS.x264-CHD.srt") == 0
+    assert reference_group_rank("Into.The.Wild.2007.1080p BluRay.x264-FSiHD.ENG.srt") == 0
+    assert reference_group_rank("Movie.2024.1080p.BluRay.x264-EbP.srt") == 0
+    assert reference_group_rank("Movie.2024.1080p.BluRay.x264-HDC.srt") == 0
+    assert reference_group_rank("Into.the.Wild.2007.1080p.Bluray.x265.HEVC.Tigole.srt") == 2
+    assert reference_group_rank("Movie.2024.1080p.WEB-DL.x264.YIFY.srt") == 2
+    assert reference_group_rank("Movie.2024.1080p.BluRay.x264-NTb.srt") == 1
+    assert reference_group_rank("Movie.2024.1080p.BluRay.srt") == 1
+
+
+def test_tree_prefers_retail_encode_over_micro_rip():
+    """Among same-source editions, a scene retail encode beats a micro-rip."""
+    from app.services.sync.tree import decide
+
+    query = _tree_query(
+        "Into.the.Wild.2007.1080p.BluRay.x264-GRP.mkv", season=None, episode=None
+    )
+    candidates = _releases(
+        "Into.the.Wild.2007.1080p.Bluray.x265.HEVC.10bit.AAC.5.1.Tigole.srt",
+        "Into the Wild 2007 BluRay.1080p.DTS.x264-CHD.srt",
+    )
+    decision = decide(candidates, query, strict=False)
+    assert decision.kind == "edition"
+    assert "CHD" in decision.release.release_name

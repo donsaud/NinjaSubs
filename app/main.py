@@ -1302,8 +1302,11 @@ def _build_subtitle_response(
     # 1. Ingestion/normalization: legacy encoding first, then convert ASS/SSA into a
     #    standard intermediate SRT so all later (SRT-only) optimizations apply.
     options = clean_options or CleanOptions()
+    # Auto-sync output is dynamic: never let a player/proxy reuse a stale
+    # (pre-sync) buffer.
     cache_control = (
-        "private, no-cache" if auto_sync and settings.ENABLE_SUBTITLE_SYNC
+        "no-store, no-cache, must-revalidate"
+        if auto_sync and settings.ENABLE_SUBTITLE_SYNC
         else "public, max-age=86400"
     )
     if options.fix_encoding:

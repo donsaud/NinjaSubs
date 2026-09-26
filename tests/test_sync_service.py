@@ -67,7 +67,7 @@ def test_sync_uses_split_penalty_and_cleans_temp_files(monkeypatch):
     service.sync(SRT, SRT)
 
     assert "--split-penalty" in captured["command"]
-    assert "0.5" in captured["command"]
+    assert "7.0" in captured["command"]
     # All temp files removed in finally.
     assert all(not os.path.exists(p) for p in captured["temp_paths"])
 
@@ -715,3 +715,11 @@ def test_guardrail_trimming_does_not_mask_genuine_drift(monkeypatch, caplog):
         out = SubtitleSyncService().sync(target, target, decision_kind="edition")
     assert out is None
     assert "safety guardrail triggered" in caplog.text
+
+
+def test_sync_logs_first_cue_before_alass(monkeypatch, caplog):
+    """The raw first-cue timestamps of target and reference are logged."""
+    _mock_alass_output(monkeypatch, _shifted_output(5, text="SYNCED"))
+    with caplog.at_level("INFO"):
+        SubtitleSyncService().sync(SRT, SRT, decision_kind="edition")
+    assert "first cue before alass" in caplog.text

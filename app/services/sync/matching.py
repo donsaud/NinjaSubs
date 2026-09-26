@@ -248,6 +248,30 @@ def _release_group(name: str | None) -> str | None:
     return segment
 
 
+# Scene retail encodes that preserve the original studio bumpers/intro, so
+# their subtitle timeline matches the disc master. Micro-rip / custom-repack
+# groups frequently trim bumpers or re-encode intros, shifting the whole
+# timeline; prefer the former when several references pass the edition gates.
+_PREFERRED_REFERENCE_GROUPS = frozenset({"chd", "hdc", "ebp", "fsihd"})
+_DEPRIORITIZED_REFERENCE_GROUPS = frozenset({"tigole", "yify", "yts", "rarbg", "ganool"})
+
+
+def reference_group_rank(name: str | None) -> int:
+    """Rank a reference's release group by timeline reliability.
+
+    ``0`` = known scene retail encode (bumpers preserved), ``1`` = neutral /
+    unknown, ``2`` = micro-rip / custom repack (bumpers often cut). Groups are
+    matched as whole tokens so dot-delimited names (``….Tigole.srt``) count too.
+    """
+    tokens = set(re.findall(r"[a-z0-9]+", (name or "").lower()))
+    group = tokens | {(_release_group(name) or "").lower()}
+    if group & _PREFERRED_REFERENCE_GROUPS:
+        return 0
+    if group & _DEPRIORITIZED_REFERENCE_GROUPS:
+        return 2
+    return 1
+
+
 def is_informative_release_name(name: str | None) -> bool:
     """True when a stream filename carries scene/release tokens worth matching on.
 
