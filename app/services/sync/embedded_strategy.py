@@ -83,7 +83,10 @@ class EmbeddedStrategy:
         if not stream_url:
             logger.info("[reference] embedded strategy skipped: no stream URL supplied")
             return ResolvedReference(None)
-        safe, reason = await asyncio.to_thread(is_safe_public_url, stream_url)
+        allow_private = bool(getattr(settings, "ALLOW_PRIVATE_STREAM_URLS", True))
+        safe, reason = await asyncio.to_thread(
+            is_safe_public_url, stream_url, allow_private=allow_private
+        )
         if not safe:
             logger.warning(
                 "[reference] embedded strategy blocked unsafe stream URL (%s) -> skipping",

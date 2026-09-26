@@ -357,7 +357,7 @@ async def test_embedded_strategy_extracts_english_track(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url: (True, "ok")
+        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url, **kwargs: (True, "ok")
     )
     cache = ReferenceDiskCache(root=tmp_path / "disk", ttl=3600.0, min_bytes=100)
     strategy = EmbeddedStrategy(
@@ -384,7 +384,7 @@ async def test_embedded_strategy_aborts_without_english_track(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url: (True, "ok")
+        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url, **kwargs: (True, "ok")
     )
     strategy = EmbeddedStrategy(
         ffprobe_path="/fake/ffprobe", ffmpeg_path="/fake/ffmpeg", timeout=2.0
@@ -395,7 +395,7 @@ async def test_embedded_strategy_aborts_without_english_track(monkeypatch):
 @pytest.mark.asyncio
 async def test_embedded_strategy_skips_without_url_or_binaries(monkeypatch):
     monkeypatch.setattr(
-        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url: (True, "ok")
+        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url, **kwargs: (True, "ok")
     )
     strategy = EmbeddedStrategy(ffprobe_path="/fake/ffprobe", ffmpeg_path="/fake/ffmpeg")
     assert await strategy.resolve(_embedded_query(stream_url="")) is None
@@ -424,7 +424,7 @@ async def test_embedded_strategy_blocks_unsafe_stream_url(monkeypatch, caplog):
 
     monkeypatch.setattr(
         "app.services.sync.embedded_strategy.is_safe_public_url",
-        lambda url: (False, "blocked address 127.0.0.1"),
+        lambda url, **kwargs: (False, "blocked address 127.0.0.1"),
     )
     result = await strategy.resolve(_embedded_query(stream_url="http://127.0.0.1/video.mkv"))
     assert result is None

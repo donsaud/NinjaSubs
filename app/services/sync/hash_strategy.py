@@ -67,10 +67,14 @@ class HashExactStrategy:
         if not video_hash and query.stream_url and self._client is not None:
             # No client-supplied hash: compute the OpenSubtitles MovieHash from
             # the stream itself (two 64 KiB range requests, bounded timeout).
+            from app.config import settings
             from app.services.sync.stream_hash import fetch_stream_moviehash
 
             computed = await fetch_stream_moviehash(
-                query.stream_url, self._client, timeout=self.stream_hash_timeout
+                query.stream_url,
+                self._client,
+                timeout=self.stream_hash_timeout,
+                allow_private=bool(getattr(settings, "ALLOW_PRIVATE_STREAM_URLS", True)),
             )
             if computed is not None:
                 video_hash, video_size = computed

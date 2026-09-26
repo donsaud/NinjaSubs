@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # Remote stream MovieHash probe: two 64 KiB range fetches, bounded budget.
     STREAM_HASH_TIMEOUT: float = 1.5
 
+    # Allow LAN/private (RFC1918) stream hosts for server-side probing. Common
+    # for self-hosted setups where AIOStreams/debrid proxies are on the LAN
+    # (e.g. http://192.168.x.x:4000/...). Cloud-metadata/link-local stay blocked.
+    ALLOW_PRIVATE_STREAM_URLS: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

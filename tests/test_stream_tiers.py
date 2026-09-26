@@ -46,7 +46,7 @@ class _RangeClient:
 @pytest.mark.asyncio
 async def test_fetch_stream_moviehash_computes_hash(monkeypatch):
     monkeypatch.setattr(
-        "app.services.sync.stream_hash.is_safe_public_url", lambda url: (True, "ok")
+        "app.services.sync.stream_hash.is_safe_public_url", lambda url, **kwargs: (True, "ok")
     )
     size = 200_000
     first = b"A" * 65536
@@ -60,7 +60,7 @@ async def test_fetch_stream_moviehash_computes_hash(monkeypatch):
 async def test_fetch_stream_moviehash_blocks_unsafe_url(monkeypatch):
     monkeypatch.setattr(
         "app.services.sync.stream_hash.is_safe_public_url",
-        lambda url: (False, "blocked address 127.0.0.1"),
+        lambda url, **kwargs: (False, "blocked address 127.0.0.1"),
     )
     client = _RangeClient(200_000, b"A" * 65536, b"B" * 65536)
     assert await fetch_stream_moviehash("http://127.0.0.1/x.mkv", client) is None
@@ -69,7 +69,7 @@ async def test_fetch_stream_moviehash_blocks_unsafe_url(monkeypatch):
 @pytest.mark.asyncio
 async def test_fetch_stream_moviehash_rejects_ignored_range(monkeypatch):
     monkeypatch.setattr(
-        "app.services.sync.stream_hash.is_safe_public_url", lambda url: (True, "ok")
+        "app.services.sync.stream_hash.is_safe_public_url", lambda url, **kwargs: (True, "ok")
     )
 
     class _IgnoreRangeClient(_RangeClient):
@@ -150,7 +150,7 @@ async def test_aiostreams_series_appends_season_episode():
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_hash_strategy_computes_stream_hash(monkeypatch):
-    async def fake_fetch(url, client, timeout=1.5):
+    async def fake_fetch(url, client, timeout=1.5, **kwargs):
         return ("deadbeefdeadbeef", 123456)
 
     monkeypatch.setattr("app.services.sync.stream_hash.fetch_stream_moviehash", fake_fetch)
@@ -200,7 +200,7 @@ async def test_embedded_skips_pgs_only_track(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url: (True, "ok")
+        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url, **kwargs: (True, "ok")
     )
     strategy = EmbeddedStrategy(
         ffprobe_path="/fake/ffprobe", ffmpeg_path="/fake/ffmpeg", timeout=2.0
@@ -273,3 +273,74 @@ async def test_orchestrator_resolves_stream_url_via_aiostreams(monkeypatch):
     assert aio.calls and aio.calls[0][0] == "tt1"
     assert embedded.urls == ["https://cdn/stream.mkv"]
     assert b"synced" in out
+
+
+def _text_probe(*langs):
+    streams = [
+        {"index": i, "codec_name": "subrip", "tags": {"language": lang}}
+        for i, lang in enumerate(langs)
+    ]
+    return json.dumps({"streams": streams}).encode()
+
+
+@pytest.mark.asyncio
+async def test_fetch_stream_moviehash_allows_private_literal_with_flag():
+    from app.services.sync.stream_hash import _opensubtitles_hash
+
+    size = 200_000
+    first = b"A" * 65536
+    last = b"B" * 65536
+    client = _RangeClient(size, first, last)
+
+    # Strict default blocks the LAN host...
+    assert (
+        await fetch_stream_moviehash("http://192.168.8.115:4000/movie.mkv", client) is None
+    )
+    # ...allow_private permits it and the hash still computes.
+    result = await fetch_stream_moviehash(
+        "http://192.168.8.115:4000/movie.mkv", client, allow_private=True
+    )
+    assert result == (_opensubtitles_hash(first, last, size), size)
+
+
+@pytest.mark.asyncio
+async def test_embedded_allows_private_stream_url_when_enabled(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ALLOW_PRIVATE_STREAM_URLS", True)
+
+    def fake_run(cmd, capture_output=True, timeout=None):
+        if cmd[0].endswith("ffprobe"):
+            return SimpleNamespace(returncode=0, stdout=_text_probe("eng"), stderr=b"")
+        srt = b"1\n00:00:01,000 --> 00:00:02,000\n" + (b"hello\n" * 600) + b"\n"
+        return SimpleNamespace(returncode=0, stdout=srt, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    strategy = EmbeddedStrategy(
+        ffprobe_path="/fake/ffprobe", ffmpeg_path="/fake/ffmpeg", timeout=2.0, min_bytes=100
+    )
+    query = ReferenceQuery(
+        imdb_id="tt1", media_type="movie", stream_url="http://192.168.8.115:4000/movie.mkv"
+    )
+    assert await strategy.resolve(query) is not None
+
+
+@pytest.mark.asyncio
+async def test_embedded_blocks_private_stream_url_when_disabled(monkeypatch, caplog):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ALLOW_PRIVATE_STREAM_URLS", False)
+
+    def fake_run(cmd, capture_output=True, timeout=None):  # pragma: no cover
+        raise AssertionError("must not spawn ffprobe for a blocked URL")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    strategy = EmbeddedStrategy(
+        ffprobe_path="/fake/ffprobe", ffmpeg_path="/fake/ffmpeg", timeout=2.0
+    )
+    query = ReferenceQuery(
+        imdb_id="tt1", media_type="movie", stream_url="http://192.168.8.115:4000/movie.mkv"
+    )
+    with caplog.at_level("WARNING"):
+        assert await strategy.resolve(query) is None
+    assert "blocked unsafe stream URL" in caplog.text

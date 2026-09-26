@@ -90,17 +90,21 @@ async def fetch_stream_moviehash(
     client: httpx.AsyncClient,
     *,
     timeout: float = 1.5,
+    allow_private: bool = False,
 ) -> tuple[str, int] | None:
     """Return ``(moviehash_hex, size)`` for a remote stream, or ``None``.
 
     Bounded by ``timeout`` seconds (range fetch + probe combined). Never
     raises; any failure degrades to ``None`` so the caller can fall through to
-    the next tier.
+    the next tier. ``allow_private`` permits LAN/RFC1918 stream hosts (metadata
+    and link-local stay blocked).
     """
     url = (stream_url or "").strip()
     if not url:
         return None
-    safe, reason = await asyncio.to_thread(is_safe_public_url, url)
+    safe, reason = await asyncio.to_thread(
+        is_safe_public_url, url, allow_private=allow_private
+    )
     if not safe:
         logger.warning("[reference] hash: blocked unsafe stream URL (%s)", reason)
         return None

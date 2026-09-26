@@ -24,25 +24,38 @@ _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _BLOCKED_ADDRESSES = frozenset({ipaddress.ip_address("169.254.169.254")})
 
 
-def _is_blocked_address(address: str) -> bool:
-    """True when an IP is private, loopback, link-local, metadata, or reserved."""
+def _is_blocked_address(address: str, *, allow_private: bool = False) -> bool:
+    """True when an IP is a disallowed destination for server-side probing.
+
+    Cloud-metadata and link-local addresses are *always* blocked. When
+    ``allow_private`` is set (self-hosted / LAN setups, e.g. an AIOStreams
+    proxy on ``192.168.x.x``), RFC1918/ULA private and loopback addresses are
+    permitted; multicast/reserved/unspecified remain blocked.
+    """
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return True
     if ip in _BLOCKED_ADDRESSES:
         return True
+    # Link-local (incl. cloud metadata) is never a legitimate stream host.
+    if ip.is_link_local:
+        return True
+    if allow_private and (ip.is_private or ip.is_loopback):
+        return False
     # ``is_global`` is False for private/loopback/link-local/multicast/reserved/
     # unspecified ranges, which covers every disallowed destination.
     return not ip.is_global
 
 
-def is_safe_public_url(url: str | None) -> tuple[bool, str]:
+def is_safe_public_url(url: str | None, *, allow_private: bool = False) -> tuple[bool, str]:
     """Validate a caller-supplied stream URL for server-side ffprobe/ffmpeg.
 
     Returns ``(ok, reason)``. Rejects non-http(s) schemes (e.g. ``file://``,
     ``gopher://``), unresolvable hosts, and any host that resolves to a
-    non-public address. Fails closed on any parsing/resolution error.
+    non-public address. ``allow_private=True`` additionally permits RFC1918/
+    loopback destinations for self-hosted LAN media servers. Cloud-metadata and
+    link-local addresses stay blocked either way.
     """
     candidate = (url or "").strip()
     if not candidate:
@@ -71,6 +84,6 @@ def is_safe_public_url(url: str | None) -> tuple[bool, str]:
         return False, "no resolved addresses"
 
     for address in addresses:
-        if _is_blocked_address(address):
+        if _is_blocked_address(address, allow_private=allow_private):
             return False, f"blocked address {address}"
     return True, "ok"

@@ -34,6 +34,8 @@ services:
       - FFMPEG_PATH=${FFMPEG_PATH:-ffmpeg}
       # Internal AIOStreams bridge (optional) for embedded/MovieHash tiers.
       - AIOSTREAMS_URL=${AIOSTREAMS_URL:-}
+      # Permit LAN/RFC1918 stream hosts (self-hosted AIOStreams/debrid proxies).
+      - ALLOW_PRIVATE_STREAM_URLS=${ALLOW_PRIVATE_STREAM_URLS:-true}
       - REFERENCE_CACHE_DIR=${REFERENCE_CACHE_DIR:-/app/cache/references}
       - REFERENCE_CACHE_TTL_SECONDS=${REFERENCE_CACHE_TTL_SECONDS:-2592000}
       # LRU Cache bounds (Max 1GB / 500 files)
