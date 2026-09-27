@@ -2,14 +2,22 @@
 
 Replaces additive scoring heuristics with an auditable verdict:
 
-``Exact Team Match`` > ``Exact Source/Codec Edition Match`` > ``Abort``.
+``Exact Team Match`` > ``Source/Edition Tier`` > ``Abort``.
 
-In strict mode (default) anything that cannot be confirmed aborts: unknown
-groups, unknown source/codec on either side, and untagged episodes.
-Resolution is cross-compatible within one source family (1080p BluRay shares
-the retail-disc master with 720p BluRay) and may be unspecified there.
-Relaxed mode keeps the same tree but treats unknowns as wildcards while
-still rejecting direct conflicts.
+Edition candidates are ranked by a multi-tier hierarchy so a reference is still
+found when the release group differs:
+
+* Tier 0 — exact source (``webdl`` -> ``webdl``); BluRay and REMUX share the
+  retail-disc master and count as one family;
+* Tier 1 — cross-format (a ``webdl`` stream anchored by a BluRay/REMUX
+  reference, or a shared explicit ``23.976`` fps fingerprint);
+* Tier 2 — relaxed fallback for an unknown source on one side (relaxed mode).
+
+DVD/CAM/screener references, mismatched episodes/seasons, and explicit cut
+conflicts are always rejected. Resolution is cross-compatible within one source
+family (1080p BluRay shares the retail-disc master with 720p BluRay). In strict
+mode (default) an unknown source on one side aborts; relaxed mode treats it as a
+wildcard while still rejecting direct conflicts.
 """
 
 from __future__ import annotations
@@ -91,6 +99,45 @@ def _affinity_key(
     )
 
 
+# Sources that can never anchor a reference: they are off-master (different
+# framings/runtimes) or low quality, so no amount of source-tier climbing helps.
+_INCOMPATIBLE_SOURCES = frozenset({"dvd", "cam"})
+# Cross-format anchoring: a WEB-DL stream may be aligned to a retail-disc
+# (BluRay/REMUX) reference — alass anchors the constant offset across editions.
+_CROSS_FORMAT_TARGET_SOURCES = frozenset({"webdl"})
+_CROSS_FORMAT_REFERENCE_SOURCES = frozenset({"bluray", "remux"})
+_23976_REGEX = re.compile(r"(?i)(?<!\d)23[.,]976(?!\d)")
+_SCREENER_REGEX = re.compile(r"(?i)\bscreener\b")
+
+
+def _is_23976(name: str | None) -> bool:
+    """True when a release name declares a 23.976 fps frame rate."""
+    return bool(_23976_REGEX.search(name or ""))
+
+
+def _is_screener(name: str | None) -> bool:
+    return bool(_SCREENER_REGEX.search(name or ""))
+
+
+def _cross_format_ok(
+    target_name: str | None,
+    target_source: str | None,
+    candidate_name: str | None,
+    candidate_source: str | None,
+) -> bool:
+    """Tier-3 compatibility: WEB-DL anchored by a retail disc, or shared 23.976 fps.
+
+    alass resolves a *constant* offset, so a WEB-DL episode can be timed against
+    a BluRay/REMUX master of the same content (and vice versa for the fps case).
+    """
+    if (
+        target_source in _CROSS_FORMAT_TARGET_SOURCES
+        and candidate_source in _CROSS_FORMAT_REFERENCE_SOURCES
+    ):
+        return True
+    return _is_23976(target_name) and _is_23976(candidate_name)
+
+
 def _edition_rank(rel_name: str, target_res: str | None) -> tuple[int, int]:
     """Order edition matches: exact resolution first, then UHD/remux carriers.
 
@@ -141,59 +188,82 @@ def _edition_sort_key(
     return (source_rank, group_rank, pack, explicit_episode, exact_res, uhd)
 
 
-def _edition_ok(
+def _edition_tier(
     rel_name: str,
     *,
+    target_name: str | None,
     target_source: str | None,
     target_codec: str | None,
     target_res: str | None,
     target_tags: frozenset[str],
     episode: int | None,
     strict: bool,
-) -> bool:
-    """True when a candidate is provably the same edition as the target."""
+) -> int | None:
+    """Edition-compatibility tier for a candidate, or ``None`` to reject it.
+
+    Tier 0 = exact source (BluRay <-> REMUX share the retail-disc master);
+    Tier 1 = cross-format (a WEB-DL target anchored by a retail-disc reference,
+    or a shared 23.976 fps fingerprint); Tier 2 = relaxed fallback (unknown
+    source on one side). Hard-incompatible sources (DVD/CAM/screener), wrong
+    episodes, and explicit cut conflicts are rejected outright.
+    """
     if episode is not None:
         # Season packs are treated as untagged (sliceable), so a loose "Season
         # 1" -> episode 1 mis-parse cannot exclude them from later episodes.
         candidate_episode = candidate_episode_number(rel_name)
         if candidate_episode is not None and candidate_episode != episode:
-            return False
+            return None
     if strict and _edition_tags(rel_name) != target_tags:
-        # Different cuts (US vs International, theatrical vs Extended,
-        # BluRay vs Remux) have different timings: any tag mismatch aborts.
-        return False
+        # Different cuts (US vs International, theatrical vs Extended) have
+        # different timings: any tag mismatch aborts in strict mode.
+        return None
+    if _is_screener(rel_name) or _is_screener(target_name):
+        return None
+
     candidate_source = _source_kind(rel_name)
+    if candidate_source in _INCOMPATIBLE_SOURCES or target_source in _INCOMPATIBLE_SOURCES:
+        return None  # DVD/CAM never serve as a reference
+
     same_family = (
         bool(target_source)
         and bool(candidate_source)
         and _sources_compatible(target_source, candidate_source)
     )
+    cross_format = (
+        bool(target_source)
+        and bool(candidate_source)
+        and _cross_format_ok(target_name, target_source, rel_name, candidate_source)
+    )
+    compatible = same_family or cross_format
     if target_source and candidate_source:
-        if not same_family:
-            return False  # direct conflict: different sources never mix
-    elif strict and (target_source or candidate_source):
-        return False  # fail closed: unknowns on either side
-    # Once the source family is confirmed on both sides (e.g. BluRay), a
-    # missing codec/resolution cannot contradict it: 720p and undertagged
-    # siblings (ALL.BluRay) share the same retail-disc master. Explicit
-    # conflicts still fail in every mode.
+        if not compatible:
+            return None
+        tier = 0 if same_family else 1
+    elif target_source or candidate_source:
+        if strict:
+            return None  # fail closed on a one-sided unknown
+        tier = 2
+    else:
+        tier = 2
+
+    # Within a compatible pair a codec/resolution mismatch cannot contradict the
+    # master (x264/x265 and 720p/1080p share subtitle timing). Explicit
+    # conflicts still fail, and resolution must match outside the 1080p/720p pair.
     candidate_codec = _codec_kind(rel_name)
     if target_codec and candidate_codec and candidate_codec != target_codec:
-        # x264 vs x265 of the same retail master has identical subtitle timing;
-        # only fail closed in strict mode or across conflicting sources.
-        if strict or not same_family:
-            return False
-    elif strict and (target_codec or candidate_codec) and not same_family:
-        return False
+        if not compatible:
+            return None
+    elif strict and (target_codec or candidate_codec) and not compatible:
+        return None
     candidate_res = _resolution(rel_name)
     if target_res and candidate_res:
         if candidate_res != target_res and not (
-            same_family and {target_res, candidate_res} <= {"1080p", "720p"}
+            compatible and {target_res, candidate_res} <= {"1080p", "720p"}
         ):
-            return False
-    elif strict and (target_res or candidate_res) and not same_family:
-        return False
-    return True
+            return None
+    elif strict and (target_res or candidate_res) and not compatible:
+        return None
+    return tier
 
 
 def decide(
@@ -335,11 +405,11 @@ def decide(
             best,
             f"relaxed fallback for uninformative target on {_release_name(best)!r}",
         )
-    edition = [
-        rel
-        for rel in pool
-        if _edition_ok(
+    edition: list[tuple[int, Any]] = []
+    for rel in pool:
+        tier = _edition_tier(
             _release_name(rel),
+            target_name=target_filename,
             target_source=target_source,
             target_codec=target_codec,
             target_res=target_res,
@@ -347,18 +417,22 @@ def decide(
             episode=episode,
             strict=strict,
         )
-    ]
+        if tier is not None:
+            edition.append((tier, rel))
+    # Best tier first (exact source > cross-format > relaxed), then the usual
+    # quality tie-breaks within a tier.
     edition.sort(
-        key=lambda rel: _edition_sort_key(
-            _release_name(rel), target_source, target_res, episode
+        key=lambda item: (
+            item[0],
+            _edition_sort_key(_release_name(item[1]), target_source, target_res, episode),
         )
     )
     if edition:
-        best = edition[0]
+        tier, best = edition[0]
         return ReferenceDecision(
             "edition",
             best,
-            f"source/codec/edition match on {_release_name(best)!r}",
+            f"source/codec/edition match (tier {tier}) on {_release_name(best)!r}",
         )
     return ReferenceDecision(
         "abort", None, "no candidate proves the same edition as the target"

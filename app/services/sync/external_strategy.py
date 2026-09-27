@@ -289,6 +289,11 @@ class ExternalExactStrategy:
             if candidate_source and (
                 candidate_source == target_source
                 or {target_source, candidate_source} == {"bluray", "remux"}
+                # A WEB-DL stream can be anchored by a retail-disc reference.
+                or (
+                    target_source == "webdl"
+                    and candidate_source in {"bluray", "remux"}
+                )
             ):
                 return False
         return True
