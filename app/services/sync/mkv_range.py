@@ -7,9 +7,10 @@ instead parses the EBML container over a handful of small Range requests:
 
 * read the header + ``SeekHead`` to locate ``Tracks`` and ``Cues``;
 * read ``Tracks`` to find the desired text-subtitle track number;
-* read ``Cues`` to build a keyframe-cluster index;
-* fetch a sample of clusters spread across the timeline and decode the
-  subtitle blocks they contain into a partial SRT reference.
+* read ``Cues`` (a targeted range, usually at the tail) to build the fuller
+  keyframe-cluster index;
+* walk every cue cluster and decode the target track's blocks, reconstructing
+  the complete SRT timeline (never a truncated/partial reference).
 
 Only plain-text ``S_TEXT/UTF8`` subtitle tracks are extractable here;
 image-based (PGS/VobSub) and styled (ASS/SSA/WebVTT) tracks are reported but
@@ -20,6 +21,7 @@ that looks forced/partial falls back to the next candidate track.
 from __future__ import annotations
 
 import logging
+import re
 import struct
 from typing import TYPE_CHECKING
 
@@ -49,6 +51,7 @@ _ID_CUES = 0x1C53BB6B
 _ID_CUE_POINT = 0xBB
 _ID_CUE_TIME = 0xB3
 _ID_CUE_TRACK_POSITIONS = 0xB7
+_ID_CUE_TRACK = 0xF7
 _ID_CUE_CLUSTER_POSITION = 0xF1
 _ID_CLUSTER = 0x1F43B675
 _ID_TIMESTAMP = 0xE7
@@ -74,12 +77,18 @@ _ENGLISH = frozenset({"eng", "en", "english"})
 _LOW_PRIORITY_NAME_MARKERS = ("forced", "stripped", "signs", "songs", "commentary")
 _PREFERRED_NAME_MARKERS = ("sdh", "full")
 
-# Completeness bar for a sampled embedded track. A full feature subtitle has
+# Completeness bar for an extracted embedded track. A full feature subtitle has
 # hundreds of cues; anything under these bounds looks forced/partial and the
-# extractor tries the next S_TEXT/UTF8 candidate.
+# extractor tries the next S_TEXT/UTF8 candidate (or returns None).
 _MIN_EMBEDDED_CUES = 150
 _MIN_EMBEDDED_BYTES = 10 * 1024
 _LONG_VIDEO_MS = 15 * 60 * 1000
+
+# Cues index lives near the tail of most muxes, so read it with one small
+# targeted range request. Full extraction then walks every cue cluster.
+_TAIL_CUES_BYTES = 512 * 1024
+_CUE_CLUSTER_BYTES = 256 * 1024
+_MAX_EXTRACT_BYTES = 256 * 1024 * 1024
 
 
 class MKVRangeError(Exception):
@@ -290,24 +299,44 @@ def _is_incomplete_embedded(
     return False
 
 
-def parse_cues(buf: bytes, start: int, end: int) -> list[tuple[int, int]]:
-    """Return ``[(time_ms, cluster_relative_position), ...]`` from Cues."""
-    cues: list[tuple[int, int]] = []
+def parse_cues(
+    buf: bytes, start: int, end: int, *, target_track: int | None = None
+) -> list[tuple[int, int]]:
+    """Return ``[(time_ms, cluster_relative_position), ...]`` from Cues.
+
+    Each ``CuePoint`` may carry several ``CueTrackPositions`` (one per indexed
+    track). When ``target_track`` is given and the index actually contains
+    entries for it, only those cluster positions are returned; otherwise every
+    ``CuePoint`` is used, since most muxes index only the video track.
+    """
+    entries: list[tuple[int, int, int]] = []  # (time_ms, cluster_pos, track)
     for eid, ds, de in _children(buf, start, end):
         if eid != _ID_CUE_POINT:
             continue
         time_ms = None
-        cluster_pos = None
+        positions: list[tuple[int, int]] = []  # (track, cluster_pos)
         for cid, cs, ce in _children(buf, ds, de):
             if cid == _ID_CUE_TIME:
                 time_ms = _read_uint(buf, cs, ce)
             elif cid == _ID_CUE_TRACK_POSITIONS:
+                track = 0
+                cluster_pos = None
                 for pid, ps, pe in _children(buf, cs, ce):
-                    if pid == _ID_CUE_CLUSTER_POSITION:
+                    if pid == _ID_CUE_TRACK:
+                        track = _read_uint(buf, ps, pe)
+                    elif pid == _ID_CUE_CLUSTER_POSITION:
                         cluster_pos = _read_uint(buf, ps, pe)
-        if time_ms is not None and cluster_pos is not None:
-            cues.append((time_ms, cluster_pos))
-    return cues
+                if cluster_pos is not None:
+                    positions.append((track, cluster_pos))
+        if time_ms is None:
+            continue
+        entries.extend((time_ms, cluster_pos, track) for track, cluster_pos in positions)
+
+    if target_track is not None:
+        targeted = [(time_ms, pos) for time_ms, pos, track in entries if track == target_track]
+        if targeted:
+            return targeted
+    return [(time_ms, pos) for time_ms, pos, _track in entries]
 
 
 def parse_cluster(buf: bytes, start: int, end: int, track: int) -> list[tuple[int, int, str]]:
@@ -387,6 +416,33 @@ async def _fetch(client: httpx.AsyncClient, url: str, start: int, size: int) -> 
     return resp.content or b""
 
 
+async def _probe_total_size(client: httpx.AsyncClient, url: str) -> int | None:
+    """Best-effort total file size from a zero-byte range response.
+
+    Used only to locate a tail ``Cues`` element when the SeekHead position is
+    stale. Never raises: an unsupported client/response simply returns ``None``.
+    """
+    try:
+        resp = await client.get(url, headers={"Range": "bytes=0-0"}, follow_redirects=True)
+        headers = resp.headers
+    except Exception:  # noqa: BLE001 - size is only an optimisation
+        return None
+    try:
+        content_range = headers.get("content-range") or ""
+    except Exception:  # noqa: BLE001 - headers may be absent/mocked
+        content_range = ""
+    match = re.search(r"/(\d+)\s*$", content_range)
+    if match:
+        return int(match.group(1))
+    try:
+        length = headers.get("content-length")
+        if length is not None and int(length) > 1:
+            return int(length)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
 def _srt_timestamp(ms: int) -> str:
     ms = max(0, ms)
     h, rem = divmod(ms, 3_600_000)
@@ -416,17 +472,21 @@ async def extract_embedded_srt(
     client: httpx.AsyncClient,
     *,
     want_language: str = "eng",
-    windows: int = 2,
-    window_bytes: int = 40 * 1024 * 1024,
-    target_cues: int = 8,
     timeout: float = 8.5,
     min_cues: int = _MIN_EMBEDDED_CUES,
     min_bytes: int = _MIN_EMBEDDED_BYTES,
+    tail_cues_bytes: int = _TAIL_CUES_BYTES,
+    cluster_bytes: int = _CUE_CLUSTER_BYTES,
+    max_extract_bytes: int = _MAX_EXTRACT_BYTES,
 ) -> bytes | None:
-    """Extract a partial text-subtitle reference from a remote MKV via ranges.
+    """Extract a complete text-subtitle reference from a remote MKV via ranges.
 
-    Returns raw SRT bytes (partial, sampled) or ``None`` when the container is
-    unsupported/absent. Never raises.
+    Locates the ``Cues`` index through the ``SeekHead`` (reading it with one
+    small targeted range request — it usually sits at the tail), then walks
+    every cue cluster and decodes the target track's blocks to reconstruct the
+    full timeline. Returns raw SRT bytes, or ``None`` when the container is
+    unsupported, the Cues index is missing, or a complete track cannot be
+    collected (never a truncated/partial reference). Never raises.
     """
     import asyncio
 
@@ -506,79 +566,99 @@ async def extract_embedded_srt(
             ),
         )
 
+        # Locate the Cues index via SeekHead and read it with one targeted range
+        # request; it normally sits near the end of the file.
         if _ID_CUES not in seeks:
-            raise MKVRangeError("no Cues index (cannot range-seek clusters)")
-        cue_blob = await _fetch_at(seeks[_ID_CUES], 1_048_576)
+            raise MKVRangeError("no Cues index (cannot enumerate clusters)")
+        cue_blob = await _fetch_at(seeks[_ID_CUES], tail_cues_bytes)
         cue_contents = _element_contents(cue_blob, _ID_CUES)
         if cue_contents is None:
+            # Stale SeekHead or a Cues element in the final bytes: retry against
+            # the tail using the file's total size (when it can be probed).
+            total = await _probe_total_size(client, stream_url)
+            if total is not None:
+                start = max(0, total - tail_cues_bytes)
+                cue_blob = await _fetch(client, stream_url, start, tail_cues_bytes)
+                cue_contents = _element_contents(cue_blob, _ID_CUES)
+                if cue_contents is not None:
+                    logger.info(
+                        "[reference] range MKV extraction: read tail Cues at byte %d of %d",
+                        start,
+                        total,
+                    )
+        if cue_contents is None:
             raise MKVRangeError("Cues element not found at its SeekHead position")
-        cues = parse_cues(cue_blob, cue_contents[0], cue_contents[1])
-        if not cues:
-            raise MKVRangeError("empty Cues index")
+        cue_range: tuple[int, int] = cue_contents
+        logger.info(
+            "[reference] range MKV extraction: located Cues index (%d bytes)",
+            cue_range[1] - cue_range[0],
+        )
 
-        cues.sort()
-        # Subtitle blocks are interleaved with video, so we cannot cheaply seek
-        # to individual cues. A single large contiguous range is fast on the
-        # proxy; fetch several evenly-spread windows and decode every cluster.
-        n_windows = max(1, min(windows, 16))
-        fractions = [(i + 1) / (n_windows + 1) for i in range(n_windows)]
-
-        async def _sample(track_number: int) -> list[tuple[int, int, str]]:
+        async def _extract_track(track_number: int) -> list[tuple[int, int, str]]:
+            """Walk every cue cluster and decode the target track's blocks."""
+            cues = parse_cues(
+                cue_blob, cue_range[0], cue_range[1], target_track=track_number
+            )
+            if not cues:
+                return []
+            positions = sorted({cluster_pos for _time, cluster_pos in cues})
             collected: list[tuple[int, int, str]] = []
-            for frac in fractions:
-                if len(collected) >= target_cues:
-                    break
-                index = min(len(cues) - 1, int(len(cues) * frac))
-                cluster_rel = cues[index][1]
+            decoded_spans: list[tuple[int, int]] = []
+            read = 0
+            for pos in positions:
+                if any(start <= pos < stop for start, stop in decoded_spans):
+                    continue
+                if read >= max_extract_bytes:
+                    raise MKVRangeError(
+                        "embedded extraction exceeded the byte budget before completion"
+                    )
                 try:
-                    blob = await _fetch_at(cluster_rel, window_bytes)
+                    blob = await _fetch_at(pos, cluster_bytes)
                 except MKVRangeError:
                     continue
+                # Record the *actual* decoded span so overlapping windows are
+                # not re-fetched (parse_cluster decodes every cluster in a blob).
+                decoded_spans.append((pos, pos + len(blob)))
+                read += len(blob)
                 collected.extend(parse_cluster(blob, 0, len(blob), track_number))
+            logger.info(
+                "[reference] range MKV extraction: track %d decoded %d block(s) across "
+                "%d/%d cue cluster(s), %d bytes read",
+                track_number,
+                len(collected),
+                len(decoded_spans),
+                len(positions),
+                read,
+            )
             return collected
 
-        # Walk candidates best-first: a full track wins immediately, a
-        # forced/partial sample falls through to the next candidate. The best
-        # sample is kept so a genuinely sparse file still yields a reference.
-        best: tuple[int, bytes] | None = None
+        # Walk candidates best-first. A complete track wins; anything below the
+        # completeness bar is rejected (never cached as a truncated reference).
         for track in candidates:
-            blocks = _render_srt_blocks(await _sample(track["number"]))
-            if len(blocks) < 5:
-                logger.info(
-                    "[reference] range MKV extraction: track %d yielded only %d cue(s) -> next",
-                    track["number"],
-                    len(blocks),
-                )
-                continue
-            payload = ("\n\n".join(blocks) + "\n").encode("utf-8")
-            if not _is_incomplete_embedded(
+            blocks = _render_srt_blocks(await _extract_track(track["number"]))
+            payload = ("\n\n".join(blocks) + "\n").encode("utf-8") if blocks else b""
+            if _is_incomplete_embedded(
                 len(blocks), len(payload), duration_ms, min_cues=min_cues, min_bytes=min_bytes
             ):
                 logger.info(
-                    "[reference] range MKV extraction: track %d yielded %d cue(s)/%d bytes -> using",
+                    "[reference] range MKV extraction: track %d incomplete "
+                    "(%d cue(s), %d bytes) -> trying next candidate",
                     track["number"],
                     len(blocks),
                     len(payload),
                 )
-                return payload
+                continue
             logger.info(
-                "[reference] range MKV extraction: track %d looks forced/partial "
-                "(%d cue(s), %d bytes) -> trying next candidate",
+                "[reference] range MKV extraction: track %d complete with %d cue(s)/%d bytes -> using",
                 track["number"],
                 len(blocks),
                 len(payload),
             )
-            if best is None or len(blocks) > best[0]:
-                best = (len(blocks), payload)
+            return payload
 
-        if best is not None:
-            logger.info(
-                "[reference] range MKV extraction: no full track found; "
-                "using best available sample (%d cue(s))",
-                best[0],
-            )
-            return best[1]
-        raise MKVRangeError("no S_TEXT/UTF8 track yielded enough subtitle cues")
+        raise MKVRangeError(
+            "no complete S_TEXT/UTF8 track could be extracted (no truncated reference)"
+        )
 
     try:
         return await asyncio.wait_for(_run(), timeout)

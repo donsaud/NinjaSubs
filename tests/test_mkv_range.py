@@ -2,6 +2,7 @@
 
 import logging
 import struct
+from types import SimpleNamespace
 
 import pytest
 
@@ -116,7 +117,11 @@ def test_parse_cues_and_cluster_block():
 
 @pytest.mark.asyncio
 async def test_extract_embedded_srt_end_to_end(monkeypatch):
-    data = _build_mkv()
+    # 5 clusters x 40 cues = 200 cues, Cues index at the tail.
+    data = _build_tail_cues_mkv(
+        [_track_entry(5, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng")],
+        [(c * 10_000, b"".join(_blocks_for(5, 40, f"C{c}_"))) for c in range(5)],
+    )
 
     class _Client:
         pass
@@ -128,8 +133,9 @@ async def test_extract_embedded_srt_end_to_end(monkeypatch):
     out = await M.extract_embedded_srt("http://host/movie.mkv", _Client(), timeout=5.0)
     assert out is not None
     text = out.decode("utf-8")
-    assert "00:00:01,000 --> 00:00:02,500" in text
-    assert "Line 0" in text and "Line 5" in text
+    assert "C0_0" in text and "C4_39" in text
+    # Full timeline: the last cluster's cue is present.
+    assert "00:00:43,900 --> 00:00:43,990" in text
 
 
 def test_srt_timestamp():
@@ -205,6 +211,59 @@ def _build_mkv_custom(track_entries: list[bytes], blocks: list[bytes]) -> bytes:
     cues = _el(M._ID_CUES, cue(cluster_off))
     sh = _seek_head(tracks_off, cues_off)
     segment = sh + info + tracks + cues + cluster
+    return _el(0x1A45DFA3, b"") + _el(M._ID_SEGMENT, segment)
+
+
+def _build_tail_cues_mkv(
+    track_entries: list[bytes],
+    clusters: list[tuple[int, bytes]],
+    *,
+    cue_track: int = 1,
+) -> bytes:
+    """MKV with one cluster per ``(cue_time_ms, payload)`` and Cues at the tail.
+
+    All payloads use fixed 8-byte field widths, so the Cues element size (and
+    therefore the recorded cluster offsets) is independent of the position
+    values — no iterative sizing is needed.
+    """
+    tracks = _el(M._ID_TRACKS, b"".join(track_entries))
+    info = _el(M._ID_INFO, _el(M._ID_TIMESTAMP_SCALE, _u8(1_000_000)))
+
+    def seek(eid: int, pos: int) -> bytes:
+        return _el(
+            M._ID_SEEK, _el(M._ID_SEEK_ID, _eid(eid)) + _el(M._ID_SEEK_POSITION, _u8(pos))
+        )
+
+    sh = _el(M._ID_SEEK_HEAD, seek(M._ID_TRACKS, 0) + seek(M._ID_CUES, 0))
+    tracks_off = len(sh) + len(info)
+
+    cluster_elems: list[bytes] = []
+    cluster_offsets: list[int] = []
+    off = tracks_off + len(tracks)
+    for cue_time, payload in clusters:
+        elem = _el(M._ID_CLUSTER, _el(M._ID_TIMESTAMP, _u8(cue_time)) + payload)
+        cluster_elems.append(elem)
+        cluster_offsets.append(off)
+        off += len(elem)
+
+    def cuepoint(time_ms: int, cluster_pos: int) -> bytes:
+        return _el(
+            M._ID_CUE_POINT,
+            _el(M._ID_CUE_TIME, _u8(time_ms))
+            + _el(
+                M._ID_CUE_TRACK_POSITIONS,
+                _el(M._ID_CUE_TRACK, _u8(cue_track))
+                + _el(M._ID_CUE_CLUSTER_POSITION, _u8(cluster_pos)),
+            ),
+        )
+
+    cues = _el(
+        M._ID_CUES,
+        b"".join(cuepoint(t, p) for (t, _), p in zip(clusters, cluster_offsets, strict=True)),
+    )
+    cues_off = tracks_off + len(tracks) + sum(len(elem) for elem in cluster_elems)
+    sh = _el(M._ID_SEEK_HEAD, seek(M._ID_TRACKS, tracks_off) + seek(M._ID_CUES, cues_off))
+    segment = sh + info + tracks + b"".join(cluster_elems) + cues
     return _el(0x1A45DFA3, b"") + _el(M._ID_SEGMENT, segment)
 
 
@@ -288,7 +347,10 @@ async def test_extract_logs_zero_subtitle_tracks(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_extract_logs_detected_tracks_on_supported_srt(monkeypatch, caplog):
-    data = _build_mkv()
+    data = _build_tail_cues_mkv(
+        [_track_entry(5, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng")],
+        [(c * 10_000, b"".join(_blocks_for(5, 40, f"C{c}_"))) for c in range(5)],
+    )
 
     async def fake_fetch(client, url, start, size):
         return data[start : start + size]
@@ -302,6 +364,7 @@ async def test_extract_logs_detected_tracks_on_supported_srt(monkeypatch, caplog
     assert "detected 1 subtitle track(s)" in messages
     assert "Track 5: CodecID='S_TEXT/UTF8', Lang='eng'" in messages
     assert "no S_TEXT/UTF8 track found" not in messages
+    assert "located Cues index" in messages
 
 
 # --------------------------------------------------------------------------- #
@@ -450,3 +513,121 @@ async def test_small_track_bypassed_for_full_track(monkeypatch, caplog):
     assert "FULL199" in text and "SMALL0" not in text
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "trying next candidate" in messages
+
+
+# --------------------------------------------------------------------------- #
+# Tail Cues parsing + full extraction (no truncated references)
+# --------------------------------------------------------------------------- #
+def test_parse_cues_targets_specific_track():
+    def cuepoint(time_ms: int, video_pos: int, sub_pos: int) -> bytes:
+        video = _el(
+            M._ID_CUE_TRACK_POSITIONS,
+            _el(M._ID_CUE_TRACK, _u8(1)) + _el(M._ID_CUE_CLUSTER_POSITION, _u8(video_pos)),
+        )
+        sub = _el(
+            M._ID_CUE_TRACK_POSITIONS,
+            _el(M._ID_CUE_TRACK, _u8(4)) + _el(M._ID_CUE_CLUSTER_POSITION, _u8(sub_pos)),
+        )
+        return _el(M._ID_CUE_POINT, _el(M._ID_CUE_TIME, _u8(time_ms)) + video + sub)
+
+    blob = _el(M._ID_CUES, cuepoint(1000, 111, 222) + cuepoint(2000, 333, 444))
+    contents = M._element_contents(blob, M._ID_CUES)
+    assert contents is not None
+    every = M.parse_cues(blob, contents[0], contents[1])
+    assert (1000, 111) in every and (1000, 222) in every
+    # Entries for the target track are preferred when present.
+    assert M.parse_cues(blob, contents[0], contents[1], target_track=4) == [(1000, 222), (2000, 444)]
+    # A track with no entries falls back to every CuePoint (video-only index).
+    assert M.parse_cues(blob, contents[0], contents[1], target_track=9) == every
+
+
+@pytest.mark.asyncio
+async def test_extract_full_track_across_clusters_from_tail_cues(monkeypatch, caplog):
+    # 160 clusters, one subtitle cue each -> complete timeline spanning the file.
+    data = _build_tail_cues_mkv(
+        [
+            _track_entry(
+                4, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng",
+                name=b"English SDH", forced=False,
+            )
+        ],
+        [(i * 1000, b"".join(_blocks_for(4, 1, f"CUE{i}_"))) for i in range(160)],
+    )
+
+    async def fake_fetch(client, url, start, size):
+        return data[start : start + size]
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.mkv_range"):
+        out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
+
+    assert out is not None
+    text = out.decode("utf-8")
+    assert "CUE0_0" in text and "CUE159_0" in text
+    assert text.count("-->") == 160
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "located Cues index" in messages
+    assert "complete with 160 cue(s)" in messages
+
+
+@pytest.mark.asyncio
+async def test_extract_returns_none_when_cues_missing(monkeypatch, caplog):
+    # Tracks inline but no SeekHead/Cues element at all.
+    data = _build_mkv_with_tracks(
+        [_track_entry(4, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng", name=b"English")]
+    )
+
+    async def fake_fetch(client, url, start, size):
+        return data[start : start + size]
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.mkv_range"):
+        out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
+
+    assert out is None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "no Cues index" in messages
+
+
+@pytest.mark.asyncio
+async def test_extract_returns_none_when_track_incomplete(monkeypatch, caplog):
+    # Only 12 cues: below the 150-cue bar -> no partial/truncated reference.
+    data = _build_tail_cues_mkv(
+        [_track_entry(4, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng", name=b"English")],
+        [(i * 1000, b"".join(_blocks_for(4, 1, f"CUE{i}_"))) for i in range(12)],
+    )
+
+    async def fake_fetch(client, url, start, size):
+        return data[start : start + size]
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.mkv_range"):
+        out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
+
+    assert out is None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "incomplete (12 cue(s)" in messages
+    assert "no complete S_TEXT/UTF8 track" in messages
+
+
+class _SizeClient:
+    def __init__(self, content_range: str):
+        self._content_range = content_range
+
+    async def get(self, url, headers=None, follow_redirects=True):
+        return SimpleNamespace(headers={"content-range": self._content_range}, status_code=206)
+
+
+@pytest.mark.asyncio
+async def test_probe_total_size_parses_content_range():
+    client = _SizeClient("bytes 0-0/19445753080")
+    assert await M._probe_total_size(client, "http://host/movie.mkv") == 19445753080
+
+
+@pytest.mark.asyncio
+async def test_probe_total_size_degrades_to_none():
+    class _Boom:
+        async def get(self, url, headers=None, follow_redirects=True):
+            raise RuntimeError("no headers")
+
+    assert await M._probe_total_size(_Boom(), "http://host/movie.mkv") is None

@@ -57,10 +57,7 @@ class EmbeddedStrategy:
         extract_timeout: float = 8.0,
         range_timeout: float = 8.5,
         inline_range: bool = False,
-        warm_timeout: float = 120.0,
-        warm_windows: int = 12,
-        warm_window_bytes: int = 16 * 1024 * 1024,
-        warm_target_cues: int = 80,
+        warm_timeout: float = 300.0,
         min_bytes: int = _MIN_REFERENCE_BYTES,
         cache: ReferenceDiskCache | None = None,
     ) -> None:
@@ -75,9 +72,6 @@ class EmbeddedStrategy:
         # warm-up instead (see ``warm_reference``).
         self.inline_range = inline_range
         self.warm_timeout = warm_timeout
-        self.warm_windows = warm_windows
-        self.warm_window_bytes = warm_window_bytes
-        self.warm_target_cues = warm_target_cues
         self.min_bytes = min_bytes
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
 
@@ -202,9 +196,6 @@ class EmbeddedStrategy:
                 stream_url,
                 self._client,
                 timeout=self.warm_timeout,
-                windows=self.warm_windows,
-                window_bytes=self.warm_window_bytes,
-                target_cues=self.warm_target_cues,
             )
         except Exception as exc:  # noqa: BLE001 - background best effort
             logger.info("[reference] embedded warm-up extraction failed: %s", exc)
