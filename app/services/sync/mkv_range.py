@@ -11,8 +11,10 @@ instead parses the EBML container over a handful of small Range requests:
 * fetch a sample of clusters spread across the timeline and decode the
   subtitle blocks they contain into a partial SRT reference.
 
-Only text codecs (``S_TEXT/UTF8`` / ``S_TEXT/ASS`` / ``S_TEXT/SSA``) are
-handled; image-based tracks (PGS/VobSub) are reported unsupported.
+Only plain-text ``S_TEXT/UTF8`` subtitle tracks are extractable here;
+image-based (PGS/VobSub) and styled (ASS/SSA/WebVTT) tracks are reported but
+not used. Forced/signs/songs/commentary tracks are deprioritised, and a sample
+that looks forced/partial falls back to the next candidate track.
 """
 
 from __future__ import annotations
@@ -41,6 +43,8 @@ _ID_TRACK_NUMBER = 0xD7
 _ID_TRACK_TYPE = 0x83
 _ID_CODEC_ID = 0x86
 _ID_LANGUAGE = 0x22B59C
+_ID_NAME = 0x536E
+_ID_FLAG_FORCED = 0x55AA
 _ID_CUES = 0x1C53BB6B
 _ID_CUE_POINT = 0xBB
 _ID_CUE_TIME = 0xB3
@@ -63,6 +67,19 @@ _TEXT_CODECS = ("S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT")
 # here — they resume via the ffmpeg or external tiers instead.
 _RANGE_SUPPORTED_TEXT_CODECS = frozenset({"S_TEXT/UTF8"})
 _ENGLISH = frozenset({"eng", "en", "english"})
+
+# Track-selection heuristics. A forced/signs/songs/commentary track holds only a
+# handful of cues and is useless as a sync reference, so it is deprioritised (or
+# dropped); a genuine English (optionally SDH/full) track is preferred.
+_LOW_PRIORITY_NAME_MARKERS = ("forced", "stripped", "signs", "songs", "commentary")
+_PREFERRED_NAME_MARKERS = ("sdh", "full")
+
+# Completeness bar for a sampled embedded track. A full feature subtitle has
+# hundreds of cues; anything under these bounds looks forced/partial and the
+# extractor tries the next S_TEXT/UTF8 candidate.
+_MIN_EMBEDDED_CUES = 150
+_MIN_EMBEDDED_BYTES = 10 * 1024
+_LONG_VIDEO_MS = 15 * 60 * 1000
 
 
 class MKVRangeError(Exception):
@@ -177,10 +194,11 @@ def parse_info(buf: bytes, start: int, end: int) -> tuple[int, float]:
 
 
 def parse_all_tracks(buf: bytes, start: int, end: int) -> list[dict]:
-    """Return every TrackEntry dict: number / type / codec / language.
+    """Return every TrackEntry dict: number / type / codec / language / name / forced.
 
     Unlike :func:`parse_tracks`, this keeps video, audio, and unsupported
-    subtitle codecs so callers can log a complete picture of the container.
+    subtitle codecs so callers can log a complete picture of the container and
+    apply track-selection heuristics (forced/signs vs. full/SDH).
     """
     tracks: list[dict] = []
     for eid, ds, de in _children(buf, start, end):
@@ -189,6 +207,8 @@ def parse_all_tracks(buf: bytes, start: int, end: int) -> list[dict]:
         number = track_type = 0
         codec = ""
         language = ""
+        name = ""
+        forced = False
         for cid, cs, ce in _children(buf, ds, de):
             if cid == _ID_TRACK_NUMBER:
                 number = _read_uint(buf, cs, ce)
@@ -198,8 +218,19 @@ def parse_all_tracks(buf: bytes, start: int, end: int) -> list[dict]:
                 codec = buf[cs:ce].decode("ascii", "replace").strip("\x00")
             elif cid == _ID_LANGUAGE:
                 language = buf[cs:ce].decode("ascii", "replace").strip("\x00")
+            elif cid == _ID_NAME:
+                name = buf[cs:ce].decode("utf-8", "replace").strip("\x00").strip()
+            elif cid == _ID_FLAG_FORCED:
+                forced = _read_uint(buf, cs, ce) != 0
         tracks.append(
-            {"number": number, "type": track_type, "codec": codec, "language": language.lower()}
+            {
+                "number": number,
+                "type": track_type,
+                "codec": codec,
+                "language": language.lower(),
+                "name": name,
+                "forced": forced,
+            }
         )
     return tracks
 
@@ -219,6 +250,44 @@ def _format_subtitle_tracks(tracks: list[dict]) -> str:
         f"Track {track['number']}: CodecID='{track['codec']}', Lang='{track['language']}'"
         for track in tracks
     )
+
+
+def _is_low_priority_track(track: dict) -> bool:
+    """True for forced/signs/songs/commentary tracks, useless as a reference."""
+    if track.get("forced"):
+        return True
+    name = (track.get("name") or "").lower()
+    return any(marker in name for marker in _LOW_PRIORITY_NAME_MARKERS)
+
+
+def _track_priority(track: dict) -> tuple[int, int, int, int]:
+    """Sort key: prefer non-forced English tracks, then ones named sdh/full."""
+    name = (track.get("name") or "").lower()
+    forced_rank = 1 if track.get("forced") else 0
+    lang_rank = 0 if track.get("language") in _ENGLISH else 1
+    name_rank = 0 if any(marker in name for marker in _PREFERRED_NAME_MARKERS) else 1
+    return (forced_rank, lang_rank, name_rank, int(track.get("number") or 0))
+
+
+def _is_incomplete_embedded(
+    cue_count: int,
+    text_bytes: int,
+    duration_ms: float,
+    *,
+    min_cues: int = _MIN_EMBEDDED_CUES,
+    min_bytes: int = _MIN_EMBEDDED_BYTES,
+) -> bool:
+    """True when a sampled embedded track looks forced/partial, not full.
+
+    A complete subtitle track has hundreds of cues; a signs/songs track has a
+    handful. Very small payloads on a feature-length (``> 15 min``) video are
+    likewise treated as incomplete so the next candidate track can be tried.
+    """
+    if cue_count < min_cues:
+        return True
+    if duration_ms >= _LONG_VIDEO_MS and text_bytes < min_bytes:
+        return True
+    return False
 
 
 def parse_cues(buf: bytes, start: int, end: int) -> list[tuple[int, int]]:
@@ -326,6 +395,22 @@ def _srt_timestamp(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def _render_srt_blocks(collected: list[tuple[int, int, str]]) -> list[str]:
+    """Sort, de-duplicate, and render decoded blocks as numbered SRT cues."""
+    seen: set[int] = set()
+    blocks: list[str] = []
+    for start_ms, duration_ms, text in sorted(collected, key=lambda item: item[0]):
+        if start_ms in seen or not text.strip():
+            continue
+        seen.add(start_ms)
+        end_ms = start_ms + (duration_ms or 2500)
+        blocks.append(
+            f"{len(blocks) + 1}\n"
+            f"{_srt_timestamp(start_ms)} --> {_srt_timestamp(end_ms)}\n{text}"
+        )
+    return blocks
+
+
 async def extract_embedded_srt(
     stream_url: str,
     client: httpx.AsyncClient,
@@ -335,6 +420,8 @@ async def extract_embedded_srt(
     window_bytes: int = 40 * 1024 * 1024,
     target_cues: int = 8,
     timeout: float = 8.5,
+    min_cues: int = _MIN_EMBEDDED_CUES,
+    min_bytes: int = _MIN_EMBEDDED_BYTES,
 ) -> bytes | None:
     """Extract a partial text-subtitle reference from a remote MKV via ranges.
 
@@ -398,9 +485,25 @@ async def extract_embedded_srt(
                 )
             raise MKVRangeError("no supported text subtitle track found in Tracks")
 
-        track = next(
-            (t for t in text_tracks if t["language"] in _ENGLISH),
-            text_tracks[0],
+        # Prefer genuine English tracks (optionally SDH/full) and drop
+        # forced/signs/songs/commentary tracks that would only ever sync a
+        # handful of cues.
+        candidates = [t for t in text_tracks if not _is_low_priority_track(t)]
+        if not candidates:
+            logger.info(
+                "[reference] range MKV extraction: only forced/signs/commentary "
+                "subtitle tracks present -> skipping embedded reference"
+            )
+            raise MKVRangeError("only low-priority (forced/signs) subtitle tracks present")
+        candidates.sort(key=_track_priority)
+        logger.info(
+            "[reference] range MKV extraction: candidate track(s) in priority order: %s",
+            ", ".join(
+                f"Track {t['number']}({t['language']}"
+                + (f", '{t['name']}'" if t.get("name") else "")
+                + ")"
+                for t in candidates
+            ),
         )
 
         if _ID_CUES not in seeks:
@@ -419,34 +522,63 @@ async def extract_embedded_srt(
         # proxy; fetch several evenly-spread windows and decode every cluster.
         n_windows = max(1, min(windows, 16))
         fractions = [(i + 1) / (n_windows + 1) for i in range(n_windows)]
-        collected: list[tuple[int, int, str]] = []
-        for frac in fractions:
-            if len(collected) >= target_cues:
-                break
-            index = min(len(cues) - 1, int(len(cues) * frac))
-            cluster_rel = cues[index][1]
-            try:
-                blob = await _fetch_at(cluster_rel, window_bytes)
-            except MKVRangeError:
-                continue
-            collected.extend(parse_cluster(blob, 0, len(blob), track["number"]))
 
-        if not collected:
-            raise MKVRangeError("no subtitle blocks decoded from sampled windows")
+        async def _sample(track_number: int) -> list[tuple[int, int, str]]:
+            collected: list[tuple[int, int, str]] = []
+            for frac in fractions:
+                if len(collected) >= target_cues:
+                    break
+                index = min(len(cues) - 1, int(len(cues) * frac))
+                cluster_rel = cues[index][1]
+                try:
+                    blob = await _fetch_at(cluster_rel, window_bytes)
+                except MKVRangeError:
+                    continue
+                collected.extend(parse_cluster(blob, 0, len(blob), track_number))
+            return collected
 
-        collected.sort(key=lambda item: item[0])
-        # De-duplicate identical start times (a cluster can be sampled twice).
-        seen: set[int] = set()
-        blocks: list[str] = []
-        for start_ms, duration_ms, text in collected:
-            if start_ms in seen or not text.strip():
+        # Walk candidates best-first: a full track wins immediately, a
+        # forced/partial sample falls through to the next candidate. The best
+        # sample is kept so a genuinely sparse file still yields a reference.
+        best: tuple[int, bytes] | None = None
+        for track in candidates:
+            blocks = _render_srt_blocks(await _sample(track["number"]))
+            if len(blocks) < 5:
+                logger.info(
+                    "[reference] range MKV extraction: track %d yielded only %d cue(s) -> next",
+                    track["number"],
+                    len(blocks),
+                )
                 continue
-            seen.add(start_ms)
-            end_ms = start_ms + (duration_ms or 2500)
-            blocks.append(f"{len(blocks) + 1}\n{_srt_timestamp(start_ms)} --> {_srt_timestamp(end_ms)}\n{text}")
-        if len(blocks) < 5:
-            raise MKVRangeError(f"only {len(blocks)} subtitle cue(s) decoded")
-        return ("\n\n".join(blocks) + "\n").encode("utf-8")
+            payload = ("\n\n".join(blocks) + "\n").encode("utf-8")
+            if not _is_incomplete_embedded(
+                len(blocks), len(payload), duration_ms, min_cues=min_cues, min_bytes=min_bytes
+            ):
+                logger.info(
+                    "[reference] range MKV extraction: track %d yielded %d cue(s)/%d bytes -> using",
+                    track["number"],
+                    len(blocks),
+                    len(payload),
+                )
+                return payload
+            logger.info(
+                "[reference] range MKV extraction: track %d looks forced/partial "
+                "(%d cue(s), %d bytes) -> trying next candidate",
+                track["number"],
+                len(blocks),
+                len(payload),
+            )
+            if best is None or len(blocks) > best[0]:
+                best = (len(blocks), payload)
+
+        if best is not None:
+            logger.info(
+                "[reference] range MKV extraction: no full track found; "
+                "using best available sample (%d cue(s))",
+                best[0],
+            )
+            return best[1]
+        raise MKVRangeError("no S_TEXT/UTF8 track yielded enough subtitle cues")
 
     try:
         return await asyncio.wait_for(_run(), timeout)

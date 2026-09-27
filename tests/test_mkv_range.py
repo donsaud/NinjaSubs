@@ -141,14 +141,25 @@ def test_srt_timestamp():
 # --------------------------------------------------------------------------- #
 # Track discovery diagnostics
 # --------------------------------------------------------------------------- #
-def _track_entry(number: int, track_type: int, codec: bytes, lang: bytes) -> bytes:
-    return _el(
-        M._ID_TRACK_ENTRY,
+def _track_entry(
+    number: int,
+    track_type: int,
+    codec: bytes,
+    lang: bytes,
+    name: bytes | None = None,
+    forced: bool | None = None,
+) -> bytes:
+    payload = (
         _el(M._ID_TRACK_NUMBER, _u8(number))
         + _el(M._ID_TRACK_TYPE, _u8(track_type))
         + _el(M._ID_CODEC_ID, codec)
-        + _el(M._ID_LANGUAGE, lang),
+        + _el(M._ID_LANGUAGE, lang)
     )
+    if name is not None:
+        payload += _el(M._ID_NAME, name)
+    if forced is not None:
+        payload += _el(M._ID_FLAG_FORCED, _u8(1 if forced else 0))
+    return _el(M._ID_TRACK_ENTRY, payload)
 
 
 def _build_mkv_with_tracks(tracks: list[bytes]) -> bytes:
@@ -156,6 +167,44 @@ def _build_mkv_with_tracks(tracks: list[bytes]) -> bytes:
     tracks_el = _el(M._ID_TRACKS, b"".join(tracks))
     info = _el(M._ID_INFO, _el(M._ID_TIMESTAMP_SCALE, _u8(1_000_000)))
     segment = info + tracks_el
+    return _el(0x1A45DFA3, b"") + _el(M._ID_SEGMENT, segment)
+
+
+def _build_mkv_custom(track_entries: list[bytes], blocks: list[bytes]) -> bytes:
+    """Build a full MKV (SeekHead/Info/Tracks/Cues/Cluster) with custom tracks."""
+    tracks = _el(M._ID_TRACKS, b"".join(track_entries))
+    info = _el(M._ID_INFO, _el(M._ID_TIMESTAMP_SCALE, _u8(1_000_000)))
+    cluster = _el(
+        M._ID_CLUSTER, _el(M._ID_TIMESTAMP, _u8(1000)) + b"".join(blocks)
+    )
+
+    def _seek_head(tracks_off: int, cues_off: int) -> bytes:
+        def seek(eid: int, pos: int) -> bytes:
+            return _el(
+                M._ID_SEEK,
+                _el(M._ID_SEEK_ID, _eid(eid)) + _el(M._ID_SEEK_POSITION, _u8(pos)),
+            )
+
+        return _el(M._ID_SEEK_HEAD, seek(M._ID_TRACKS, tracks_off) + seek(M._ID_CUES, cues_off))
+
+    def cue(cluster_pos: int) -> bytes:
+        return _el(
+            M._ID_CUE_POINT,
+            _el(M._ID_CUE_TIME, _u8(1000))
+            + _el(
+                M._ID_CUE_TRACK_POSITIONS,
+                _el(0xF7, _u8(1)) + _el(M._ID_CUE_CLUSTER_POSITION, _u8(cluster_pos)),
+            ),
+        )
+
+    sh = _seek_head(0, 0)
+    tracks_off = len(sh) + len(info)
+    cues_placeholder = _el(M._ID_CUES, cue(0))
+    cues_off = tracks_off + len(tracks)
+    cluster_off = cues_off + len(cues_placeholder)
+    cues = _el(M._ID_CUES, cue(cluster_off))
+    sh = _seek_head(tracks_off, cues_off)
+    segment = sh + info + tracks + cues + cluster
     return _el(0x1A45DFA3, b"") + _el(M._ID_SEGMENT, segment)
 
 
@@ -253,3 +302,151 @@ async def test_extract_logs_detected_tracks_on_supported_srt(monkeypatch, caplog
     assert "detected 1 subtitle track(s)" in messages
     assert "Track 5: CodecID='S_TEXT/UTF8', Lang='eng'" in messages
     assert "no S_TEXT/UTF8 track found" not in messages
+
+
+# --------------------------------------------------------------------------- #
+# Track flags / names + smart track selection
+# --------------------------------------------------------------------------- #
+def _parse_tracks_from(data: bytes) -> list[dict]:
+    seg_start, seg_end = M.find_segment(data)
+    tracks_range = next(
+        (ds, de) for eid, ds, de in M._children(data, seg_start, seg_end) if eid == M._ID_TRACKS
+    )
+    return M.parse_all_tracks(data, *tracks_range)
+
+
+def test_parse_all_tracks_extracts_name_and_flag_forced():
+    data = _build_mkv_with_tracks(
+        [
+            _track_entry(
+                3,
+                M._TRACK_TYPE_SUBTITLE,
+                b"S_TEXT/UTF8",
+                b"eng",
+                name=b"Signs & Songs (forced)",
+                forced=True,
+            ),
+            _track_entry(
+                4,
+                M._TRACK_TYPE_SUBTITLE,
+                b"S_TEXT/UTF8",
+                b"eng",
+                name=b"English SDH",
+                forced=False,
+            ),
+        ]
+    )
+    parsed = _parse_tracks_from(data)
+    assert parsed[0]["name"] == "Signs & Songs (forced)"
+    assert parsed[0]["forced"] is True
+    assert parsed[1]["name"] == "English SDH"
+    assert parsed[1]["forced"] is False
+    # No FlagForced element -> defaults to False.
+    plain = _parse_tracks_from(
+        _build_mkv_with_tracks([_track_entry(5, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng")])
+    )
+    assert plain[0]["forced"] is False and plain[0]["name"] == ""
+
+
+def test_is_low_priority_and_track_priority():
+    forced = {"number": 3, "language": "eng", "name": "", "forced": True}
+    signs = {"number": 4, "language": "eng", "name": "Signs", "forced": False}
+    commentary = {"number": 5, "language": "eng", "name": "Commentary", "forced": False}
+    plain = {"number": 6, "language": "eng", "name": "English", "forced": False}
+    sdh = {"number": 7, "language": "eng", "name": "English SDH", "forced": False}
+    other_lang = {"number": 8, "language": "ara", "name": "Arabic", "forced": False}
+
+    assert M._is_low_priority_track(forced)
+    assert M._is_low_priority_track(signs)
+    assert M._is_low_priority_track(commentary)
+    assert not M._is_low_priority_track(plain)
+    assert not M._is_low_priority_track(sdh)
+
+    ordered = sorted([other_lang, plain, sdh], key=M._track_priority)
+    assert [t["number"] for t in ordered] == [7, 6, 8]  # SDH, then English, then non-Eng
+
+
+def test_is_incomplete_embedded_thresholds():
+    assert M._is_incomplete_embedded(149, 20_000, 0) is True
+    assert M._is_incomplete_embedded(150, 20_000, 0) is False
+    # Long video + tiny payload is incomplete even with many cues.
+    assert M._is_incomplete_embedded(200, 9_000, 20 * 60 * 1000) is True
+    assert M._is_incomplete_embedded(200, 20_000, 20 * 60 * 1000) is False
+    # Short video: the byte floor does not apply.
+    assert M._is_incomplete_embedded(200, 5_000, 5 * 60 * 1000) is False
+
+
+def _blocks_for(track: int, count: int, prefix: str) -> list[bytes]:
+    # 100 ms spacing keeps the int16 relative timestamp within range for 300+ cues.
+    return [_block(track, i * 100, f"{prefix}{i}".encode(), 90) for i in range(count)]
+
+
+@pytest.mark.asyncio
+async def test_forced_track_filtered_for_full_sdh_track(monkeypatch, caplog):
+    data = _build_mkv_custom(
+        [
+            _track_entry(
+                3,
+                M._TRACK_TYPE_SUBTITLE,
+                b"S_TEXT/UTF8",
+                b"eng",
+                name=b"Signs (forced)",
+                forced=True,
+            ),
+            _track_entry(
+                4,
+                M._TRACK_TYPE_SUBTITLE,
+                b"S_TEXT/UTF8",
+                b"eng",
+                name=b"English SDH",
+                forced=False,
+            ),
+        ],
+        _blocks_for(3, 3, "SIGNS") + _blocks_for(4, 200, "FULL"),
+    )
+
+    async def fake_fetch(client, url, start, size):
+        return data[start : start + size]
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.mkv_range"):
+        out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
+
+    assert out is not None
+    text = out.decode("utf-8")
+    assert "FULL199" in text and "SIGNS0" not in text
+    # The forced track never becomes a candidate.
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "candidate track(s) in priority order: Track 4" in messages
+
+
+@pytest.mark.asyncio
+async def test_small_track_bypassed_for_full_track(monkeypatch, caplog):
+    # Track 3 is named SDH (top priority) but its sample is too small; track 4 is
+    # a genuine full track and must win after the threshold rejects track 3.
+    data = _build_mkv_custom(
+        [
+            _track_entry(
+                3, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng",
+                name=b"English SDH", forced=False,
+            ),
+            _track_entry(
+                4, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng",
+                name=b"English", forced=False,
+            ),
+        ],
+        _blocks_for(3, 10, "SMALL") + _blocks_for(4, 200, "FULL"),
+    )
+
+    async def fake_fetch(client, url, start, size):
+        return data[start : start + size]
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.mkv_range"):
+        out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
+
+    assert out is not None
+    text = out.decode("utf-8")
+    assert "FULL199" in text and "SMALL0" not in text
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "trying next candidate" in messages
