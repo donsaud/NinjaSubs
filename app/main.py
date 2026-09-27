@@ -41,15 +41,12 @@ from app.services.aggregator import (
     format_informative_badge,
 )
 from app.services.cache import clear_subtitle_cache
-from app.services.sync.embedded_strategy import EmbeddedStrategy
 from app.services.sync.external_strategy import ExternalExactStrategy
-from app.services.sync.hash_strategy import HashExactStrategy
 from app.services.sync.matching import (
     is_informative_release_name,
     prefer_meaningful_release_name,
 )
 from app.services.sync.orchestrator import SyncOrchestrator
-from app.services.sync.stream_resolver import StreamResolver
 from app.services.sync_cache import SyncCache
 from app.services.sync_service import SubtitleSyncService
 from app.utils.ass_converter import convert_ass_to_srt_bytes
@@ -1164,35 +1161,21 @@ async def _sync_subtitle_for_response(
 
 
 def _build_sync_orchestrator() -> SyncOrchestrator | None:
-    """Construct the sync orchestrator: hash, embedded, then exact external.
+    """Construct the lightweight sync orchestrator: one external reference.
 
-    Tier 1 is the OpenSubtitles video-hash lookup; Tier 2 extracts an
-    embedded English track when a stream URL is supplied; Tier 3 resolves an
-    external reference only on an exact team/edition tree verdict. Anything
-    unconfirmed aborts to the original subtitle.
+    The playing video stream is never touched — no embedded-track probing, no
+    MovieHash range reads, no header parsing. A single English reference is
+    fetched from SubDL/SubSource/OpenSubtitles for the same IMDb id / season /
+    episode, then ``alass`` aligns the Arabic subtitle to it.
     """
     if _http_client is None:
         return None
-    # Generic Stremio stream resolver. A per-user addon URL is supplied on each
-    # request (Torrentio/Comet/MediaFusion/AIOStreams); AIOSTREAMS_URL is the
-    # environment fallback used when the user supplies none.
-    stream_resolver = StreamResolver(
-        _http_client,
-        getattr(settings, "AIOSTREAMS_URL", "") or "",
-        timeout=float(getattr(settings, "AIOSTREAMS_TIMEOUT", 1.2)),
-    )
     return SyncOrchestrator(
-        hash_strategy=HashExactStrategy(
-            OpenSubtitlesProvider(_http_client),
-            client=_http_client,
-            stream_hash_timeout=float(getattr(settings, "STREAM_HASH_TIMEOUT", 1.5)),
-        ),
-        embedded_strategy=EmbeddedStrategy(client=_http_client),
         external_strategy=ExternalExactStrategy(
             subdl_provider=SubdlProvider(_http_client),
             subsource_provider=SubsourceProvider(_http_client),
+            opensubtitles_provider=OpenSubtitlesProvider(_http_client),
         ),
-        aiostreams=stream_resolver,
         sync_service=_sync_service,
         sync_cache=_sync_cache,
     )

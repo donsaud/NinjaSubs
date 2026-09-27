@@ -115,57 +115,6 @@ def _valid_cue_count(text: str) -> int:
     return len(_cue_spans(text))
 
 
-# Strict full-line timespan: catches minus signs and trailing garbage that a
-# searching regex would silently skip over.
-_STRICT_TIMESPAN_LINE_REGEX = re.compile(
-    r"^\s*(?P<sneg>-)?(?P<sh>\d{1,2}):(?P<smin>\d{2}):(?P<ss>\d{2})[,.](?P<sf>\d{1,3})"
-    r"\s*-->\s*(?P<eneg>-)?(?P<eh>\d{1,2}):(?P<em>\d{2}):(?P<es>\d{2})[,.](?P<ef>\d{1,3})\s*$"
-)
-
-
-def _validate_synced_output(target_srt: str, synced: str) -> str | None:
-    """Reject structurally unsound alass output; return a reason or ``None`` if sound.
-
-    Guards: cue retention (>= 85% of the target's cues), per-cue integrity
-    (no negative or inverted timestamps, no malformed timespan lines), and
-    total duration within [0.5x, 2.0x] of the target (no collapse/blowup).
-    """
-    target_spans = _cue_spans(target_srt)
-    if not target_spans:
-        return "no valid target cues to compare against"
-    out_spans: list[tuple[int, int]] = []
-    for line in synced.splitlines():
-        if "-->" not in line:
-            continue
-        match = _STRICT_TIMESPAN_LINE_REGEX.match(line.strip())
-        if match is None:
-            return f"malformed timespan line: {line.strip()[:60]!r}"
-        parts = match.groupdict()
-        if parts["sneg"] or parts["eneg"]:
-            return "negative timestamp in output"
-        start = (
-            (int(parts["sh"]) * 3600 + int(parts["smin"]) * 60 + int(parts["ss"])) * 1000
-            + int(parts["sf"].ljust(3, "0")[:3])
-        )
-        end = (
-            (int(parts["eh"]) * 3600 + int(parts["em"]) * 60 + int(parts["es"])) * 1000
-            + int(parts["ef"].ljust(3, "0")[:3])
-        )
-        if not start < end:
-            return f"inverted cue ({start} >= {end} ms)"
-        out_spans.append((start, end))
-    if len(out_spans) < len(target_spans) * 0.85:
-        return f"cue retention {len(out_spans)}/{len(target_spans)} below 85%"
-    target_duration = max(end for _, end in target_spans) - min(start for start, _ in target_spans)
-    out_duration = max(end for _, end in out_spans) - min(start for start, _ in out_spans)
-    if out_duration < 0.5 * target_duration or out_duration > 2.0 * target_duration:
-        return (
-            f"duration {out_duration / 1000.0:.1f}s outside [0.5x, 2.0x] "
-            f"of target {target_duration / 1000.0:.1f}s"
-        )
-    return None
-
-
 def _cue_starts_ms(text: str, limit: int = 3) -> list[int]:
     """First ``limit`` cue start timestamps (milliseconds) from an SRT string."""
     starts: list[int] = []
@@ -205,25 +154,6 @@ _DURATION_GAP_RATIO = 0.08
 # likely an extended/recap cut than a wrong one; allow a wider band and let
 # alass + the shift guardrail decide.
 _SOURCE_CONFIRMED_GAP_RATIO = 0.15
-
-# A shift whose per-cue spread stays within this band (after trimming a single
-# extreme sample) is a *uniform constant offset* — an intro/logo/bumper length
-# difference — not a drifting (wrong-cut) alignment.
-_UNIFORM_SHIFT_SPREAD_SECONDS = 3.0
-
-
-def _uniform_shift_spread(shifts: list[float], min_samples: int = 8) -> float:
-    """Spread of the sampled shifts with a single extreme outlier trimmed.
-
-    A lone early-cue artifact (translator credit/pre-roll) must not mark an
-    otherwise-constant offset as variable.
-    """
-    ordered = sorted(shifts)
-    if len(ordered) >= min_samples:
-        ordered = ordered[1:-1]
-    if not ordered:
-        return 0.0
-    return ordered[-1] - ordered[0]
 
 # Relaxed fallback (uninformative target) has no edition confirmation to lean
 # on, so the timeline must agree much more tightly: 5% of the runtime (1-minute
@@ -431,26 +361,6 @@ class SubtitleSyncService:
         except (OSError, subprocess.SubprocessError):
             return False
 
-    # Maximum plausible shift for a non-exact (edition) reference. Hash,
-    # embedded, and team references identify the same cut, so large shifts
-    # are impossible; an edition reference is only timing-adjacent, and a
-    # shift beyond this bound means alass aligned the wrong content.
-    MAX_ALLOWED_EDITION_SHIFT = 6.0
-    # Broadcast/WEB airings carry recap/intro segments (typically 30-120s)
-    # that retail BluRay editions omit. A large UNIFORM shift on series
-    # content with a bilaterally confirmed BluRay source is that recap cut,
-    # not a sync collapse, so the ceiling is raised for exactly that case.
-    MAX_ALLOWED_RECAP_SHIFT = 120.0
-    # A *uniform* constant offset on a TRUSTED reference (embedded track =
-    # the video's own bytes) may exceed the strict edition ceiling up to this
-    # bound; variable/split shifts stay on the strict ceiling.
-    MAX_ALLOWED_UNIFORM_SHIFT = 30.0
-    # A best-effort EDITION reference comes from a *different* release whose
-    # intro/bumper may not match the playing video at all. Applying a large
-    # constant offset would then mis-time an otherwise-correct subtitle, so an
-    # edition sync is trusted only for minor (<= 3s) constant corrections.
-    MAX_ALLOWED_EDITION_UNIFORM_SHIFT = 3.0
-
     def sync(
         self,
         target_srt: str,
@@ -464,15 +374,11 @@ class SubtitleSyncService:
         """
         Return the synced target SRT, or ``None`` on any failure.
 
-        Runs ``alass <reference> <target> <output> --split-penalty 0.5`` inside
+        Runs ``alass <reference> <target> <output> --split-penalty 7.0`` inside
         secure temporary files with a strict subprocess timeout.
 
-        ``decision_kind`` (``hash`` / ``embedded`` / ``team`` / ``edition``)
-        selects the safety guardrail: for a non-exact ``edition`` reference a
-        first-cue shift beyond ``MAX_ALLOWED_EDITION_SHIFT`` discards the
-        output so a mis-aligned sync is never served — except for series
-        content with a confirmed BluRay source pair, where recap cuts of up
-        to ``MAX_ALLOWED_RECAP_SHIFT`` are legitimate.
+        A zero exit code with a non-empty output is trusted and returned as-is;
+        the remaining keyword arguments are accepted for call compatibility.
         """
         if not target_srt or not reference_srt:
             logger.info(
@@ -595,13 +501,10 @@ class SubtitleSyncService:
             if not synced:
                 logger.warning("[sync] alass output was empty text -> fallback")
                 return None
-            rejection = _validate_synced_output(target_srt, synced)
-            if rejection is not None:
-                logger.warning("[sync] synced output rejected: %s -> fallback", rejection)
-                return None
             logger.info("[sync] success: produced %d chars of synced subtitle", len(synced))
 
-            # Prove whether alass actually shifted the timecodes.
+            # Trust alass: exit code 0 + non-empty output is served as-is. The
+            # shift is logged for observability only, never used to reject.
             target_starts = _cue_starts_ms(target_srt, limit=target_cues)
             synced_starts = _cue_starts_ms(synced, limit=target_cues)
             shifts = [
@@ -609,63 +512,11 @@ class SubtitleSyncService:
                 for before, after in zip(target_starts, synced_starts, strict=False)
             ]
             if shifts:
-                peak = max(shifts, key=abs)
-                spread = _uniform_shift_spread(shifts)
                 logger.info(
-                    "[sync] applied shift - sampled %d cue shift(s): peak %+.2fs, "
-                    "spread %.2fs",
+                    "[sync] applied shift - sampled %d cue shift(s): peak %+.2fs",
                     len(shifts),
-                    peak,
-                    spread,
+                    max(shifts, key=abs),
                 )
-                if decision_kind == "edition" or reference_partial:
-                    if is_series and source_confirmed:
-                        # Broadcast/retail recap cut: allow a large uniform shift.
-                        if abs(peak) > self.MAX_ALLOWED_RECAP_SHIFT:
-                            logger.warning(
-                                "[sync] safety guardrail triggered: recap shift "
-                                "(%+.2fs, spread %.2fs) exceeds the recap ceiling; "
-                                "rejecting sync to prevent mis-timing",
-                                peak,
-                                spread,
-                            )
-                            return None
-                    else:
-                        uniform_cap = (
-                            self.MAX_ALLOWED_UNIFORM_SHIFT
-                            if reference_partial
-                            else self.MAX_ALLOWED_EDITION_UNIFORM_SHIFT
-                        )
-                        if spread <= _UNIFORM_SHIFT_SPREAD_SECONDS:
-                            if abs(peak) <= uniform_cap:
-                                logger.info(
-                                    "[sync] uniform constant offset %+.2fs accepted "
-                                    "(minor constant correction, spread %.2fs)",
-                                    peak,
-                                    spread,
-                                )
-                            else:
-                                logger.warning(
-                                    "[sync] safety guardrail triggered: uniform shift "
-                                    "(%+.2fs, spread %.2fs) exceeds the edition bound "
-                                    "(%.1fs) for a cross-release reference; rejecting "
-                                    "sync to avoid mis-timing an already-correct "
-                                    "subtitle (reference bumper/cut differs)",
-                                    peak,
-                                    spread,
-                                    uniform_cap,
-                                )
-                                return None
-                        elif abs(peak) > self.MAX_ALLOWED_EDITION_SHIFT:
-                            logger.warning(
-                                "[sync] safety guardrail triggered: variable shift "
-                                "(%+.2fs, spread %.2fs) exceeds max safe threshold for "
-                                "generic edition; rejecting sync to prevent mis-timing "
-                                "(reference likely a different cut of the video)",
-                                peak,
-                                spread,
-                            )
-                            return None
             else:
                 logger.info("[sync] applied shift: no cues parsed for comparison")
             return synced

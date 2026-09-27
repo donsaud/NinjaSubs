@@ -288,8 +288,8 @@ async def test_orchestrator_forwards_decision_kind_to_alass(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_guardrail_rejects_edition_drift(monkeypatch):
-    """An edition reference that shifts cues by minutes serves the original."""
+async def test_orchestrator_trusts_alass_output(monkeypatch):
+    """A zero-exit alass output reaches the client regardless of the shift."""
     import subprocess
 
     from app.config import settings as app_settings
@@ -302,7 +302,6 @@ async def test_orchestrator_guardrail_rejects_edition_drift(monkeypatch):
 
     def _shifted_run(command, capture_output=True, timeout=None):
         # alass "succeeds" but with a +69s shift on the first cue.
-        # Full-length output so output validation passes and the guardrail decides.
         drifted = "".join(
             f"{i + 1}\n00:01:{10 + i * 2:02d},000 --> 00:01:{12 + i * 2:02d},000\nsynced {i}\n\n"
             for i in range(6)
@@ -314,20 +313,13 @@ async def test_orchestrator_guardrail_rejects_edition_drift(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _shifted_run)
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
 
-    orch = _orchestrator(
-        embedded_strategy=_FakeStrategy(ref, kind="edition"),
-        sync_service=SubtitleSyncService(),
-    )
-    out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
-    assert out == _arabic_bytes()
-
-    # The identical drift on a team verdict is trusted and served.
-    orch = _orchestrator(
-        embedded_strategy=_FakeStrategy(ref, kind="team"),
-        sync_service=SubtitleSyncService(),
-    )
-    out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
-    assert b"synced" in out
+    for kind in ("edition", "team"):
+        orch = _orchestrator(
+            embedded_strategy=_FakeStrategy(ref, kind=kind),
+            sync_service=SubtitleSyncService(),
+        )
+        out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
+        assert b"synced" in out
 
 
 def _probe_payload(*langs):
@@ -788,7 +780,7 @@ async def test_external_reference_remux_target_is_retail_pair():
     strategy = ExternalExactStrategy(subdl_provider=None, subsource_provider=None)
     resolved = await strategy._download_reference([_Release()], _FakeProvider(), None, query)
     assert resolved.text
-    assert resolved.kind == "team"
+    assert resolved.kind == "edition"
     assert resolved.bluray_match is True
 
 

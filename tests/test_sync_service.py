@@ -362,36 +362,15 @@ def _mock_alass_output(monkeypatch, text):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
 
-def test_guardrail_rejects_edition_drift(monkeypatch, caplog):
-    """Edition reference shifting the first cue by minutes must be discarded."""
-    _mock_alass_output(monkeypatch, _shifted_output())
-    with caplog.at_level("WARNING"):
-        out = SubtitleSyncService().sync(SRT, SRT, decision_kind="edition")
-    assert out is None
-    assert "safety guardrail triggered" in caplog.text
-    assert "mis-timing" in caplog.text
-
-
-def test_guardrail_trusts_team_reference(monkeypatch):
-    """The identical shift on a team verdict is served, not rejected."""
-    _mock_alass_output(monkeypatch, _shifted_output())
-    out = SubtitleSyncService().sync(SRT, SRT, decision_kind="team")
-    assert out is not None and "shifted" in out
-
-
-def test_guardrail_allows_small_edition_shifts(monkeypatch):
-    """Shifts within the threshold (including the 6.0s boundary) are served."""
-    _mock_alass_output(monkeypatch, _shifted_output(3))
+def test_sync_trusts_alass_output(monkeypatch):
+    """A zero-exit alass output is served regardless of the applied shift."""
+    _mock_alass_output(monkeypatch, _shifted_output())  # first cue moved by minutes
     out = SubtitleSyncService().sync(SRT, SRT, decision_kind="edition")
     assert out is not None and "shifted" in out
 
-
-def test_guardrail_default_is_conservative(monkeypatch, caplog):
-    """Callers that omit the verdict get edition-grade protection."""
-    _mock_alass_output(monkeypatch, _shifted_output())
-    with caplog.at_level("WARNING"):
-        assert SubtitleSyncService().sync(SRT, SRT) is None
-    assert "safety guardrail triggered" in caplog.text
+    _mock_alass_output(monkeypatch, _shifted_output(3))
+    out = SubtitleSyncService().sync(SRT, SRT, decision_kind="edition")
+    assert out is not None and "shifted" in out
 
 
 def _fmt_ts(seconds: float) -> str:
@@ -569,43 +548,13 @@ def test_inline_ass_tag_does_not_span_lines():
     assert "00:00:03,000 --> 00:00:04,000" in out
 
 
-def test_guardrail_allows_series_bluray_recap_shift(monkeypatch):
-    """A 96s recap cut on series with a confirmed BluRay pair is served."""
-    _mock_alass_output(monkeypatch, _shifted_output(97))
+def test_sync_trusts_large_shift(monkeypatch):
+    """Even a >120s shift is served on a zero-exit alass run."""
+    _mock_alass_output(monkeypatch, _shifted_output(150))
     out = SubtitleSyncService().sync(
         SRT, SRT, decision_kind="edition", is_series=True, source_confirmed=True
     )
     assert out is not None and "shifted" in out
-
-
-def test_guardrail_recap_requires_series_and_bluray(monkeypatch, caplog):
-    """Movies, or series without a confirmed pair, keep the 6s ceiling."""
-    _mock_alass_output(monkeypatch, _shifted_output(97))
-    with caplog.at_level("WARNING"):
-        assert (
-            SubtitleSyncService().sync(
-                SRT, SRT, decision_kind="edition", is_series=False, source_confirmed=True
-            )
-            is None
-        )
-        assert (
-            SubtitleSyncService().sync(
-                SRT, SRT, decision_kind="edition", is_series=True, source_confirmed=False
-            )
-            is None
-        )
-    assert caplog.text.count("safety guardrail triggered") == 2
-
-
-def test_guardrail_caps_recap_allowance_at_120s(monkeypatch, caplog):
-    """Even the recap allowance has a ceiling: +149s is still rejected."""
-    _mock_alass_output(monkeypatch, _shifted_output(150))
-    with caplog.at_level("WARNING"):
-        out = SubtitleSyncService().sync(
-            SRT, SRT, decision_kind="edition", is_series=True, source_confirmed=True
-        )
-    assert out is None
-    assert "safety guardrail triggered" in caplog.text
 
 
 def test_backward_jumps_detects_multi_episode_resets():
@@ -678,48 +627,17 @@ def test_timeline_rejection_source_confirmed_widens_band():
     )
 
 
-def test_guardrail_accepts_small_uniform_movie_offset(monkeypatch, caplog):
-    """A small constant edition correction (<= 3s) is applied."""
-    target = _span_srt(60, 6000.0)
-    _mock_alass_output(monkeypatch, _offset_srt(target, 2.0))
-    with caplog.at_level("INFO"):
-        out = SubtitleSyncService().sync(target, target, decision_kind="edition")
-    assert out is not None
-    assert "uniform constant offset" in caplog.text
-
-
-def test_guardrail_rejects_large_uniform_edition_offset(monkeypatch, caplog):
-    """Into the Wild: a +10.3s uniform shift vs a DIFFERENT release is refused.
-
-    The reference's intro/bumper does not match the playing video, so applying
-    the offset would mis-time an otherwise-correct subtitle.
-    """
+def test_sync_trusts_uniform_offset(monkeypatch):
+    """A constant edition offset (small or large) is applied as alass produced it."""
     target = _span_srt(60, 6000.0)
     _mock_alass_output(monkeypatch, _offset_srt(target, 10.3))
-    with caplog.at_level("WARNING"):
-        out = SubtitleSyncService().sync(target, target, decision_kind="edition")
-    assert out is None
-    assert "safety guardrail triggered" in caplog.text
-
-
-def test_guardrail_trims_single_outlier_cue(monkeypatch, caplog):
-    """A trusted (partial/embedded) reference tolerates a large uniform offset."""
-    target = _span_srt(12, 6000.0)
-    blocks = target.strip().split("\n\n")
-    synced = "\n\n".join(
-        [_offset_srt(blocks[0], 6.9)] + [_offset_srt(block, 9.7) for block in blocks[1:]]
-    ) + "\n"
-    _mock_alass_output(monkeypatch, synced)
-    with caplog.at_level("INFO"):
-        out = SubtitleSyncService().sync(
-            target, target, decision_kind="embedded", reference_partial=True
-        )
+    out = SubtitleSyncService().sync(target, target, decision_kind="edition")
     assert out is not None
-    assert "uniform constant offset" in caplog.text
+    assert out != target
 
 
-def test_guardrail_trimming_does_not_mask_genuine_drift(monkeypatch, caplog):
-    """A half/half split (real drift) is still rejected after trimming."""
+def test_sync_trusts_split_shift(monkeypatch):
+    """A split/drifting alass alignment is still served verbatim."""
     target = _span_srt(12, 6000.0)
     blocks = target.strip().split("\n\n")
     synced = "\n\n".join(
@@ -727,10 +645,8 @@ def test_guardrail_trimming_does_not_mask_genuine_drift(monkeypatch, caplog):
         + [_offset_srt(block, 9.7) for block in blocks[6:]]
     ) + "\n"
     _mock_alass_output(monkeypatch, synced)
-    with caplog.at_level("WARNING"):
-        out = SubtitleSyncService().sync(target, target, decision_kind="edition")
-    assert out is None
-    assert "safety guardrail triggered" in caplog.text
+    out = SubtitleSyncService().sync(target, target, decision_kind="edition")
+    assert out is not None and out.strip() == synced.strip()
 
 
 def test_sync_logs_first_cue_before_alass(monkeypatch, caplog):

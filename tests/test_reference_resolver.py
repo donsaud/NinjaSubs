@@ -112,23 +112,27 @@ def test_reference_query_is_series():
 @pytest.mark.asyncio
 async def test_opaque_filename_falls_back_to_episode_match():
     """Arbitrary debrid names (wVwm.mkv) must not block episode-level matching."""
-    captured: dict = {}
 
     class _Capture:
+        def __init__(self):
+            self.calls: list = []
+
         async def search_subtitles(self, **kwargs):
-            captured.update(kwargs)
+            self.calls.append(kwargs)
             return []
 
         async def download_archive(self, url, api_key=None):  # pragma: no cover
             return None
 
-    resolver = DualReferenceResolver(subdl_provider=_Capture(), subsource_provider=None, timeout=0.5)
+    capture = _Capture()
+    resolver = DualReferenceResolver(subdl_provider=capture, subsource_provider=None, timeout=0.5)
     await resolver.resolve(
         ReferenceQuery(imdb_id="tt0773262", target_filename="wVwm.mkv", season=8, episode=2)
     )
-    assert captured["target_filename"] is None
-    assert captured["imdb_id"] == "tt0773262"
-    assert captured["season"] == 8 and captured["episode"] == 2
+    first = capture.calls[0]
+    assert first["target_filename"] is None
+    assert first["imdb_id"] == "tt0773262"
+    assert first["season"] == 8 and first["episode"] == 2
 
 
 def _zip_with_srt(member: str, text: str) -> bytes:
@@ -186,7 +190,7 @@ def test_select_zip_member_prefers_requested_episode():
 
 
 @pytest.mark.asyncio
-async def test_resolver_rejects_wrong_season_release(monkeypatch):
+async def test_resolver_rejects_wrong_season_release():
     """A S01 candidate must never be used for a S08 request."""
 
     class _P:
@@ -212,13 +216,7 @@ async def test_resolver_rejects_wrong_season_release(monkeypatch):
     provider = _P()
     resolver = DualReferenceResolver(subdl_provider=provider, subsource_provider=None, timeout=0.5)
     query = ReferenceQuery(imdb_id="tt0773262", media_type="series", season=8, episode=1)
-    # Strict (default): no target edition info means nothing can be confirmed.
-    assert await resolver.resolve(query) is None
-    assert provider.downloaded == []
-    # Relaxed: the season-confirmed S08 pack is accepted and sliced by member.
-    from app.config import settings as app_settings
-
-    monkeypatch.setattr(app_settings, "SYNC_REQUIRE_EXACT_MATCH", False)
+    # The season-matched S08 pack is accepted (and sliced by member); S01 is not.
     content = await resolver.resolve(query)
     assert content is not None
     assert provider.downloaded == ["http://s08"]
@@ -299,7 +297,8 @@ def test_tree_aborts_without_target_edition_info():
 
 
 @pytest.mark.asyncio
-async def test_resolver_prefers_bluray_reference_for_bluray_stream():
+async def test_resolver_uses_top_matching_reference():
+    """The first season/episode-matched English candidate is used as-is."""
     class _P:
         def __init__(self):
             self.downloaded: list[str] = []
@@ -307,12 +306,12 @@ async def test_resolver_prefers_bluray_reference_for_bluray_stream():
         async def search_subtitles(self, **kwargs):
             return [
                 SubtitleRelease(
-                    release_name="Dexter.S08E01.480p.HDTV.x264-mSD.srt",
-                    download_url="http://hdtv", provider="subdl", lang="eng",
-                ),
-                SubtitleRelease(
                     release_name="Dexter.S08E01.1080p.BluRay.x264-GRP.srt",
                     download_url="http://bluray", provider="subdl", lang="eng",
+                ),
+                SubtitleRelease(
+                    release_name="Dexter.S08E01.480p.HDTV.x264-mSD.srt",
+                    download_url="http://hdtv", provider="subdl", lang="eng",
                 ),
             ]
 
@@ -413,9 +412,7 @@ async def test_resolver_logs_evaluated_candidates(caplog):
                 target_filename="Dexter.S08E01.1080p.BluRay.x265-GRP.mkv",
             )
         )
-    assert "evaluated 2 candidate(s)" in caplog.text
-    assert "Dexter.S08E01.480p.HDTV" in caplog.text
-    assert "Dexter.S08E01.1080p.BluRay" in caplog.text
+    assert "selected English reference" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -480,13 +477,7 @@ async def test_resolver_season_filter_keeps_tagged_candidate(monkeypatch):
     provider = _P()
     resolver = DualReferenceResolver(subsource_provider=provider, subdl_provider=None, timeout=0.5)
     query = ReferenceQuery(imdb_id="tt0773262", media_type="series", season=8, episode=1)
-    # Strict (default): no target edition info means nothing can be confirmed.
-    assert await resolver.resolve(query) is None
-    assert provider.downloaded == []
-    # Relaxed: the tagged S08E01 WEB-DL reference is accepted.
-    from app.config import settings as app_settings
-
-    monkeypatch.setattr(app_settings, "SYNC_REQUIRE_EXACT_MATCH", False)
+    # The tagged S08E01 WEB-DL reference is accepted; untagged peers are dropped.
     assert await resolver.resolve(query) is not None
     assert provider.downloaded == ["http://good"]
 
@@ -618,11 +609,8 @@ async def test_resolve_returns_disk_cache_without_calling_providers(tmp_path, ca
 
 
 @pytest.mark.asyncio
-async def test_cached_team_reference_keeps_team_provenance(tmp_path):
-    """Regression: an FSiHD team resolve must still report team on cache hit.
-
-    Otherwise the edition guardrail would wrongly reject the trusted shift.
-    """
+async def test_cached_reference_keeps_provenance(tmp_path):
+    """Regression: a resolve keeps its kind + bluray flag on a disk cache hit."""
     query = ReferenceQuery(
         imdb_id="tt0758758",
         media_type="movie",
@@ -644,14 +632,14 @@ async def test_cached_team_reference_keeps_team_provenance(tmp_path):
 
     first = DualReferenceResolver(subdl_provider=provider, cache=cache, timeout=0.5)
     resolved = await first.resolve_with_provenance(query)
-    assert resolved.text is not None and resolved.kind == "team"
+    assert resolved.text is not None and resolved.kind == "edition"
     assert resolved.bluray_match is True
 
     provider.search_subtitles = _dead_search  # type: ignore[method-assign]
     provider.download_archive = _dead_download  # type: ignore[method-assign]
     second = DualReferenceResolver(subdl_provider=provider, cache=cache, timeout=0.5)
     resolved = await second.resolve_with_provenance(query)
-    assert resolved.text is not None and resolved.kind == "team"
+    assert resolved.text is not None and resolved.kind == "edition"
     assert resolved.bluray_match is True
 
 
@@ -671,7 +659,7 @@ async def test_resolve_saves_successful_reference_for_future_requests(tmp_path):
     resolver = DualReferenceResolver(subdl_provider=provider, cache=cache, timeout=0.5)
     first = await resolver.resolve(query)
     assert first is not None
-    assert (tmp_path / "disk" / f"{query.cache_stem}_subdl_team.srt").exists()
+    assert (tmp_path / "disk" / f"{query.cache_stem}_subdl_edition.srt").exists()
 
     async def _fail_search(**kwargs):
         raise AssertionError("second resolution should use the disk cache")
@@ -736,8 +724,8 @@ def test_exact_release_group_beats_generic_source_match():
 
 
 @pytest.mark.asyncio
-async def test_resolver_downloads_exact_group_reference():
-    """End to end: same-source candidates lose to the exact release group."""
+async def test_resolver_ignores_release_group():
+    """End to end: release group is not a filter — the top candidate wins."""
 
     class _P:
         def __init__(self):
@@ -773,7 +761,7 @@ async def test_resolver_downloads_exact_group_reference():
         )
     )
     assert content is not None
-    assert provider.downloaded == ["http://fsihd"]
+    assert provider.downloaded == ["http://tigole"]
 
 
 def test_cache_stem_pins_stream_edition():
@@ -814,7 +802,7 @@ async def test_different_editions_do_not_share_cached_reference(tmp_path):
         subdl_provider=fsihd_provider, cache=cache, timeout=0.5
     )
     assert await resolver.resolve(fsihd_query) is not None
-    assert (tmp_path / "disk" / f"{fsihd_query.cache_stem}_subdl_team.srt").exists()
+    assert (tmp_path / "disk" / f"{fsihd_query.cache_stem}_subdl_edition.srt").exists()
 
     # The YIFY edition must re-resolve instead of reusing the FSiHD timings.
     yify_provider = _FakeProvider(BIG, name="subdl")
@@ -823,7 +811,7 @@ async def test_different_editions_do_not_share_cached_reference(tmp_path):
     )
     assert await resolver.resolve(yify_query) is not None
     assert yify_provider.downloaded == 1
-    assert (tmp_path / "disk" / f"{yify_query.cache_stem}_subdl_team.srt").exists()
+    assert (tmp_path / "disk" / f"{yify_query.cache_stem}_subdl_edition.srt").exists()
 
 
 def test_edition_tags_extraction():
@@ -938,8 +926,8 @@ def test_team_match_finds_non_trailing_group():
 
 
 @pytest.mark.asyncio
-async def test_resolver_downloads_midname_group_reference():
-    """End to end: the CHD release wins over a same-movie HDTV candidate."""
+async def test_resolver_uses_first_movie_candidate():
+    """End to end: the top same-imdb candidate is used regardless of source."""
 
     class _P:
         def __init__(self):
@@ -971,7 +959,7 @@ async def test_resolver_downloads_midname_group_reference():
         )
     )
     assert content is not None
-    assert provider.downloaded == ["http://chd"]
+    assert provider.downloaded == ["http://other"]
 
 
 @pytest.mark.asyncio
@@ -1085,8 +1073,8 @@ def test_same_source_outranks_webdl_despite_provider_order():
 
 
 @pytest.mark.asyncio
-async def test_resolver_never_downloads_cross_source_reference():
-    """End to end: the WEB-DL pack is skipped even when listed first."""
+async def test_resolver_accepts_cross_source_reference():
+    """End to end: source type is not a filter — the top candidate is used."""
 
     class _P:
         def __init__(self):
@@ -1117,7 +1105,7 @@ async def test_resolver_never_downloads_cross_source_reference():
         )
     )
     assert content is not None
-    assert provider.downloaded == ["http://demand"]
+    assert provider.downloaded == ["http://publichd"]
 
 
 def test_member_episode_explicit_part_forms():
@@ -1147,8 +1135,8 @@ def test_select_zip_member_mixed_naming_picks_only_requested_episode():
 
 
 @pytest.mark.asyncio
-async def test_tier2_season_query_enriches_missing_source_family(tmp_path):
-    """BluRay stream, HDTV-only episode results -> season catalog is queried."""
+async def test_tier1_candidate_used_without_season_query(tmp_path):
+    """Any episode candidate is accepted immediately; no season fan-out."""
 
     class _TieredProvider:
         def __init__(self):
@@ -1189,8 +1177,8 @@ async def test_tier2_season_query_enriches_missing_source_family(tmp_path):
         )
     )
     assert content is not None
-    assert provider.searches == [2, None]
-    assert provider.downloaded == ["http://pack"]
+    assert provider.searches == [2]
+    assert provider.downloaded == ["http://hdtv"]
 
 
 @pytest.mark.asyncio
@@ -1300,7 +1288,7 @@ async def test_pack_extraction_cached_under_episode_key(tmp_path):
     assert content is not None
     assert "episode two" in content
     assert "episode one" not in content and "episode three" not in content
-    assert len(list((tmp_path / "disk").glob("tt0773262_8_2_GRP_v2_*_subdl_team.srt"))) == 1
+    assert len(list((tmp_path / "disk").glob("tt0773262_8_2_GRP_v2_*_subdl_edition.srt"))) == 1
 
 
 def test_reference_disk_cache_restores_sidecar_verdict(tmp_path):
@@ -1434,11 +1422,8 @@ async def test_tier2_relaxed_recovers_season_pack_for_uninformative_target(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_tier2_strict_skips_season_for_uninformative_target(tmp_path, monkeypatch):
-    """Strict mode must not fan out to the season catalog for a hash target."""
-    from app.config import settings as app_settings
-
-    monkeypatch.setattr(app_settings, "SYNC_REQUIRE_EXACT_MATCH", True)
+async def test_tier2_enriches_empty_episode_query(tmp_path):
+    """An empty episode query falls back to the season catalog."""
 
     class _CountingProvider:
         def __init__(self):
@@ -1464,7 +1449,7 @@ async def test_tier2_strict_skips_season_for_uninformative_target(tmp_path, monk
             target_filename="e4WcFo4Tz5J8PoFwiBfP880XsBuHk4dS.mkv",
         )
     )
-    assert provider.searches == [1]
+    assert provider.searches == [1, None]
 
 
 def test_relaxed_fallback_prefers_explicit_episode_over_complete_pack():

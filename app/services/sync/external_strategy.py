@@ -18,12 +18,13 @@ from app.config import settings
 from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.decode import decode_payload, select_zip_member
 from app.services.sync.matching import (
+    _season_number,
     _source_kind,
+    candidate_episode_number,
     is_informative_release_name,
     is_retail_disc_source,
 )
 from app.services.sync.query import ResolvedReference
-from app.services.sync.tree import decide
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.sync.query import ReferenceQuery
@@ -34,6 +35,43 @@ logger = logging.getLogger(__name__)
 # reference resolution finishes inline and still leaves room for alass.
 _DEFAULT_TIMEOUT = 5.0
 _MIN_REFERENCE_BYTES = 5120
+
+
+def _release_name(release) -> str:
+    return str(getattr(release, "release_name", "") or "")
+
+
+def _select_reference(releases, query: ReferenceQuery):
+    """Pick the top season/episode-matched English reference, or ``None``.
+
+    Deliberately ignores release group, source, resolution and edition tags — a
+    matching season/episode is enough for ``alass`` to anchor the timing. A
+    byte-exact MovieHash match and non-HI subtitles are preferred when present.
+    """
+    pool = list(releases or [])
+    if not pool:
+        return None
+    if query.season is not None:
+        matched = [rel for rel in pool if _season_number(_release_name(rel)) == query.season]
+        if not matched:
+            return None
+        pool = matched
+    if query.episode is not None:
+        pool = [
+            rel
+            for rel in pool
+            if candidate_episode_number(_release_name(rel)) in (None, query.episode)
+        ]
+    if not pool:
+        return None
+    pool.sort(
+        key=lambda rel: (
+            0 if getattr(rel, "is_hash_match", False) else 1,
+            1 if getattr(rel, "hearing_impaired", False) else 0,
+            0 if str(getattr(rel, "lang", "") or "").lower().startswith("en") else 1,
+        )
+    )
+    return pool[0]
 
 
 class ExternalExactStrategy:
@@ -50,6 +88,7 @@ class ExternalExactStrategy:
         self,
         subdl_provider=None,
         subsource_provider=None,
+        opensubtitles_provider=None,
         *,
         timeout: float = _DEFAULT_TIMEOUT,
         min_bytes: int = _MIN_REFERENCE_BYTES,
@@ -57,6 +96,7 @@ class ExternalExactStrategy:
     ) -> None:
         self._subdl = subdl_provider
         self._subsource = subsource_provider
+        self._opensubtitles = opensubtitles_provider
         self.timeout = timeout
         self.min_bytes = min_bytes
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
@@ -87,6 +127,10 @@ class ExternalExactStrategy:
             tasks.append(asyncio.create_task(self._fetch_subdl(query), name="subdl"))
         if self._subsource is not None:
             tasks.append(asyncio.create_task(self._fetch_subsource(query), name="subsource"))
+        if self._opensubtitles is not None:
+            tasks.append(
+                asyncio.create_task(self._fetch_opensubtitles(query), name="opensubtitles")
+            )
         logger.info(
             "[reference] resolving imdb=%s S%sE%s filename=%r across %s (timeout=%.1fs)",
             query.imdb_id,
@@ -187,38 +231,30 @@ class ExternalExactStrategy:
     async def _download_reference(
         self, releases, provider, api_key: str | None, query: ReferenceQuery
     ) -> ResolvedReference:
-        """Download the tree-selected candidate and decode it (at most one file).
+        """Download the best season/episode-matched English reference.
 
-        Returns the subtitle text plus the tree decision kind (``team`` /
-        ``edition`` / ``abort``) so callers can apply kind-aware guardrails.
-        ``bluray_match`` records a bilaterally verified BluRay source pair,
-        which unlocks the series recap allowance downstream.
+        Selection is intentionally permissive: a matching season/episode is
+        enough, so a candidate is never rejected for its release group, source,
+        resolution or edition tags. ``bluray_match`` still records a bilaterally
+        verified BluRay source pair for downstream recap handling.
         """
         if not releases:
             logger.info("[reference] provider returned no candidate releases")
             return ResolvedReference(None)
 
-        # Explicit decision tree (team > edition > abort) replaces scoring.
-        # Fail-safe policy: anything the tree cannot confirm aborts here and
-        # the caller serves the original subtitle — never a guessed edition.
-        strict = bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True))
-        decision = decide(
-            list(releases),
-            query,
-            strict=strict,
-            provider_name=getattr(provider, "name", type(provider).__name__),
-        )
-        if decision.kind == "abort" or decision.release is None:
-            logger.warning("[reference] aborting: %s", decision.reason)
+        best = _select_reference(releases, query)
+        if best is None:
+            logger.warning(
+                "[reference] aborting: no season/episode-matched English reference"
+            )
             return ResolvedReference(None)
-        best = decision.release
         best_name = getattr(best, "release_name", "?")
+        decision_kind = "hash" if getattr(best, "is_hash_match", False) else "edition"
         logger.info(
-            "[reference] decision=%s (%s); downloading candidate %r via %s",
-            decision.kind,
-            decision.reason,
-            getattr(best, "release_name", "?"),
+            "[reference] selected English reference %r via %s (kind=%s)",
+            best_name,
             getattr(provider, "name", type(provider).__name__),
+            decision_kind,
         )
         try:
             raw = await provider.download_archive(best.download_url, api_key=api_key)
@@ -251,7 +287,7 @@ class ExternalExactStrategy:
         ) and is_retail_disc_source(_source_kind(best_name))
         return ResolvedReference(
             decoded.decode("utf-8", "replace"),
-            kind=decision.kind,
+            kind=decision_kind,
             bluray_match=bluray_match,
             candidate=best_name,
         )
@@ -269,34 +305,11 @@ class ExternalExactStrategy:
     def _needs_season_enrichment(releases, query: ReferenceQuery, strict: bool = True) -> bool:
         """True when a season-wide Tier 2 query is warranted.
 
-        For series with a known stream source family that Tier 1 failed to
-        cover (e.g. a BluRay stream whose episode query returned HDTV rips
-        only): the season catalog may hold the full-season retail pack.
-
-        When the target is uninformative (an obfuscated debrid hash) and the
-        episode query returned nothing, relaxed mode still queries the season
-        catalog — a season pack is the only remaining way to resolve a
-        reference. If Tier 1 already produced candidates, they are used as-is
-        rather than fanning out further.
+        Only when the episode query returned nothing for a series: a season pack
+        is the last remaining way to resolve a reference. If Tier 1 already
+        produced any candidate, it is used as-is.
         """
-        if query.season is None:
-            return False
-        target_source = _source_kind(query.target_filename)
-        if not target_source:
-            return not strict and not releases
-        for rel in releases or []:
-            candidate_source = _source_kind(getattr(rel, "release_name", "") or "")
-            if candidate_source and (
-                candidate_source == target_source
-                or {target_source, candidate_source} == {"bluray", "remux"}
-                # A WEB-DL stream can be anchored by a retail-disc reference.
-                or (
-                    target_source == "webdl"
-                    and candidate_source in {"bluray", "remux"}
-                )
-            ):
-                return False
-        return True
+        return query.season is not None and not releases
 
     async def _search_tiers(self, search, query: ReferenceQuery, provider_name: str) -> list:
         """Tier 1 episode query, enriched by a Tier 2 season query when needed.
@@ -353,3 +366,20 @@ class ExternalExactStrategy:
 
         releases = await self._search_tiers(_search, query, "subsource")
         return await self._download_reference(releases, self._subsource, api_key, query)
+
+    async def _fetch_opensubtitles(self, query: ReferenceQuery) -> ResolvedReference:
+        api_key = query.api_keys.get("opensubtitles")
+
+        async def _search(episode: int | None):
+            return await self._opensubtitles.search_subtitles(
+                imdb_id=query.imdb_id,
+                is_series=query.is_series,
+                season=query.season,
+                episode=episode,
+                api_key=api_key,
+                languages=list(query.languages),
+                target_filename=self._match_filename(query),
+            )
+
+        releases = await self._search_tiers(_search, query, "opensubtitles")
+        return await self._download_reference(releases, self._opensubtitles, api_key, query)

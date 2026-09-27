@@ -162,14 +162,15 @@ async def test_opensubtitles_cached_route_runs_autosync(monkeypatch, enabled_syn
     assert b"00:00:11,000" in response.body
 
 
-def test_edition_guardrail_checks_later_cues(monkeypatch):
+def test_sync_serves_alass_output_regardless_of_drift(monkeypatch):
     def run(command, **kwargs):
         with open(command[3], "w", encoding="utf-8") as output:
             output.write(_srt([0] * 3 + [20] * 7))
         return SimpleNamespace(returncode=0, stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", run)
-    assert SubtitleSyncService().sync(_srt(), _srt(), decision_kind="edition") is None
+    # The post-alass shift guardrail is gone: a zero-exit output is trusted.
+    assert SubtitleSyncService().sync(_srt(), _srt(), decision_kind="edition") is not None
 
 
 @pytest.mark.asyncio
