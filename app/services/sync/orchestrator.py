@@ -97,15 +97,14 @@ class SyncOrchestrator:
         self._inflight_lock = asyncio.Lock()
 
     def _strategies(self) -> list[tuple[str, Any]]:
-        # Fast, reliable network tiers first so a sync can finish inside the
-        # player's request budget: external (SubDL/SubSource) then stream
-        # MovieHash. The embedded track needs several seconds of remote demux
-        # (8s cap), so it runs LAST — it can only realistically warm the cache
-        # in the background after the inline budget expires.
+        # The embedded track is the ground-truth reference (the video's own
+        # bytes), so it is tried first — the range-based extractor reads only a
+        # couple of small windows. Fall back to the external exact-match tree,
+        # then the stream MovieHash.
         return [
+            ("embedded", self._embedded_strategy),
             ("external exact-match", self._external_strategy),
             ("hash-exact", self._hash_strategy),
-            ("embedded", self._embedded_strategy),
         ]
 
     async def _maybe_resolve_stream_url(self, query: ReferenceQuery) -> None:

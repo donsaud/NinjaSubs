@@ -1180,7 +1180,7 @@ def _build_sync_orchestrator() -> SyncOrchestrator | None:
             client=_http_client,
             stream_hash_timeout=float(getattr(settings, "STREAM_HASH_TIMEOUT", 1.5)),
         ),
-        embedded_strategy=EmbeddedStrategy(),
+        embedded_strategy=EmbeddedStrategy(client=_http_client),
         external_strategy=ExternalExactStrategy(
             subdl_provider=SubdlProvider(_http_client),
             subsource_provider=SubsourceProvider(_http_client),

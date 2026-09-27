@@ -49,15 +49,19 @@ class EmbeddedStrategy:
         *,
         ffprobe_path: str | None = None,
         ffmpeg_path: str | None = None,
+        client=None,
         timeout: float = 15.0,
         extract_timeout: float = 8.0,
+        range_timeout: float = 8.5,
         min_bytes: int = _MIN_REFERENCE_BYTES,
         cache: ReferenceDiskCache | None = None,
     ) -> None:
         self._ffprobe_path = ffprobe_path
         self._ffmpeg_path = ffmpeg_path
+        self._client = client
         self.timeout = timeout
         self.extract_timeout = extract_timeout
+        self.range_timeout = range_timeout
         self.min_bytes = min_bytes
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
 
@@ -95,6 +99,35 @@ class EmbeddedStrategy:
                 reason,
             )
             return ResolvedReference(None)
+
+        # Fast path: decode the internal text track purely via HTTP Range
+        # requests (no sequential media read). Falls through to ffprobe/ffmpeg
+        # when the container is unsupported.
+        if self._client is not None:
+            from app.services.sync.mkv_range import extract_embedded_srt
+
+            try:
+                ranged = await asyncio.wait_for(
+                    extract_embedded_srt(
+                        stream_url, self._client, timeout=self.range_timeout
+                    ),
+                    self.range_timeout + 1.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - fall back to ffmpeg
+                logger.info("[reference] range MKV extraction skipped: %s", exc)
+                ranged = None
+            if ranged:
+                from app.services.sync_service import sanitize_subtitle
+
+                sanitized = sanitize_subtitle(ranged.decode("utf-8", "replace"))
+                if sanitized:
+                    logger.info(
+                        "[reference] embedded strategy: range-extracted %d chars of internal track",
+                        len(sanitized),
+                    )
+                    self.cache.set(query, "embedded-range", sanitized, kind="embedded")
+                    return ResolvedReference(sanitized, kind="embedded", partial=True)
+
         ffprobe = self._binary("ffprobe")
         ffmpeg = self._binary("ffmpeg")
         if not ffprobe or not ffmpeg:
