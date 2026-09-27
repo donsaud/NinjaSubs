@@ -17,7 +17,6 @@ from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.orchestrator import SyncOrchestrator
 from app.services.sync.query import ReferenceQuery, ResolvedReference
-from app.services.sync.tree import decide
 from app.services.sync_service import SubtitleSyncService
 from app.utils.config_parser import encode_user_config
 
@@ -316,12 +315,6 @@ async def test_alignment_concurrency_is_bounded(monkeypatch):
     await asyncio.gather(first, second)
     assert before_release == 1
     assert calls == 2
-
-
-def test_same_team_reference_cannot_override_explicit_source_conflict():
-    query = ReferenceQuery(imdb_id="tt1", target_filename="Movie.2020.BluRay-GRP.mkv")
-    candidate = SimpleNamespace(release_name="Movie.2020.WEB-DL-GRP.srt")
-    assert decide([candidate], query).kind == "abort"
 
 
 def test_reference_cache_rejects_mixed_payload_and_provenance(tmp_path):

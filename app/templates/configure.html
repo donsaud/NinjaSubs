@@ -1113,16 +1113,6 @@
 
                     <div class="pref-row">
                         <div class="min-w-0">
-                            <label for="streamAddonUrl" class="pref-label">Stream Addon URL (Optional / Embedded Subs)</label>
-                            <p class="pref-desc">Paste the manifest/base URL of any Stremio stream addon you use (Torrentio, Comet, MediaFusion, AIOStreams) to unlock instant embedded subtitle extraction via HTTP Range.</p>
-                        </div>
-                    </div>
-                    <div class="pb-4">
-                        <input type="text" id="streamAddonUrl" value="{{initial_stream_addon}}" placeholder="https://torrentio.strem.fun/... or https://your-addon/manifest.json" class="mono-input w-full" autocomplete="off">
-                    </div>
-
-                    <div class="pref-row">
-                        <div class="min-w-0">
                             <label for="cleanTags" class="pref-label">Clean tags</label>
                             <p class="pref-desc">Fixes unclosed <code class="text-white font-mono">&lt;i&gt;/&lt;b&gt;</code> tags and repairs malformed wrappers.</p>
                         </div>
@@ -1788,10 +1778,6 @@
             const autoSyncEnabled = autoSyncToggle ? autoSyncToggle.checked : false;
             if (autoSyncEnabled) configObj.auto_sync = true;
 
-            const streamAddonEl = document.getElementById("streamAddonUrl");
-            const streamAddonUrl = streamAddonEl ? streamAddonEl.value.trim() : "";
-            if (streamAddonUrl) configObj.stream_addon_url = streamAddonUrl;
-
             const stripHiToggle = document.getElementById("stripHiLabels");
             const stripHiEnabled = stripHiToggle ? stripHiToggle.checked : false;
             // Standalone preference, independent of HI track exclusion.
@@ -1813,7 +1799,6 @@
                 !creditsEnabled || cleanFlagsNonDefault ||
                 easternNumeralsEnabled || stripDiacriticsEnabled ||
                 stripHiEnabled || !convertAssEnabled || autoSyncEnabled ||
-                streamAddonUrl ||
                 !subdlEnabled || !subsourceEnabled || !opensubtitlesEnabled;
 
             if (!hasAnyPreference) {
@@ -2174,9 +2159,6 @@
             const el = document.getElementById(id);
             if (el) el.addEventListener("change", updateUrls);
         });
-
-        const streamAddonInput = document.getElementById("streamAddonUrl");
-        if (streamAddonInput) streamAddonInput.addEventListener("input", updateUrls);
 
         applyInitialPrefs();
         updateProviderCollapse();

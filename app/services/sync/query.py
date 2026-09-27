@@ -23,8 +23,6 @@ class ReferenceQuery:
     video_hash: str | None = None
     video_size: int | str | None = None
     stream_url: str | None = None
-    # Per-user Stremio stream-addon base URL (overrides AIOSTREAMS_URL fallback).
-    stream_addon_url: str | None = None
     season: int | None = None
     episode: int | None = None
     api_keys: dict[str, str] = field(default_factory=dict)

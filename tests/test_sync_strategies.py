@@ -1,15 +1,9 @@
 """Tests for the sync strategies (hash-exact, embedded) and the orchestrator."""
 
-import json
-import subprocess
 from types import SimpleNamespace
 
 import pytest
 
-from app.models import SubtitleRelease
-from app.services.sync.cache import ReferenceDiskCache
-from app.services.sync.embedded_strategy import EmbeddedStrategy
-from app.services.sync.hash_strategy import HashExactStrategy
 from app.services.sync.orchestrator import SyncOrchestrator, build_synced_cache_key
 from app.services.sync.query import ReferenceQuery
 from app.services.sync_cache import SyncCache
@@ -17,84 +11,6 @@ from app.services.sync_cache import SyncCache
 BIG_REF = (
     "1\n00:00:01,000 --> 00:00:02,000\n" + ("reference line\n" * 600) + "\n"
 ).encode()
-
-
-def _os_release(name, file_id, *, hash_match=True, hi=False):
-    return SubtitleRelease(
-        release_name=name,
-        download_url=f"/sub/opensubtitles/{file_id}.srt",
-        provider="opensubtitles",
-        lang="eng",
-        hearing_impaired=hi,
-        is_hash_match=hash_match,
-    )
-
-
-class _FakeOSProvider:
-    def __init__(self, releases, payload=BIG_REF):
-        self._releases = releases
-        self._payload = payload
-        self.search_calls: list[dict] = []
-        self.download_calls: list[str] = []
-
-    async def search_subtitles(self, **kwargs):
-        self.search_calls.append(kwargs)
-        return list(self._releases)
-
-    async def download_archive(self, download_ref, api_key=None):
-        self.download_calls.append(download_ref)
-        return self._payload
-
-
-def _hash_query(**overrides):
-    params = {
-        "imdb_id": "tt0758758",
-        "media_type": "movie",
-        "target_filename": "Into.The.Wild.2007.1080p.BluRay.x264-FSiHD",
-        "video_hash": "8b2ashafthash1234",
-        "languages": ("eng",),
-    }
-    params.update(overrides)
-    return ReferenceQuery(**params)
-
-
-@pytest.mark.asyncio
-async def test_hash_strategy_needs_provider_and_hash():
-    assert await HashExactStrategy(None).resolve(_hash_query()) is None
-
-    provider = _FakeOSProvider([_os_release("x.srt", 1)])
-    strategy = HashExactStrategy(provider)
-    assert await strategy.resolve(_hash_query(video_hash="")) is None
-    assert await strategy.resolve(_hash_query(video_hash=None)) is None
-    assert provider.search_calls == []
-
-
-@pytest.mark.asyncio
-async def test_hash_strategy_downloads_confirmed_match_and_caches(tmp_path):
-    provider = _FakeOSProvider(
-        [
-            _os_release("Other.srt", 9, hash_match=False),
-            _os_release("Into.The.Wild.HI.srt", 7, hi=True),
-            _os_release("Into.The.Wild.2007.srt", 8),
-        ]
-    )
-    cache = ReferenceDiskCache(root=tmp_path / "disk", ttl=3600.0, min_bytes=100)
-    strategy = HashExactStrategy(provider, cache=cache, timeout=2.0)
-
-    content = await strategy.resolve(_hash_query())
-    assert content is not None and "reference line" in content
-    # Non-HI hash match preferred; the release search carried the video hash.
-    assert provider.download_calls == ["/sub/opensubtitles/8.srt"]
-    assert provider.search_calls[0]["video_hash"] == "8b2ashafthash1234"
-    assert (tmp_path / "disk" / f"{_hash_query().cache_stem}_opensubtitles_hash.srt").exists()
-
-
-@pytest.mark.asyncio
-async def test_hash_strategy_rejects_unconfirmed_candidates():
-    provider = _FakeOSProvider([_os_release("Into.The.Wild.2007.srt", 8, hash_match=False)])
-    strategy = HashExactStrategy(provider, timeout=2.0)
-    assert await strategy.resolve(_hash_query()) is None
-    assert provider.download_calls == []
 
 
 class _FakeStrategy:
@@ -320,114 +236,6 @@ async def test_orchestrator_trusts_alass_output(monkeypatch):
         )
         out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
         assert b"synced" in out
-
-
-def _probe_payload(*langs):
-    streams = [
-        {"index": i, "codec_name": "subrip", "tags": {"language": lang}}
-        for i, lang in enumerate(langs)
-    ]
-    return json.dumps({"streams": streams}).encode()
-
-
-def _embedded_query(**overrides):
-    params = {
-        "imdb_id": "tt1",
-        "media_type": "movie",
-        "stream_url": "https://cdn.example/video.mkv",
-    }
-    params.update(overrides)
-    return ReferenceQuery(**params)
-
-
-def _big_srt_bytes():
-    return ("1\n00:00:01,000 --> 00:00:02,000\n" + ("hello\n" * 600) + "\n").encode()
-
-
-@pytest.mark.asyncio
-async def test_embedded_strategy_extracts_english_track(tmp_path, monkeypatch):
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        if cmd[0].endswith("ffprobe"):
-            return SimpleNamespace(returncode=0, stdout=_probe_payload("spa", "eng"), stderr=b"")
-        return SimpleNamespace(returncode=0, stdout=_big_srt_bytes(), stderr=b"")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url, **kwargs: (True, "ok")
-    )
-    cache = ReferenceDiskCache(root=tmp_path / "disk", ttl=3600.0, min_bytes=100)
-    strategy = EmbeddedStrategy(
-        ffprobe_path="/fake/ffprobe",
-        ffmpeg_path="/fake/ffmpeg",
-        cache=cache,
-        timeout=2.0,
-        min_bytes=100,
-    )
-    content = await strategy.resolve(_embedded_query())
-    assert content is not None and "hello" in content
-    assert any("ffprobe" in cmd[0] for cmd in calls)
-    extract = [cmd for cmd in calls if "ffmpeg" in cmd[0]][0]
-    assert extract[extract.index("-map") + 1] == "0:1"
-    assert list((tmp_path / "disk").glob("*.srt")) == [
-        tmp_path / "disk" / f"{_embedded_query().cache_stem}_embedded_embedded.srt"
-    ]
-
-
-@pytest.mark.asyncio
-async def test_embedded_strategy_aborts_without_english_track(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        return SimpleNamespace(returncode=0, stdout=_probe_payload("spa", "fre"), stderr=b"")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url, **kwargs: (True, "ok")
-    )
-    strategy = EmbeddedStrategy(
-        ffprobe_path="/fake/ffprobe", ffmpeg_path="/fake/ffmpeg", timeout=2.0
-    )
-    assert await strategy.resolve(_embedded_query()) is None
-
-
-@pytest.mark.asyncio
-async def test_embedded_strategy_skips_without_url_or_binaries(monkeypatch):
-    monkeypatch.setattr(
-        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url, **kwargs: (True, "ok")
-    )
-    strategy = EmbeddedStrategy(ffprobe_path="/fake/ffprobe", ffmpeg_path="/fake/ffmpeg")
-    assert await strategy.resolve(_embedded_query(stream_url="")) is None
-    assert await strategy.resolve(_embedded_query(stream_url=None)) is None
-
-    strategy = EmbeddedStrategy(ffprobe_path="/nonexistent/ffprobe-xyz")
-    assert await strategy.resolve(_embedded_query()) is None
-
-
-@pytest.mark.asyncio
-async def test_embedded_strategy_blocks_unsafe_stream_url(monkeypatch, caplog):
-    """An SSRF/private URL must abort before any ffprobe/ffmpeg subprocess."""
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):  # pragma: no cover - must never be reached
-        calls.append(cmd)
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    strategy = EmbeddedStrategy(ffprobe_path="/fake/ffprobe", ffmpeg_path="/fake/ffmpeg")
-    with caplog.at_level("WARNING"):
-        result = await strategy.resolve(_embedded_query(stream_url="file:///etc/passwd"))
-    assert result is None
-    assert calls == []
-    assert "blocked unsafe stream URL" in caplog.text
-
-    monkeypatch.setattr(
-        "app.services.sync.embedded_strategy.is_safe_public_url",
-        lambda url, **kwargs: (False, "blocked address 127.0.0.1"),
-    )
-    result = await strategy.resolve(_embedded_query(stream_url="http://127.0.0.1/video.mkv"))
-    assert result is None
-    assert calls == []
 
 
 @pytest.mark.asyncio

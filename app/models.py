@@ -151,9 +151,6 @@ class UserPreferences(BaseModel):
     subdl_key: str = ""
     subsource_key: str = ""
     opensubtitles_key: str = ""
-    # Optional Stremio stream-addon base URL (Torrentio/Comet/MediaFusion/
-    # AIOStreams) used to resolve the playing file for embedded-sub extraction.
-    stream_addon_url: str = ""
     languages: list[str] = Field(default_factory=lambda: ["ara"])
     exclude_hi: bool = False
     nuvio_mode: bool = False  # True: Clean ISO code ("ara") & Nuvio ID; False: Stremio format ("ara | ...", "AR [★ Match] | ...")

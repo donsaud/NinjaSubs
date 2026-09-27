@@ -25,7 +25,6 @@ def encode_user_config(
     nuvio_mode: bool = False,
     opensubtitles_key: str | None = None,
     opensubtitles_api_key: str | None = None,
-    stream_addon_url: str | None = None,
     hi_preference: str | None = None,
     badge_parts: list[str] | None = None,
     badge_format: str | None = None,
@@ -61,8 +60,6 @@ def encode_user_config(
     os_key = opensubtitles_key or opensubtitles_api_key
     if os_key and os_key.strip():
         payload["opensubtitles_key"] = os_key.strip()
-    if stream_addon_url and stream_addon_url.strip():
-        payload["stream_addon_url"] = stream_addon_url.strip()
     if languages:
         payload["languages"] = [
             language.strip().lower() for language in languages if language.strip()
@@ -145,7 +142,6 @@ def parse_user_config(
     user_subdl: str | None = query_subdl.strip() if query_subdl else None
     user_subsource: str | None = query_subsource.strip() if query_subsource else None
     user_opensubtitles: str | None = query_opensubtitles.strip() if query_opensubtitles else None
-    stream_addon_url: str = ""
     languages: list[str] = []
     exclude_hi: bool = False
     nuvio_mode: bool = False
@@ -202,14 +198,6 @@ def parse_user_config(
                         or data.get("opensubtitles")
                         or data.get("opensubtitlesKey")
                     )
-                if not stream_addon_url:
-                    stream_addon_url = (
-                        data.get("stream_addon_url")
-                        or data.get("streamAddonUrl")
-                        or data.get("stream_addon")
-                        or data.get("streamAddon")
-                        or ""
-                    ).strip()
 
                 cfg_langs = data.get("languages") or data.get("langs")
                 if isinstance(cfg_langs, list):
@@ -352,11 +340,6 @@ def parse_user_config(
                         if k in parsed_qs:
                             user_opensubtitles = parsed_qs[k][0]
                             break
-                if not stream_addon_url:
-                    for k in ("stream_addon_url", "streamAddonUrl", "stream_addon"):
-                        if k in parsed_qs:
-                            stream_addon_url = parsed_qs[k][0].strip()
-                            break
                 if not languages and "languages" in parsed_qs:
                     languages = [
                         language.strip().lower()
@@ -491,7 +474,6 @@ def parse_user_config(
         subdl_key=effective_subdl,
         subsource_key=effective_subsource,
         opensubtitles_key=effective_opensubtitles,
-        stream_addon_url=stream_addon_url,
         languages=languages,
         exclude_hi=exclude_hi,
         nuvio_mode=nuvio_mode,

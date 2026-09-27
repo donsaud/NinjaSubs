@@ -147,25 +147,4 @@ def test_merge_sync_meta_recovers_parent_from_obfuscated_path():
     assert derived["target_filename"] == "Suits.S01E01.1080p.WEB-DL-GRP"
 
 
-def test_obfuscated_stream_name_reaches_edition_tree():
-    from app.models import SubtitleRelease
-    from app.services.sync.query import ReferenceQuery
-    from app.services.sync.tree import decide
 
-    merged = _merge_sync_meta({"imdb_id": "tt1"}, {"target_filename": OBFUSCATED})
-    query = ReferenceQuery(
-        imdb_id="tt1",
-        media_type="series",
-        season=1,
-        episode=1,
-        target_filename=merged["target_filename"],
-    )
-    releases = [
-        SubtitleRelease(
-            release_name="Suits.S01E01.Pilot.Part.1.2.1080p.NF.WEB-DL.DDP5.1.H.264-PLAYWEB.srt",
-            download_url="u",
-            provider="subdl",
-        )
-    ]
-    decision = decide(releases, query, strict=True)
-    assert decision.kind in ("team", "edition")

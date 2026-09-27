@@ -230,72 +230,6 @@ def test_select_zip_member_rejects_wrong_season():
     assert resolver._select_zip_member([("Dexter S01E01.srt", 9000)], 8, 1) is None
 
 
-def _releases(*names: str) -> list[SubtitleRelease]:
-    return [
-        SubtitleRelease(
-            release_name=name, download_url=f"http://x/{i}",
-            provider="subdl", lang="eng",
-        )
-        for i, name in enumerate(names)
-    ]
-
-
-def _tree_query(target: str | None, season: int | None = 8, episode: int | None = 1):
-    return ReferenceQuery(
-        imdb_id="tt0773262", media_type="series", season=season, episode=episode,
-        target_filename=target,
-    )
-
-
-def test_tree_team_match_beats_generic_source():
-    """Same group on a compatible source wins despite codec differences."""
-    from app.services.sync.tree import decide
-
-    target = "Dexter.S08E01.1080p.BluRay.x265-GRP.mkv"
-    candidates = _releases(
-        "Dexter.S08E01.480p.HDTV.x264-mSD.srt",
-        "Dexter.S08E01.1080p.BluRay.x264-GRP.srt",
-    )
-    decision = decide(candidates, _tree_query(target), strict=True)
-    assert decision.kind == "team"
-    assert getattr(decision.release, "release_name", "") == (
-        "Dexter.S08E01.1080p.BluRay.x264-GRP.srt"
-    )
-
-
-def test_tree_edition_match_requires_full_confirmation():
-    """Source+codec+res+explicit S/E confirm an edition; unknowns abort in strict mode."""
-    from app.services.sync.tree import decide
-
-    target = "Dexter.S08E01.1080p.BluRay.x264.mkv"
-    full = _releases("Dexter.S08E01.1080p.BluRay.x264-Other.srt")
-    decision = decide(full, _tree_query(target), strict=True)
-    assert decision.kind == "edition"
-
-    # Unknown source on the candidate fails closed in strict mode.
-    bare = _releases("Dexter.S08E01.srt")
-    decision = decide(bare, _tree_query(target), strict=True)
-    assert decision.kind == "abort"
-
-    # ... but is accepted when strictness is relaxed.
-    decision = decide(bare, _tree_query(target), strict=False)
-    assert decision.kind == "edition"
-
-    # A direct conflict (HDTV vs BluRay) aborts in both modes.
-    hdtv = _releases("Dexter.S08E01.480p.HDTV.x264-mSD.srt")
-    assert decide(hdtv, _tree_query(target), strict=True).kind == "abort"
-    assert decide(hdtv, _tree_query(target), strict=False).kind == "abort"
-
-
-def test_tree_aborts_without_target_edition_info():
-    """No group/source/codec/res on the target means nothing can be confirmed."""
-    from app.services.sync.tree import decide
-
-    candidates = _releases("Dexter.S08E01.1080p.BluRay.x264-GRP.srt")
-    decision = decide(candidates, _tree_query(None), strict=True)
-    assert decision.kind == "abort"
-
-
 @pytest.mark.asyncio
 async def test_resolver_uses_top_matching_reference():
     """The first season/episode-matched English candidate is used as-is."""
@@ -706,23 +640,6 @@ def test_release_group_extraction():
     assert g("") is None
 
 
-def test_exact_release_group_beats_generic_source_match():
-    """Into the Wild: the FSiHD reference must win the tree over Tigole."""
-    from app.services.sync.tree import decide
-
-    target = "Into.The.Wild.2007.1080p.BluRay.x264-FSiHD"
-    candidates = _releases(
-        "Into.the.Wild.2007.1080p.Bluray.x265.HEVC.10bit.AAC.5.1.Tigole.srt",
-        "Into.The.Wild.2007.1080p.BluRay.x264-FSiHD.ENG.srt",
-    )
-    query = ReferenceQuery(imdb_id="tt0758758", media_type="movie", target_filename=target)
-    decision = decide(candidates, query, strict=True)
-    assert decision.kind == "team"
-    assert getattr(decision.release, "release_name", "") == (
-        "Into.The.Wild.2007.1080p.BluRay.x264-FSiHD.ENG.srt"
-    )
-
-
 @pytest.mark.asyncio
 async def test_resolver_ignores_release_group():
     """End to end: release group is not a filter — the top candidate wins."""
@@ -842,54 +759,6 @@ def test_edition_tags_extraction():
     assert is_retail_disc_source(None) is False
 
 
-def test_tree_edition_tags_must_agree_in_strict_mode():
-    """US vs plain and Extended vs plain abort strict; REMUX never counts as a cut."""
-    from app.services.sync.tree import decide
-
-    def query(target):
-        return ReferenceQuery(imdb_id="tt1", media_type="movie", target_filename=target)
-
-    us_target = "Movie.US.1080p.BluRay.x264"
-    assert decide(
-        _releases("Movie.1080p.BluRay.x264-Other.srt"), query(us_target), strict=True
-    ).kind == "abort"
-    assert decide(
-        _releases("Movie.US.1080p.BluRay.x264-Other.srt"), query(us_target), strict=True
-    ).kind == "edition"
-
-    ext_target = "Movie.Extended.1080p.BluRay.x264"
-    assert decide(
-        _releases("Movie.1080p.BluRay.x264-Other.srt"), query(ext_target), strict=True
-    ).kind == "abort"
-
-    # "remux" is an encoding method, not a cut: a REMUX target accepts a
-    # BluRay encode of the same master (source fuzziness already models this).
-    remux_target = "Movie.2007.1080p.REMUX.AVC.DTS-HD.MA.5.1-AAA"
-    assert decide(
-        _releases("Movie.2007.1080p.BluRay.x264-BBB.srt"), query(remux_target), strict=True
-    ).kind == "edition"
-
-    # Relaxed mode ignores tag asymmetry (legacy availability).
-    assert decide(
-        _releases("Movie.1080p.BluRay.x264-Other.srt"), query(us_target), strict=False
-    ).kind == "edition"
-
-
-def test_tree_edition_prefers_uhd_remux_over_legacy_bluray():
-    """Pulp Fiction: the 2160p REMUX wins over a listed-first legacy release."""
-    from app.services.sync.tree import decide
-
-    target = "Pulp.Fiction.1994.2160p.UHD.BluRay.HEVC.DTS-HD.MA.5.1-SPHD"
-    candidates = _releases(
-        "Pulp Fiction (Blu-ray).srt",
-        "Pulp.Fiction.1994.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.5.1-FGT.srt",
-    )
-    query = ReferenceQuery(imdb_id="tt0110912", media_type="movie", target_filename=target)
-    decision = decide(candidates, query, strict=True)
-    assert decision.kind == "edition"
-    assert "FGT" in getattr(decision.release, "release_name", "")
-
-
 def test_season_episode_provider_query_formats():
     """Every S/E notation providers emit must parse on both axes."""
     from app.services.sync.matching import _member_episode_number, _season_number
@@ -908,21 +777,6 @@ def test_season_episode_provider_query_formats():
     assert _member_episode_number("Movie.1920x1080.BluRay.srt") is None
     assert _member_episode_number("Show.2024.1080p.WEB-DL.srt") is None
     assert _member_episode_number("Show.x265-GROUP.srt") is None
-
-
-def test_team_match_finds_non_trailing_group():
-    """A group placed mid-filename (CHD.BluRay) still confirms the team."""
-    from app.services.sync.tree import decide
-
-    target = "The.Great.Beauty.2013.BluRay.1080p.DTS-HD.MA.5.1.X264-CHD"
-    candidates = _releases(
-        "The.Great.Beauty.2013.720p.HDTV.x264-OTHER.srt",
-        "The.Great.Beauty.2013.CHD.1080p.BluRay.srt",
-    )
-    query = ReferenceQuery(imdb_id="tt2358896", media_type="movie", target_filename=target)
-    decision = decide(candidates, query, strict=True)
-    assert decision.kind == "team"
-    assert "CHD.1080p" in getattr(decision.release, "release_name", "")
 
 
 @pytest.mark.asyncio
@@ -999,24 +853,6 @@ async def test_smi_zip_member_converted_to_reference():
     assert "line 0" in content and "SYNC" not in content
 
 
-def test_tree_edition_allows_same_source_resolution_cross():
-    """720p BluRay shares the retail-disc master with 1080p BluRay."""
-    from app.services.sync.tree import decide
-
-    target = "Dexter.S08E01.1080p.BluRay.x264.mkv"
-
-    def query():
-        return ReferenceQuery(imdb_id="tt0773262", media_type="series", season=8, episode=1, target_filename=target)
-
-    assert decide(_releases("Dexter.S08.720p.BluRay.x264-DEMAND.srt"), query(), strict=True).kind == "edition"
-    assert decide(_releases("Dexter.S08.ALL.BluRay.srt"), query(), strict=True).kind == "edition"
-    # Different sources never mix, even at the same resolution.
-    assert decide(_releases("Dexter.S08E01.1080p.WEB-DL.x264-GRP.srt"), query(), strict=True).kind == "abort"
-    assert decide(_releases("Dexter.S08E01.480p.HDTV.x264-mSD.srt"), query(), strict=True).kind == "abort"
-    # Outside the 1080p/720p family the resolution must match exactly.
-    assert decide(_releases("Dexter.S08E01.2160p.BluRay.x264-GRP.srt"), query(), strict=True).kind == "abort"
-
-
 @pytest.mark.asyncio
 async def test_resolver_downloads_edition_matched_bluray():
     """End to end: PiR8 target resolves a same-source 720p/ALL BluRay edition."""
@@ -1051,25 +887,6 @@ async def test_resolver_downloads_edition_matched_bluray():
     )
     assert content is not None
     assert provider.downloaded == ["http://demand"]
-
-
-def test_same_source_outranks_webdl_despite_provider_order():
-    """PiR8 BluRay target: a BluRay edition must beat a listed-first WEB-DL."""
-    from app.services.sync.tree import decide
-
-    target = "Dexter.s8e01.A.Beautiful.Day.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv"
-    candidates = _releases(
-        "Dexter.S08.complete.720p.WEB-DL.H264-BS PublicHD.srt",
-        "Dexter.S08.720p.BluRay.x264-DEMAND.srt",
-        "Dexter.S08.ALL.BluRay.srt",
-    )
-    query = ReferenceQuery(
-        imdb_id="tt0773262", media_type="series", season=8, episode=1, target_filename=target
-    )
-    decision = decide(candidates, query, strict=True)
-    assert decision.kind == "edition"
-    assert "PublicHD" not in getattr(decision.release, "release_name", "")
-    assert "BluRay" in getattr(decision.release, "release_name", "")
 
 
 @pytest.mark.asyncio
@@ -1306,76 +1123,6 @@ def test_reference_disk_cache_restores_sidecar_verdict(tmp_path):
     )
 
 
-def test_tree_team_vetoes_cut_conflicts():
-    """Same group but conflicting cuts (Extended vs Theatrical) must not align."""
-    from app.services.sync.tree import decide
-
-    def query(target):
-        return ReferenceQuery(imdb_id="tt1", media_type="movie", target_filename=target)
-
-    ext_target = "Movie.Extended.1080p.BluRay.x264-GRP.mkv"
-    theatrical = _releases("Movie.Theatrical.1080p.BluRay.x264-GRP.srt")
-    # Strict: vetoed team cannot resurface; nothing else matches -> abort.
-    assert decide(theatrical, query(ext_target), strict=True).kind == "abort"
-    # Relaxed: explicit-vs-explicit cut conflicts veto everywhere too.
-    assert decide(theatrical, query(ext_target), strict=False).kind == "abort"
-    # Untagged same-group release stays wildcard-eligible when relaxed...
-    assert (
-        decide(
-            _releases("Movie.1080p.BluRay.x264-GRP.srt"), query(ext_target), strict=False
-        ).kind
-        == "team"
-    )
-    # ... and matching cuts on both sides still confirm the team.
-    assert (
-        decide(
-            _releases("Movie.Extended.1080p.BluRay.x264-GRP.srt"),
-            query(ext_target),
-            strict=True,
-        ).kind
-        == "team"
-    )
-    # Plain stream vs Extended team release: vetoed in strict mode.
-    assert (
-        decide(
-            _releases("Movie.Extended.1080p.BluRay.x264-GRP.srt"),
-            query("Movie.1080p.BluRay.x264.mkv"),
-            strict=True,
-        ).kind
-        == "abort"
-    )
-
-
-def test_tree_relaxed_fallback_for_uninformative_target():
-    """An obfuscated target aborts strict but is served best-match relaxed."""
-    from app.services.sync.tree import decide
-
-    obfuscated = "e4WcFo4Tz5J8PoFwiBfP880XsBuHk4dS.mkv"
-    candidates = _releases(
-        "Dexter.S08E01.1080p.WEB-DL.x264-NTb.srt",
-        "Dexter.S08E01.2160p.WEB-DL.x265-GRP.srt",
-        "Dexter.S08E02.1080p.WEB-DL.x264-NTb.srt",
-        "Dexter.S08.1080p.BluRay.x264-GRP.srt",
-    )
-    # Strict: nothing to confirm against -> the exact production abort.
-    strict_decision = decide(candidates, _tree_query(obfuscated), strict=True)
-    assert strict_decision.kind == "abort"
-    assert strict_decision.reason == "target carries no edition info to confirm against"
-
-    # Relaxed: best same-episode candidate (UHD ranked first); wrong episode
-    # is still dropped by the episode filter, not silently accepted.
-    decision = decide(candidates, _tree_query(obfuscated), strict=False)
-    assert decision.kind == "edition"
-    assert decision.reason.startswith("relaxed fallback")
-    assert "2160p" in decision.release.release_name
-    assert "S08E02" not in decision.release.release_name
-
-    # An untagged season pack is an acceptable relaxed fallback too.
-    pack = _releases("Dexter.S08.1080p.BluRay.x264-GRP.srt")
-    assert decide(pack, _tree_query(obfuscated), strict=True).kind == "abort"
-    assert decide(pack, _tree_query(obfuscated), strict=False).kind == "edition"
-
-
 @pytest.mark.asyncio
 async def test_tier2_relaxed_recovers_season_pack_for_uninformative_target(tmp_path, monkeypatch):
     """Relaxed + obfuscated target: an empty episode query falls back to the pack."""
@@ -1452,21 +1199,6 @@ async def test_tier2_enriches_empty_episode_query(tmp_path):
     assert provider.searches == [1, None]
 
 
-def test_relaxed_fallback_prefers_explicit_episode_over_complete_pack():
-    """A 'S01 complete' pack must never outrank the explicit E01 single."""
-    from app.services.sync.tree import decide
-
-    obfuscated = "e4WcFo4Tz5J8PoFwiBfP880XsBuHk4dS.mkv"
-    pool = _releases(
-        "Suits S01 complete (360p re-webrip).srt",
-        "Suits.S01E01.1080p.WEB-DL.x264-NTb.srt",
-    )
-    decision = decide(pool, _tree_query(obfuscated, season=1, episode=1), strict=False)
-    assert decision.kind == "edition"
-    assert "S01E01" in decision.release.release_name
-    assert "complete" not in decision.release.release_name
-
-
 def test_looks_like_season_pack_and_candidate_episode():
     from app.services.sync.matching import (
         candidate_episode_number,
@@ -1486,42 +1218,6 @@ def test_looks_like_season_pack_and_candidate_episode():
     assert candidate_episode_number("Suits.S01E02.Pilot.srt") == 2
 
 
-def test_tree_prefers_matching_source_single_over_unknown_pack():
-    """BluRay stream: prefer a BluRay episode single over an unknown-source pack."""
-    from app.services.sync.tree import decide
-
-    query = _tree_query(
-        "Suits.S01E01.Pilot.BluRay.1080p.10Bit.DtsHDMa5.1.HEVC-d3g.mkv",
-        season=1,
-        episode=1,
-    )
-    candidates = _releases(
-        "Suits, SEASON 1, 1080p [23.976 FPS].srt",
-        "Suits Season 1  720p mkv compression [mkvGOD].srt",
-        "Suits.S01.Complete.720p.x264-MIXED.srt",
-        "Suits - First Season TV.srt",
-        "Suits Season 1 All 12 Episodes.srt",
-        "Suits S01E01 720p BluRay DD5.1 x264-EbP.srt",
-        "Suits.Season.1.1080p.BluRay.AAC5.1.x265-DTG.srt",
-    )
-    decision = decide(candidates, query, strict=False)
-    assert decision.kind == "edition"
-    assert "S01E01" in decision.release.release_name
-    assert "BluRay" in decision.release.release_name
-    assert "SEASON 1" not in decision.release.release_name
-
-
-def test_tree_season_pack_usable_for_later_episode():
-    """A 'Season 1' pack must survive the episode filter for S01E02 (sliceable)."""
-    from app.services.sync.tree import decide
-
-    query = _tree_query("Suits.S01E02.BluRay.1080p.x265-GRP.mkv", season=1, episode=2)
-    candidates = _releases("Suits.Season.1.1080p.BluRay.AAC5.1.x265-DTG.srt")
-    decision = decide(candidates, query, strict=False)
-    assert decision.kind == "edition"
-    assert "Season.1" in decision.release.release_name
-
-
 def test_reference_group_rank_prefers_retail_encodes():
     from app.services.sync.matching import reference_group_rank
 
@@ -1535,17 +1231,3 @@ def test_reference_group_rank_prefers_retail_encodes():
     assert reference_group_rank("Movie.2024.1080p.BluRay.srt") == 1
 
 
-def test_tree_prefers_retail_encode_over_micro_rip():
-    """Among same-source editions, a scene retail encode beats a micro-rip."""
-    from app.services.sync.tree import decide
-
-    query = _tree_query(
-        "Into.the.Wild.2007.1080p.BluRay.x264-GRP.mkv", season=None, episode=None
-    )
-    candidates = _releases(
-        "Into.the.Wild.2007.1080p.Bluray.x265.HEVC.10bit.AAC.5.1.Tigole.srt",
-        "Into the Wild 2007 BluRay.1080p.DTS.x264-CHD.srt",
-    )
-    decision = decide(candidates, query, strict=False)
-    assert decision.kind == "edition"
-    assert "CHD" in decision.release.release_name

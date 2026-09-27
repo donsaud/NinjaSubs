@@ -5,9 +5,7 @@ Canonical homes (Phase 2 layout):
 - :mod:`app.services.sync.query` — :class:`ReferenceQuery`
 - :mod:`app.services.sync.cache` — :class:`ReferenceDiskCache`
 - :mod:`app.services.sync.matching` — release-name matching primitives
-- :mod:`app.services.sync.tree` — explicit reference decision tree
-- :mod:`app.services.sync.external_strategy` — secondary exact-match strategy
-- :mod:`app.services.sync.hash_strategy` — primary hash-exact strategy
+- :mod:`app.services.sync.external_strategy` — external English reference resolver
 - :mod:`app.services.sync.orchestrator` — request routing facade
 
 All names below are re-exported with ``as`` aliases so existing imports keep

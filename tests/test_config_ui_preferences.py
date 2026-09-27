@@ -104,20 +104,6 @@ def test_configure_page_prefills_rtl_fix(client):
     assert '"enable_rtl_fix": false' in body
 
 
-def test_configure_page_shows_stream_addon_url_field(client):
-    body = client.get("/configure").text
-    assert 'id="streamAddonUrl"' in body
-    assert "Stream Addon URL (Optional / Embedded Subs)" in body
-    assert "to unlock instant embedded subtitle extraction via HTTP Range" in body
-
-
-def test_configure_page_prefills_stream_addon_url(client):
-    url = "https://torrentio.strem.fun/manifest.json"
-    encoded = encode_user_config(subdl_key="k", stream_addon_url=url)
-    body = client.get(f"/{encoded}/configure").text
-    assert f'value="{url}"' in body
-
-
 @pytest.mark.asyncio
 async def test_rtl_fix_toggle_controls_served_content(client):
     """When disabled, the raw text is served; when enabled, the RLM fix is applied."""

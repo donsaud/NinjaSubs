@@ -92,14 +92,12 @@ class SyncOrchestrator:
         hash_strategy: Any | None = None,
         embedded_strategy: Any | None = None,
         external_strategy: Any | None = None,
-        aiostreams: Any | None = None,
         sync_service: Any | None = None,
         sync_cache: Any | None = None,
     ) -> None:
         self._hash_strategy = hash_strategy
         self._embedded_strategy = embedded_strategy
         self._external_strategy = external_strategy
-        self._aiostreams = aiostreams
         self._sync_service = sync_service
         self._sync_cache = sync_cache
         self._inflight: dict[str, asyncio.Future] = {}
@@ -117,37 +115,6 @@ class SyncOrchestrator:
             ("external exact-match", self._external_strategy),
             ("hash-exact", self._hash_strategy),
         ]
-
-    async def _maybe_resolve_stream_url(self, query: ReferenceQuery) -> None:
-        """Ask the stream resolver for a probeable direct stream URL.
-
-        Uses the user's configured stream-addon URL when supplied, else the
-        ``AIOSTREAMS_URL`` fallback baked into the resolver. Skipped when the
-        client already supplied a stream URL. Any failure (unreachable, timeout,
-        no match) is swallowed so the pipeline falls through to the external
-        tier.
-        """
-        if self._aiostreams is None or (query.stream_url or "").strip():
-            return
-        kwargs: dict[str, str] = {}
-        user_base = (query.stream_addon_url or "").strip()
-        if user_base:
-            kwargs["base_url"] = user_base
-        try:
-            url = await self._aiostreams.resolve_stream_url(
-                query.imdb_id,
-                query.media_type,
-                query.target_filename,
-                season=query.season,
-                episode=query.episode,
-                **kwargs,
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.info("[sync] stream addon resolution failed: %s", exc)
-            return
-        if url:
-            query.stream_url = url
-            logger.info("[sync] stream addon resolved a direct stream URL for probing")
 
     def _embedded_reference_from_disk(self, query: ReferenceQuery) -> ResolvedReference | None:
         """Return the on-disk internal-track reference if the warm-up produced one.
@@ -209,7 +176,6 @@ class SyncOrchestrator:
             video_hash=meta.get("video_hash"),
             video_size=meta.get("video_size"),
             stream_url=meta.get("stream_url"),
-            stream_addon_url=meta.get("stream_addon_url"),
             season=meta.get("season"),
             episode=meta.get("episode"),
             api_keys={
@@ -357,7 +323,6 @@ class SyncOrchestrator:
         if ready_embedded is not None:
             resolved = ready_embedded
         else:
-            await self._maybe_resolve_stream_url(query)
             resolved = ResolvedReference(None)
             for strategy_name, strategy in self._strategies():
                 if strategy is None:
