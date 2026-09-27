@@ -86,10 +86,16 @@ class AIOStreamsClient:
             return None
         ident = self._stream_id(imdb_id, media_type, season, episode)
         url = f"{self._base_url}/stream/{media_type}/{ident}.json"
-        try:
-            resp = await self._client.get(url, timeout=self.timeout, follow_redirects=True)
-        except Exception as exc:  # noqa: BLE001 - never raise to caller
-            logger.info("[reference] AIOStreams request failed (%s)", exc)
+        resp = None
+        for attempt in range(2):  # one retry: the bridge is occasionally flaky
+            try:
+                resp = await self._client.get(url, timeout=self.timeout, follow_redirects=True)
+                break
+            except Exception as exc:  # noqa: BLE001 - never raise to caller
+                logger.info(
+                    "[reference] AIOStreams request failed (attempt %d): %r", attempt + 1, exc
+                )
+        if resp is None:
             return None
         if resp.status_code != 200:
             logger.info("[reference] AIOStreams returned HTTP %s", resp.status_code)
