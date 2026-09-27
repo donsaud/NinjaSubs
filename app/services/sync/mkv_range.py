@@ -360,8 +360,9 @@ async def extract_embedded_srt(
         cues.sort()
         # Subtitle blocks are interleaved with video, so we cannot cheaply seek
         # to individual cues. A single large contiguous range is fast on the
-        # proxy; fetch a few spread windows and decode every cluster in them.
-        fractions = [0.2, 0.5, 0.8, 0.35, 0.65][: max(1, windows)]
+        # proxy; fetch several evenly-spread windows and decode every cluster.
+        n_windows = max(1, min(windows, 16))
+        fractions = [(i + 1) / (n_windows + 1) for i in range(n_windows)]
         collected: list[tuple[int, int, str]] = []
         for frac in fractions:
             if len(collected) >= target_cues:

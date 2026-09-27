@@ -67,6 +67,15 @@ def build_synced_cache_key(
     return SyncCache.build_key(imdb_id, season_ep, fingerprint, target_id, decision, content_hash)
 
 
+def _consume_task_exception(task: asyncio.Future) -> None:
+    """Retrieve a detached task's result so its exception is not "never retrieved"."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug("[sync] background task finished with error: %s", exc)
+
+
 def _parse_year(value: Any) -> int | None:
     try:
         return int(str(value).strip()) if str(value or "").strip() else None
@@ -95,6 +104,8 @@ class SyncOrchestrator:
         self._sync_cache = sync_cache
         self._inflight: dict[str, asyncio.Future] = {}
         self._inflight_lock = asyncio.Lock()
+        # In-flight background embedded-track warm-ups (dedup by request key).
+        self._warmups: set[str] = set()
 
     def _strategies(self) -> list[tuple[str, Any]]:
         # The embedded track is the ground-truth reference (the video's own
@@ -130,6 +141,37 @@ class SyncOrchestrator:
         if url:
             query.stream_url = url
             logger.info("[sync] AIOStreams resolved a direct stream URL for probing")
+
+    def _schedule_embedded_warmup(
+        self,
+        query: ReferenceQuery,
+        meta: dict,
+        target_id: str,
+        sub_bytes: bytes,
+        resolved: ResolvedReference,
+    ) -> None:
+        """Detach a background internal-track extraction + cache, deduped."""
+        warm = getattr(self._embedded_strategy, "warm_reference", None)
+        if warm is None or not (query.stream_url or "").strip():
+            return
+        if resolved.text and resolved.kind == "embedded":
+            return  # already using the internal track inline
+        key = self._flight_key(meta, target_id, sub_bytes)
+        if key in self._warmups:
+            return
+        self._warmups.add(key)
+        task = asyncio.ensure_future(self._run_embedded_warmup(warm, query, key))
+        task.add_done_callback(_consume_task_exception)
+
+    async def _run_embedded_warmup(self, warm, query: ReferenceQuery, key: str) -> None:
+        try:
+            result = await warm(query)
+            if result and result.text:
+                logger.info("[sync] background internal-track reference is ready for %s", key)
+        except Exception as exc:  # pragma: no cover - background best effort
+            logger.info("[sync] background embedded warm-up failed: %s", exc)
+        finally:
+            self._warmups.discard(key)
 
     def _build_query(self, meta: dict) -> ReferenceQuery:
         return ReferenceQuery(
@@ -289,6 +331,11 @@ class SyncOrchestrator:
                     resolved.kind,
                 )
                 break
+        # Warm the internal-track reference in the background when the inline
+        # tiers did not use it, so a later request can sync against the video's
+        # own subtitle track without any player-visible latency.
+        self._schedule_embedded_warmup(query, meta, target_id, sub_bytes, resolved)
+
         if not resolved.text:
             logger.info("[sync] no deterministic reference available -> aborting sync")
             if self._sync_cache is not None:

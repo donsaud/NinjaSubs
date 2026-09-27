@@ -589,3 +589,81 @@ async def test_orchestrator_marks_embedded_reference_partial(monkeypatch):
     meta = {"imdb_id": "tt1", "media_type": "movie", "lang": "ara", "target_filename": "Movie.mkv"}
     await orch.evaluate_and_sync(_arabic_bytes(), meta, "t", True)
     assert sync.partial == [True]
+
+
+# --------------------------------------------------------------------------- #
+# Background embedded warm-up
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_embedded_warm_reference_caches_internal_track(monkeypatch, tmp_path):
+    from app.config import settings as app_settings
+    from app.services.sync import mkv_range
+
+    monkeypatch.setattr(app_settings, "ALLOW_PRIVATE_STREAM_URLS", True)
+    monkeypatch.setattr(
+        "app.services.sync.embedded_strategy.is_safe_public_url", lambda url, **k: (True, "ok")
+    )
+    srt = ("1\n00:00:01,000 --> 00:00:02,000\n" + ("hi\n" * 600) + "\n").encode()
+
+    async def fake_extract(url, client, **kwargs):
+        return srt
+
+    monkeypatch.setattr(mkv_range, "extract_embedded_srt", fake_extract)
+
+    cache = ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100)
+    strategy = EmbeddedStrategy(client=object(), cache=cache)
+    query = ReferenceQuery(
+        imdb_id="tt1", media_type="movie", stream_url="http://192.168.8.115:4000/movie.mkv"
+    )
+    resolved = await strategy.warm_reference(query)
+    assert resolved is not None and resolved.partial is True
+    assert cache.get(query) is not None  # persisted for the next request
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_schedules_embedded_warmup(monkeypatch):
+    import asyncio
+
+    from app.config import settings as app_settings
+    from app.services.sync.orchestrator import SyncOrchestrator
+    from app.services.sync.query import ResolvedReference
+    from app.services.sync_cache import SyncCache
+
+    monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
+
+    class _AIO:
+        async def resolve_stream_url(self, imdb_id, media_type, filename, season=None, episode=None):
+            return "http://192.168.8.115:4000/movie.mkv"
+
+    warm_calls = {"n": 0}
+
+    class _Embedded:
+        async def resolve_with_provenance(self, query):
+            return ResolvedReference(None)
+
+        async def warm_reference(self, query):
+            warm_calls["n"] += 1
+            return None
+
+    class _External:
+        async def resolve_with_provenance(self, query):
+            return ResolvedReference(BIG_REF.decode(), kind="edition")
+
+    class _Sync:
+        async def sync_async(self, *a, **k):
+            return "1\n00:00:03,000 --> 00:00:04,000\nsynced\n"
+
+    orch = SyncOrchestrator(
+        embedded_strategy=_Embedded(),
+        external_strategy=_External(),
+        aiostreams=_AIO(),
+        sync_service=_Sync(),
+        sync_cache=SyncCache(),
+    )
+    meta = {"imdb_id": "tt1", "media_type": "movie", "lang": "ara", "target_filename": "Movie.mkv"}
+    await orch.evaluate_and_sync(_arabic_bytes(), meta, "t", True)
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if warm_calls["n"]:
+            break
+    assert warm_calls["n"] == 1

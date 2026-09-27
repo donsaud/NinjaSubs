@@ -49,12 +49,14 @@ class ReferenceQuery:
         imdb = re.sub(r"[^A-Za-z0-9]+", "", self.imdb_id or "unknown") or "unknown"
         season = str(self.season) if self.season is not None else "movie"
         episode = str(self.episode) if self.episode is not None else "x"
+        # NB: stream_url is deliberately excluded — debrid/AIOStreams hand out a
+        # freshly-signed token per request, which would otherwise change the
+        # stem every time and defeat the reference cache.
         identity = json.dumps([
             self.media_type.lower(),
             re.sub(r"\s+", " ", (self.target_filename or "").strip().lower()),
             (self.video_hash or "").strip().lower(),
             str(self.video_size or ""),
-            (self.stream_url or "").strip(),
             self.languages,
         ], ensure_ascii=False)
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]

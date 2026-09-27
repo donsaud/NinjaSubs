@@ -43,7 +43,8 @@ def enabled_sync(monkeypatch):
     {"target_filename": "Movie.2020.1080p.WEB-DL-GRP.mkv"},
     {"target_filename": "Movie.2020.Extended.1080p.BluRay-GRP.mkv"},
     {"video_hash": "bbbbbbbbbbbbbbbb"},
-    {"stream_url": "https://cdn.example/other.mkv"},
+    # NB: stream_url is intentionally NOT part of the cache identity — debrid
+    # tokens are freshly signed per request.
 ])
 def test_reference_cache_does_not_share_group_across_media(tmp_path, change):
     cache = ReferenceDiskCache(tmp_path, min_bytes=10)

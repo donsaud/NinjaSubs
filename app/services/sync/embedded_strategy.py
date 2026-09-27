@@ -29,7 +29,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-_MIN_REFERENCE_BYTES = 5120
+# A sampled/partial internal-track reference can be tiny (the extractor already
+# enforces a minimum of 5 cues), so the embedded cache floor is far below the
+# external tier's 5 kB.
+_MIN_REFERENCE_BYTES = 100
 _ENGLISH_TAGS = frozenset({"eng", "en"})
 # Only text subtitle codecs can be converted to SRT; image-based tracks
 # (PGS/VobSub/DVB) are unusable as a reference and must fall through to the
@@ -53,6 +56,11 @@ class EmbeddedStrategy:
         timeout: float = 15.0,
         extract_timeout: float = 8.0,
         range_timeout: float = 8.5,
+        inline_range: bool = False,
+        warm_timeout: float = 120.0,
+        warm_windows: int = 12,
+        warm_window_bytes: int = 16 * 1024 * 1024,
+        warm_target_cues: int = 80,
         min_bytes: int = _MIN_REFERENCE_BYTES,
         cache: ReferenceDiskCache | None = None,
     ) -> None:
@@ -62,6 +70,14 @@ class EmbeddedStrategy:
         self.timeout = timeout
         self.extract_timeout = extract_timeout
         self.range_timeout = range_timeout
+        # Inline range extraction is off by default: a sparse sample can starve
+        # the faster external tier. Range extraction runs in the background
+        # warm-up instead (see ``warm_reference``).
+        self.inline_range = inline_range
+        self.warm_timeout = warm_timeout
+        self.warm_windows = warm_windows
+        self.warm_window_bytes = warm_window_bytes
+        self.warm_target_cues = warm_target_cues
         self.min_bytes = min_bytes
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
 
@@ -100,10 +116,11 @@ class EmbeddedStrategy:
             )
             return ResolvedReference(None)
 
-        # Fast path: decode the internal text track purely via HTTP Range
-        # requests (no sequential media read). Falls through to ffprobe/ffmpeg
-        # when the container is unsupported.
-        if self._client is not None:
+        # Optional fast path: decode the internal text track purely via HTTP
+        # Range requests (no sequential media read). Disabled by default so a
+        # sparse sample never starves the external tier; the background
+        # warm-up populates the cache densely instead.
+        if self.inline_range and self._client is not None:
             from app.services.sync.mkv_range import extract_embedded_srt
 
             try:
@@ -128,6 +145,12 @@ class EmbeddedStrategy:
                     self.cache.set(query, "embedded-range", sanitized, kind="embedded")
                     return ResolvedReference(sanitized, kind="embedded", partial=True)
 
+        if self._client is not None:
+            # Production: a remote demux would blow the player deadline. The
+            # inline tier is cache-only; the background warm-up extracts and
+            # caches the internal track for the next request.
+            return ResolvedReference(None)
+
         ffprobe = self._binary("ffprobe")
         ffmpeg = self._binary("ffmpeg")
         if not ffprobe or not ffmpeg:
@@ -147,6 +170,57 @@ class EmbeddedStrategy:
         # Extracted only the first ~15 min of the media, so the reference is a
         # sampled prefix: mark it partial so duration gates don't reject it.
         return ResolvedReference(text, kind="embedded", partial=True)
+
+    async def warm_reference(self, query: ReferenceQuery) -> ResolvedReference | None:
+        """Background: densely extract the internal track and cache it.
+
+        Runs without the player deadline. A later request finds the cached
+        reference and syncs against the video's own subtitle track instantly.
+        """
+        if self._client is None:
+            return None
+        # Only an *embedded* cached reference should short-circuit the warm-up:
+        # the disk cache is shared with the external tier's edition reference.
+        cached = self.cache.get(query)
+        if cached is not None and cached.kind == "embedded":
+            return cached
+        stream_url = (query.stream_url or "").strip()
+        if not stream_url:
+            return None
+        allow_private = bool(getattr(settings, "ALLOW_PRIVATE_STREAM_URLS", True))
+        safe, reason = await asyncio.to_thread(
+            is_safe_public_url, stream_url, allow_private=allow_private
+        )
+        if not safe:
+            logger.warning("[reference] embedded warm-up blocked unsafe URL (%s)", reason)
+            return None
+
+        from app.services.sync.mkv_range import extract_embedded_srt
+
+        try:
+            ranged = await extract_embedded_srt(
+                stream_url,
+                self._client,
+                timeout=self.warm_timeout,
+                windows=self.warm_windows,
+                window_bytes=self.warm_window_bytes,
+                target_cues=self.warm_target_cues,
+            )
+        except Exception as exc:  # noqa: BLE001 - background best effort
+            logger.info("[reference] embedded warm-up extraction failed: %s", exc)
+            return None
+        if not ranged:
+            return None
+        from app.services.sync_service import sanitize_subtitle
+
+        sanitized = sanitize_subtitle(ranged.decode("utf-8", "replace"))
+        if not sanitized:
+            return None
+        self.cache.set(query, "embedded", sanitized, kind="embedded")
+        logger.info(
+            "[reference] embedded warm-up cached the internal track (%d chars)", len(sanitized)
+        )
+        return ResolvedReference(sanitized, kind="embedded", partial=True)
 
     async def _run(
         self, query: ReferenceQuery, stream_url: str, ffprobe: str, ffmpeg: str
