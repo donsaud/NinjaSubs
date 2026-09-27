@@ -815,3 +815,21 @@ async def test_orchestrator_marks_opaque_edition_target_as_relaxed(monkeypatch):
         _arabic_bytes(), _meta_with("Show.S01E01.1080p.WEB-DL-GRP.mkv"), "t", True
     )
     assert orch._sync_service.relaxed == [False]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_logs_sync_cache_hit(monkeypatch, caplog):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
+    orch = _orchestrator(external_strategy=_FakeStrategy(BIG_REF.decode()))
+    await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "sub123", True)
+
+    orch2 = _orchestrator(
+        external_strategy=_FakeStrategy("x"), sync_cache=orch._sync_cache
+    )
+    with caplog.at_level("INFO"):
+        out = await orch2.evaluate_and_sync(_arabic_bytes(), _meta(), "sub123", True)
+    assert b"synced" in out
+    assert orch2._external_strategy.calls == 0
+    assert "cache HIT for sub=sub123" in caplog.text

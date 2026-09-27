@@ -261,6 +261,10 @@ class SyncOrchestrator:
         if self._sync_cache is not None:
             cached = await self._sync_cache.get(resolution_key)
             if cached:
+                logger.info(
+                    "[sync] cache HIT for sub=%s -> serving pre-synced subtitle immediately",
+                    target_id,
+                )
                 return cached
         if self._sync_cache is not None and await self._sync_cache.is_failed(resolution_key):
             logger.info(
