@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # Hard inline budget for sync during a player request. ExoPlayer drops
     # subtitles after ~8-12s, so past this we serve the original and let the
     # (still-running) sync warm the cache for the next request.
-    SYNC_TOTAL_REQUEST_BUDGET: float = 7.5
+    SYNC_TOTAL_REQUEST_BUDGET: float = 9.0
 
     # Persistent English-reference disk cache (30 days) for the sync pipeline.
     REFERENCE_CACHE_DIR: str | None = None
