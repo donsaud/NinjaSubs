@@ -1,5 +1,6 @@
 """Unit tests for the range-based Matroska subtitle extractor."""
 
+import logging
 import struct
 
 import pytest
@@ -135,3 +136,120 @@ def test_srt_timestamp():
     assert M._srt_timestamp(1000) == "00:00:01,000"
     assert M._srt_timestamp(3_661_500) == "01:01:01,500"
     assert M._srt_timestamp(-5) == "00:00:00,000"
+
+
+# --------------------------------------------------------------------------- #
+# Track discovery diagnostics
+# --------------------------------------------------------------------------- #
+def _track_entry(number: int, track_type: int, codec: bytes, lang: bytes) -> bytes:
+    return _el(
+        M._ID_TRACK_ENTRY,
+        _el(M._ID_TRACK_NUMBER, _u8(number))
+        + _el(M._ID_TRACK_TYPE, _u8(track_type))
+        + _el(M._ID_CODEC_ID, codec)
+        + _el(M._ID_LANGUAGE, lang),
+    )
+
+
+def _build_mkv_with_tracks(tracks: list[bytes]) -> bytes:
+    """Minimal MKV whose Tracks element is inlined in the header (no cues)."""
+    tracks_el = _el(M._ID_TRACKS, b"".join(tracks))
+    info = _el(M._ID_INFO, _el(M._ID_TIMESTAMP_SCALE, _u8(1_000_000)))
+    segment = info + tracks_el
+    return _el(0x1A45DFA3, b"") + _el(M._ID_SEGMENT, segment)
+
+
+def test_parse_all_tracks_reports_type_codec_language():
+    data = _build_mkv_with_tracks(
+        [
+            _track_entry(1, M._TRACK_TYPE_VIDEO, b"V_MPEG4/ISO/AVC", b"und"),
+            _track_entry(2, M._TRACK_TYPE_AUDIO, b"A_AAC", b"eng"),
+            _track_entry(3, M._TRACK_TYPE_SUBTITLE, b"S_HDMV/PGS", b"eng"),
+            _track_entry(4, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/ASS", b"ara"),
+            _track_entry(5, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng"),
+        ]
+    )
+    seg_start, seg_end = M.find_segment(data)
+    tracks_range = next(
+        (ds, de) for eid, ds, de in M._children(data, seg_start, seg_end) if eid == M._ID_TRACKS
+    )
+    parsed = M.parse_all_tracks(data, *tracks_range)
+    assert [(t["number"], t["type"], t["codec"], t["language"]) for t in parsed] == [
+        (1, M._TRACK_TYPE_VIDEO, "V_MPEG4/ISO/AVC", "und"),
+        (2, M._TRACK_TYPE_AUDIO, "A_AAC", "eng"),
+        (3, M._TRACK_TYPE_SUBTITLE, "S_HDMV/PGS", "eng"),
+        (4, M._TRACK_TYPE_SUBTITLE, "S_TEXT/ASS", "ara"),
+        (5, M._TRACK_TYPE_SUBTITLE, "S_TEXT/UTF8", "eng"),
+    ]
+    # parse_tracks keeps the text-codec family (ASS + UTF8), dropping PGS.
+    assert M.parse_tracks(data, *tracks_range) == [
+        {"number": 4, "codec": "S_TEXT/ASS", "language": "ara"},
+        {"number": 5, "codec": "S_TEXT/UTF8", "language": "eng"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_extract_logs_unsupported_subtitle_tracks(monkeypatch, caplog):
+    data = _build_mkv_with_tracks(
+        [
+            _track_entry(1, M._TRACK_TYPE_VIDEO, b"V_MPEG4/ISO/AVC", b"und"),
+            _track_entry(2, M._TRACK_TYPE_AUDIO, b"A_AAC", b"eng"),
+            _track_entry(3, M._TRACK_TYPE_SUBTITLE, b"S_HDMV/PGS", b"eng"),
+            _track_entry(4, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/ASS", b"ara"),
+        ]
+    )
+
+    async def fake_fetch(client, url, start, size):
+        return data[start : start + size]
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.mkv_range"):
+        out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
+
+    assert out is None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "detected 2 subtitle track(s)" in messages
+    assert "Track 3: CodecID='S_HDMV/PGS', Lang='eng'" in messages
+    assert "Track 4: CodecID='S_TEXT/ASS', Lang='ara'" in messages
+    assert "no S_TEXT/UTF8 track found" in messages
+    assert "Total video/audio/sub tracks: 4" in messages
+
+
+@pytest.mark.asyncio
+async def test_extract_logs_zero_subtitle_tracks(monkeypatch, caplog):
+    data = _build_mkv_with_tracks(
+        [
+            _track_entry(1, M._TRACK_TYPE_VIDEO, b"V_MPEG4/ISO/AVC", b"und"),
+            _track_entry(2, M._TRACK_TYPE_AUDIO, b"A_AAC", b"eng"),
+        ]
+    )
+
+    async def fake_fetch(client, url, start, size):
+        return data[start : start + size]
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.mkv_range"):
+        out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
+
+    assert out is None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "file contains 0 subtitle tracks (only video/audio detected)" in messages
+    assert "no S_TEXT/UTF8 track found" not in messages
+
+
+@pytest.mark.asyncio
+async def test_extract_logs_detected_tracks_on_supported_srt(monkeypatch, caplog):
+    data = _build_mkv()
+
+    async def fake_fetch(client, url, start, size):
+        return data[start : start + size]
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.mkv_range"):
+        out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
+
+    assert out is not None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "detected 1 subtitle track(s)" in messages
+    assert "Track 5: CodecID='S_TEXT/UTF8', Lang='eng'" in messages
+    assert "no S_TEXT/UTF8 track found" not in messages

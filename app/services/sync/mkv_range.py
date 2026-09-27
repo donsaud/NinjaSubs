@@ -53,8 +53,15 @@ _ID_BLOCK_GROUP = 0xA0
 _ID_BLOCK = 0xA1
 _ID_BLOCK_DURATION = 0x9B
 
+_TRACK_TYPE_VIDEO = 0x01
+_TRACK_TYPE_AUDIO = 0x02
 _TRACK_TYPE_SUBTITLE = 0x11
 _TEXT_CODECS = ("S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT")
+# The range parser turns raw Matroska text blocks straight into SRT, so only
+# S_TEXT/UTF8 is guaranteed to be plain, timestamp-able text. ASS/SSA dialogue
+# blocks and image codecs (PGS/VobSub) are detected/logged but never extracted
+# here — they resume via the ffmpeg or external tiers instead.
+_RANGE_SUPPORTED_TEXT_CODECS = frozenset({"S_TEXT/UTF8"})
 _ENGLISH = frozenset({"eng", "en", "english"})
 
 
@@ -169,8 +176,12 @@ def parse_info(buf: bytes, start: int, end: int) -> tuple[int, float]:
     return scale, duration_ticks * scale / 1_000_000.0
 
 
-def parse_tracks(buf: bytes, start: int, end: int) -> list[dict]:
-    """Return subtitle TrackEntry dicts: number / codec / language."""
+def parse_all_tracks(buf: bytes, start: int, end: int) -> list[dict]:
+    """Return every TrackEntry dict: number / type / codec / language.
+
+    Unlike :func:`parse_tracks`, this keeps video, audio, and unsupported
+    subtitle codecs so callers can log a complete picture of the container.
+    """
     tracks: list[dict] = []
     for eid, ds, de in _children(buf, start, end):
         if eid != _ID_TRACK_ENTRY:
@@ -187,9 +198,27 @@ def parse_tracks(buf: bytes, start: int, end: int) -> list[dict]:
                 codec = buf[cs:ce].decode("ascii", "replace").strip("\x00")
             elif cid == _ID_LANGUAGE:
                 language = buf[cs:ce].decode("ascii", "replace").strip("\x00")
-        if track_type == _TRACK_TYPE_SUBTITLE and codec in _TEXT_CODECS:
-            tracks.append({"number": number, "codec": codec, "language": language.lower()})
+        tracks.append(
+            {"number": number, "type": track_type, "codec": codec, "language": language.lower()}
+        )
     return tracks
+
+
+def parse_tracks(buf: bytes, start: int, end: int) -> list[dict]:
+    """Return supported text-subtitle TrackEntry dicts: number / codec / language."""
+    return [
+        {"number": track["number"], "codec": track["codec"], "language": track["language"]}
+        for track in parse_all_tracks(buf, start, end)
+        if track["type"] == _TRACK_TYPE_SUBTITLE and track["codec"] in _TEXT_CODECS
+    ]
+
+
+def _format_subtitle_tracks(tracks: list[dict]) -> str:
+    """Render detected subtitle tracks for the diagnostic log line."""
+    return "; ".join(
+        f"Track {track['number']}: CodecID='{track['codec']}', Lang='{track['language']}'"
+        for track in tracks
+    )
 
 
 def parse_cues(buf: bytes, start: int, end: int) -> list[tuple[int, int]]:
@@ -322,29 +351,56 @@ async def extract_embedded_srt(
 
         seeks: dict[int, int] = {}
         info_scale, duration_ms = 1_000_000, 0.0
-        tracks: list[dict] = []
+        all_tracks: list[dict] = []
         for eid, ds, de in _children(header, base, window_end):
             if eid == _ID_SEEK_HEAD:
                 seeks.update(parse_seek_head(header, ds, de))
             elif eid == _ID_INFO:
                 info_scale, duration_ms = parse_info(header, ds, de)
             elif eid == _ID_TRACKS:
-                tracks = parse_tracks(header, ds, de)
+                all_tracks = parse_all_tracks(header, ds, de)
 
         async def _fetch_at(rel_pos: int, size: int) -> bytes:
             return await _fetch(client, stream_url, base + rel_pos, size)
 
-        if not tracks and _ID_TRACKS in seeks:
+        if not all_tracks and _ID_TRACKS in seeks:
             blob = await _fetch_at(seeks[_ID_TRACKS], 262_144)
             contents = _element_contents(blob, _ID_TRACKS)
             if contents:
-                tracks = parse_tracks(blob, contents[0], contents[1])
-        if not tracks:
-            raise MKVRangeError("no text subtitle track found in Tracks")
+                all_tracks = parse_all_tracks(blob, contents[0], contents[1])
+        if not all_tracks:
+            raise MKVRangeError("no Tracks element found in the container")
+
+        # Diagnostic: surface every detected subtitle track (number/codec/lang)
+        # before deciding whether a usable S_TEXT/UTF8 track exists.
+        subtitle_tracks = [t for t in all_tracks if t["type"] == _TRACK_TYPE_SUBTITLE]
+        text_tracks = [
+            t for t in subtitle_tracks if t["codec"] in _RANGE_SUPPORTED_TEXT_CODECS
+        ]
+        if subtitle_tracks:
+            logger.info(
+                "[reference] range MKV extraction: detected %d subtitle track(s): %s",
+                len(subtitle_tracks),
+                _format_subtitle_tracks(subtitle_tracks),
+            )
+        if not text_tracks:
+            if not subtitle_tracks:
+                logger.info(
+                    "[reference] range MKV extraction: file contains 0 subtitle "
+                    "tracks (only video/audio detected)"
+                )
+            else:
+                logger.info(
+                    "[reference] range MKV extraction: no S_TEXT/UTF8 track found. "
+                    "Detected subtitle tracks: [%s] (Total video/audio/sub tracks: %d)",
+                    _format_subtitle_tracks(subtitle_tracks),
+                    len(all_tracks),
+                )
+            raise MKVRangeError("no supported text subtitle track found in Tracks")
 
         track = next(
-            (t for t in tracks if t["language"] in _ENGLISH),
-            tracks[0],
+            (t for t in text_tracks if t["language"] in _ENGLISH),
+            text_tracks[0],
         )
 
         if _ID_CUES not in seeks:
