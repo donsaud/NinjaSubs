@@ -667,3 +667,69 @@ async def test_orchestrator_schedules_embedded_warmup(monkeypatch):
         if warm_calls["n"]:
             break
     assert warm_calls["n"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Negative-cache invalidation once a warm embedded reference is ready
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_negative_cache_overridden_by_ready_embedded_reference(monkeypatch, tmp_path):
+    from app.config import settings as app_settings
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.orchestrator import SyncOrchestrator
+    from app.services.sync.query import ResolvedReference
+    from app.services.sync_cache import SyncCache
+
+    monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
+
+    cache = ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100)
+
+    class _Embedded:
+        def __init__(self):
+            self.cache = cache
+
+        async def resolve_with_provenance(self, query):
+            return ResolvedReference(None)  # inline embedded tier is cache-only
+
+        async def warm_reference(self, query):
+            return None
+
+    class _Sync:
+        def __init__(self):
+            self.calls = 0
+            self.partial: list = []
+
+        async def sync_async(self, *args, **kwargs):
+            self.calls += 1
+            self.partial.append(kwargs.get("reference_partial"))
+            return "1\n00:00:03,000 --> 00:00:04,000\nsynced\n"
+
+    sync = _Sync()
+    sync_cache = SyncCache()
+    orch = SyncOrchestrator(
+        embedded_strategy=_Embedded(), sync_service=sync, sync_cache=sync_cache
+    )
+    sub = _arabic_bytes()
+    meta = {
+        "imdb_id": "tt1",
+        "media_type": "movie",
+        "lang": "ara",
+        "target_filename": "Movie.2024.1080p.BluRay.x264-GRP.mkv",
+    }
+    resolution_key = orch._flight_key(meta, "t", sub)
+    await sync_cache.mark_failed(resolution_key)
+
+    # 1) No reference on disk yet -> the negative cache short-circuits the sync.
+    assert await orch.evaluate_and_sync(sub, meta, "t", True) == sub
+    assert sync.calls == 0
+
+    # 2) The background warm-up finishes and writes the internal-track reference.
+    cache.set(orch._build_query(meta), "embedded", BIG_REF.decode(), kind="embedded")
+
+    # 3) The next request ignores the stale negative entry and syncs against it.
+    out = await orch.evaluate_and_sync(sub, meta, "t", True)
+    assert b"synced" in out
+    assert sync.calls == 1
+    assert sync.partial == [True]  # embedded references are partial by nature
+    assert not await sync_cache.is_failed(resolution_key)
+    assert await sync_cache.get(resolution_key) is not None

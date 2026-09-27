@@ -149,6 +149,25 @@ class SyncOrchestrator:
             query.stream_url = url
             logger.info("[sync] stream addon resolved a direct stream URL for probing")
 
+    def _embedded_reference_from_disk(self, query: ReferenceQuery) -> ResolvedReference | None:
+        """Return the on-disk internal-track reference if the warm-up produced one.
+
+        Only an ``embedded`` entry counts here: ``team``/``edition``/``hash``
+        entries are the normal strategy loop's job, not a signal to override the
+        negative cache.
+        """
+        cache = getattr(self._embedded_strategy, "cache", None)
+        if cache is None:
+            return None
+        try:
+            cached = cache.get(query)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.info("[sync] embedded reference cache lookup failed: %s", exc)
+            return None
+        if cached is not None and cached.kind == "embedded" and cached.text:
+            return cached
+        return None
+
     def _schedule_embedded_warmup(
         self,
         query: ReferenceQuery,
@@ -304,8 +323,7 @@ class SyncOrchestrator:
     ) -> bytes:
         """The expensive pipeline body: strategies, cache, alass (see evaluate_and_sync)."""
         content_hash = hashlib.sha256(sub_bytes).hexdigest()[:16]
-        # Negative cache: a request that recently resolved to nothing must not
-        # re-run the provider fan-out on every client retry.
+        # Positive cache: serve an already-synced subtitle without any work.
         resolution_key = self._flight_key(meta, target_id, sub_bytes)
         if self._sync_cache is not None:
             cached = await self._sync_cache.get(resolution_key)
@@ -315,34 +333,51 @@ class SyncOrchestrator:
                     target_id,
                 )
                 return cached
-        if self._sync_cache is not None and await self._sync_cache.is_failed(resolution_key):
-            logger.info(
-                "[sync] negative cache hit for %s -> skipping provider fan-out", resolution_key
-            )
-            return sub_bytes
 
         query = self._build_query(meta)
-        await self._maybe_resolve_stream_url(query)
-        resolved = ResolvedReference(None)
-        for strategy_name, strategy in self._strategies():
-            if strategy is None:
-                continue
-            try:
-                resolved = await strategy.resolve_with_provenance(query)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("[sync] %s strategy failed: %s -> next", strategy_name, exc)
-                resolved = ResolvedReference(None)
-            if resolved.text:
+        ready_embedded: ResolvedReference | None = None
+        if self._sync_cache is not None and await self._sync_cache.is_failed(resolution_key):
+            # The previous attempt aborted before the background embedded warm-up
+            # finished. If the internal-track reference has since landed on disk,
+            # the negative entry is stale: bust it and sync against the ready
+            # reference instead of aborting immediately.
+            ready_embedded = self._embedded_reference_from_disk(query)
+            if ready_embedded is None:
                 logger.info(
-                    "[sync] %s strategy provided a reference (decision=%s)",
-                    strategy_name,
-                    resolved.kind,
+                    "[sync] negative cache hit for %s -> skipping provider fan-out",
+                    resolution_key,
                 )
-                break
-        # Warm the internal-track reference in the background when the inline
-        # tiers did not use it, so a later request can sync against the video's
-        # own subtitle track without any player-visible latency.
-        self._schedule_embedded_warmup(query, meta, target_id, sub_bytes, resolved)
+                return sub_bytes
+            logger.info(
+                "[sync] negative cache overridden by ready embedded reference for %s",
+                resolution_key,
+            )
+            await self._sync_cache.clear_failed(resolution_key)
+
+        if ready_embedded is not None:
+            resolved = ready_embedded
+        else:
+            await self._maybe_resolve_stream_url(query)
+            resolved = ResolvedReference(None)
+            for strategy_name, strategy in self._strategies():
+                if strategy is None:
+                    continue
+                try:
+                    resolved = await strategy.resolve_with_provenance(query)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("[sync] %s strategy failed: %s -> next", strategy_name, exc)
+                    resolved = ResolvedReference(None)
+                if resolved.text:
+                    logger.info(
+                        "[sync] %s strategy provided a reference (decision=%s)",
+                        strategy_name,
+                        resolved.kind,
+                    )
+                    break
+            # Warm the internal-track reference in the background when the inline
+            # tiers did not use it, so a later request can sync against the
+            # video's own subtitle track without any player-visible latency.
+            self._schedule_embedded_warmup(query, meta, target_id, sub_bytes, resolved)
 
         if not resolved.text:
             logger.info("[sync] no deterministic reference available -> aborting sync")
