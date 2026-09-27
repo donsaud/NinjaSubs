@@ -1,26 +1,25 @@
-"""Secondary sync strategy: external reference download.
+"""External reference resolution for subtitle auto-sync.
 
-Races SubDL, SubSource, and OpenSubtitles for the first *valid* result (a fast
-failure such as SubDL HTTP 429 never cancels a slower provider), scores the
-candidates against the target video, downloads the best one, and persists it to
-the reference disk cache.
+All providers (SubDL / SubSource / OpenSubtitles) are queried concurrently and
+their candidates are pooled, then scored against the *video's* filename. The
+single best-scoring candidate is downloaded and used as the ``alass`` reference.
 
 ``alass`` only anchors speech-timing intervals, so any high-accuracy official
-track is a usable reference — not just English. Candidates are ranked by a
-weighted score (release group, source family, streaming service, resolution,
-codec, language priority, non-HI). If no candidate scores, the first
-season/episode match is used rather than aborting.
+track works â€” regardless of language (en/es/fr/de/it are searched). The score
+favours a reference whose release quality matches the playing video (same source
+family, same streaming service family, same release group, resolution and
+codec), so a BluRay-quality Arabic subtitle played against a WEB-DL video is
+re-timed against a WEB-DL reference rather than a mismatched edition. When no
+candidate scores, the first season/episode match is used instead of aborting.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import re
 from typing import TYPE_CHECKING
 
-from app.config import settings
 from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.decode import decode_payload, select_zip_member
 from app.services.sync.matching import (
@@ -33,6 +32,7 @@ from app.services.sync.matching import (
     candidate_episode_number,
     is_informative_release_name,
     is_retail_disc_source,
+    looks_like_season_pack,
 )
 from app.services.sync.query import ResolvedReference
 
@@ -51,12 +51,16 @@ _MIN_REFERENCE_BYTES = 5120
 # timing anchors for alass. ISO-639-1 here; providers normalize to their own.
 _REFERENCE_LANGUAGES = ("en", "es", "fr", "de", "it")
 
-# Weighted-scoring weights for candidate reference selection.
+# Weighted-scoring weights for candidate reference selection. The goal is to pick
+# the reference whose release quality matches the playing video file.
 _GROUP_SCORE = 50  # exact release group
 _SOURCE_SCORE = 30  # shared source family (web-dl/web, bluray/remux)
-_PLATFORM_SCORE = 20  # shared streaming service (HMAX/ATVP/NF/AMZN/DSNP)
-_RESOLUTION_SCORE = 10  # shared resolution
+_PLATFORM_SCORE = 20  # identical streaming service (HMAX/ATVP/NF/AMZN/DSNP)
+_STREAMING_FAMILY_SCORE = 10  # different streaming service, same streaming family
+_RESOLUTION_SCORE = 10  # identical resolution
+_RESOLUTION_NEAR_SCORE = 5  # 1080p neighbour of a 4K target
 _CODEC_SCORE = 5  # shared codec (x265/HEVC/x264)
+_EPISODE_SCORE = 10  # explicit episode single (vs a whole-season pack)
 _EN_SCORE = 10  # English preferred on ties
 _ALT_LANG_SCORE = 5  # es / fr / de / it
 _NON_HI_SCORE = 5  # standard dialogue over hearing-impaired
@@ -100,9 +104,11 @@ def _platform_tags(name: str | None) -> frozenset[str]:
 def score_candidate(target_name: str | None, release) -> int:
     """Weighted score for one candidate reference against the target video.
 
-    Weights: exact release group ``+50``, matching source family ``+30``, shared
-    streaming service ``+20``, resolution ``+10``, codec ``+5``, language
-    priority ``+10`` (English) / ``+5`` (es/fr/de/it), non-HI ``+5``.
+    Weights: exact release group ``+50``, matching source family ``+30``,
+    identical streaming service ``+20`` (else same streaming family ``+10``),
+    resolution ``+10`` (or ``+5`` for a 1080p neighbour of a 4K target), codec
+    ``+5``, episode single ``+10`` (season pack ``-10``), language priority
+    ``+10`` (English) / ``+5`` (es/fr/de/it), non-HI ``+5``.
     """
     cand_name = _release_name(release)
     if not cand_name:
@@ -121,16 +127,31 @@ def score_candidate(target_name: str | None, release) -> int:
     if target_source and cand_source and _sources_compatible(target_source, cand_source):
         score += _SOURCE_SCORE
 
-    if _platform_tags(target_name) & _platform_tags(cand_name):
+    target_platforms = _platform_tags(target_name)
+    cand_platforms = _platform_tags(cand_name)
+    if target_platforms & cand_platforms:
         score += _PLATFORM_SCORE
+    elif target_platforms and cand_platforms:
+        # Both are streaming releases but different services: still a much better
+        # timing anchor than a disc/encode of another edition.
+        score += _STREAMING_FAMILY_SCORE
 
     target_res = _resolution(target_name)
-    if target_res and target_res == _resolution(cand_name):
-        score += _RESOLUTION_SCORE
+    cand_res = _resolution(cand_name)
+    if target_res and cand_res:
+        if cand_res == target_res:
+            score += _RESOLUTION_SCORE
+        elif target_res in ("2160p", "4k") and cand_res in ("1080p", "2160p", "4k"):
+            score += _RESOLUTION_NEAR_SCORE
 
     target_codec = _codec_kind(target_name)
     if target_codec and target_codec == _codec_kind(cand_name):
         score += _CODEC_SCORE
+
+    if candidate_episode_number(cand_name) is not None:
+        score += _EPISODE_SCORE
+    elif looks_like_season_pack(cand_name):
+        score -= _EPISODE_SCORE
 
     score += _LANG_SCORES.get(str(getattr(release, "lang", "") or "").strip().lower(), 0)
 
@@ -145,7 +166,7 @@ def _select_reference(releases, query: ReferenceQuery):
     Eligible candidates (matching season/episode) are sorted by score
     descending; ties keep provider order. A byte-exact MovieHash match always
     wins. An all-zero field falls back to the first available candidate rather
-    than aborting — ``None`` is returned only when nothing matches S/E.
+    than aborting â€” ``None`` is returned only when nothing matches S/E.
     """
     pool = list(releases or [])
     if not pool:
@@ -183,11 +204,12 @@ def _select_reference(releases, query: ReferenceQuery):
 
 
 class ExternalExactStrategy:
-    """External reference acquisition across SubDL and SubSource.
+    """External reference acquisition across SubDL, SubSource, and OpenSubtitles.
 
-    Series episode queries run in two tiers: the episode query first, then a
-    season-wide enrichment query when the episode results lack the stream's
-    source family (retail season packs are indexed at season level).
+    All providers are queried concurrently; their candidates are pooled and
+    scored globally, so the fastest provider no longer wins by default. Series
+    episode queries are enriched with a season-wide query only when the episode
+    query returned nothing.
     """
 
     name = "external"
@@ -210,112 +232,208 @@ class ExternalExactStrategy:
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
 
     async def resolve(self, query: ReferenceQuery) -> str | None:
-        """Return the first valid reference subtitle (> ``min_bytes``) or ``None``."""
+        """Return the best reference subtitle (> ``min_bytes``) or ``None``."""
         resolved = await self.resolve_with_provenance(query)
         return resolved.text
 
     async def resolve_with_provenance(
         self, query: ReferenceQuery
     ) -> ResolvedReference:
-        """Resolve a reference, reporting the tree decision kind with it.
+        """Query every provider, pool the candidates, download the best one.
 
-        Kinds: ``team`` / ``edition`` for fresh tree verdicts; cache hits
-        recover the persisted (or filename-inferred) kind. ``abort`` on
-        failure.
+        The weighted score is applied across all providers together, so the
+        reference that best matches the video's release quality wins regardless
+        of which provider responded first. Cache hits recover the persisted
+        decision kind.
         """
-        # 0. Persistent disk cache: never re-hit external providers for the same episode.
-        # The recovered kind is preserved so a cached team reference keeps its
-        # verdict instead of being downgraded to "edition".
         cached = self.cache.get(query)
         if cached is not None:
             return cached
 
-        tasks: list[asyncio.Task[ResolvedReference]] = []
-        if self._subdl is not None:
-            tasks.append(asyncio.create_task(self._fetch_subdl(query), name="subdl"))
-        if self._subsource is not None:
-            tasks.append(asyncio.create_task(self._fetch_subsource(query), name="subsource"))
-        if self._opensubtitles is not None:
-            tasks.append(
-                asyncio.create_task(self._fetch_opensubtitles(query), name="opensubtitles")
-            )
+        providers = [
+            p for p in (self._subdl, self._subsource, self._opensubtitles) if p is not None
+        ]
+        if not providers:
+            return ResolvedReference(None)
         logger.info(
             "[reference] resolving imdb=%s S%sE%s filename=%r across %s (timeout=%.1fs)",
             query.imdb_id,
             query.season,
             query.episode,
             query.target_filename,
-            [t.get_name() for t in tasks] or "no-providers",
+            [self._provider_label(p) for p in providers],
             self.timeout,
         )
-        if not tasks:
-            return ResolvedReference(None)
 
-        # Wait for the FIRST *valid* result rather than the first task to finish:
-        # a fast failure (e.g. SubDL HTTP 429) must not cancel a slower provider
-        # that would have delivered a usable reference.
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + self.timeout
-        pending: set[asyncio.Task[ResolvedReference]] = set(tasks)
-        result: ResolvedReference | None = None
-        winner: str | None = None
-
-        try:
-            while pending:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                done, pending = await asyncio.wait(
-                    pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in done:
-                    try:
-                        resolved = task.result()
-                    except Exception as exc:  # pragma: no cover - defensive
-                        logger.warning("[reference] %s task failed: %s", task.get_name(), exc)
-                        resolved = ResolvedReference(None)
-                    size = len(resolved.text.encode("utf-8")) if resolved.text else 0
-                    logger.info("[reference] %s returned %d bytes", task.get_name(), size)
-                    if resolved.text and size > self.min_bytes and result is None:
-                        result = resolved
-                        winner = task.get_name()
-                if result is not None:
-                    break
-        finally:
-            # Drain all children, including completed losers, on cancellation
-            # as well as success. Provider HTTP calls must not outlive the resolver.
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            with contextlib.suppress(Exception):
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-        if result is None or result.text is None:
+        candidates = await self._gather_candidates(providers, query)
+        if not candidates:
             logger.warning(
-                "[reference] no valid reference within %.1fs (min=%d bytes)",
-                self.timeout,
-                self.min_bytes,
+                "[reference] no candidates from %s", [self._provider_label(p) for p in providers]
             )
             return ResolvedReference(None)
-        result_text = result.text
+
+        provider_of = {id(rel): provider for rel, provider in candidates}
+        best = _select_reference([rel for rel, _ in candidates], query)
+        if best is None:
+            logger.warning("[reference] aborting: no season/episode-matched reference")
+            return ResolvedReference(None)
+        provider = provider_of.get(id(best))
+
+        result = await self._download_candidate(best, provider, query)
+        text = result.text
+        if text is None:
+            return ResolvedReference(None)
 
         # Persist a sanitised copy so later switches for this episode are instant.
         from app.services.sync_service import sanitize_subtitle
 
-        sanitized = sanitize_subtitle(result_text)
+        sanitized = sanitize_subtitle(text)
         if sanitized:
             self.cache.set(
                 query,
-                winner,
+                self._provider_label(provider),
                 sanitized,
                 kind=result.kind,
                 bluray_match=result.bluray_match,
                 candidate=result.candidate,
             )
-            result_text = sanitized
-        logger.info("[reference] selected reference: %d bytes", len(result_text.encode("utf-8")))
-        return ResolvedReference(result_text, kind=result.kind, bluray_match=result.bluray_match,
-                                 candidate=result.candidate)
+            text = sanitized
+        logger.info("[reference] selected reference: %d bytes", len(text.encode("utf-8")))
+        return ResolvedReference(
+            text,
+            kind=result.kind,
+            bluray_match=result.bluray_match,
+            candidate=result.candidate,
+        )
+
+    def _provider_label(self, provider) -> str:
+        """Stable provider label for logs and the reference cache filename."""
+        if provider is self._subdl:
+            return "subdl"
+        if provider is self._subsource:
+            return "subsource"
+        if provider is self._opensubtitles:
+            return "opensubtitles"
+        return getattr(provider, "name", type(provider).__name__)
+
+    async def _gather_candidates(self, providers, query: ReferenceQuery) -> list[tuple]:
+        """Pool ``(release, provider)`` candidates from every provider.
+
+        Each provider is bounded by the resolver timeout; a slow/failing provider
+        simply contributes nothing.
+        """
+
+        async def one(provider) -> list[tuple]:
+            name = self._provider_label(provider)
+            try:
+                releases = await asyncio.wait_for(
+                    self._search_provider(provider, query), self.timeout
+                )
+            except Exception as exc:  # noqa: BLE001 - one provider must not sink the rest
+                logger.warning("[reference] %s search failed: %s", name, exc)
+                return []
+            logger.info("[reference] %s returned %d candidate(s)", name, len(releases or []))
+            return [(rel, provider) for rel in (releases or [])]
+
+        batches = await asyncio.gather(*(one(p) for p in providers), return_exceptions=True)
+        merged: list[tuple] = []
+        for batch in batches:
+            if isinstance(batch, list):
+                merged.extend(batch)
+
+        # De-duplicate identical downloads returned by more than one provider.
+        seen: set[str] = set()
+        deduped: list[tuple] = []
+        for rel, provider in merged:
+            url = getattr(rel, "download_url", None)
+            if url and url in seen:
+                continue
+            if url:
+                seen.add(url)
+            deduped.append((rel, provider))
+        return deduped
+
+    async def _search_provider(self, provider, query: ReferenceQuery) -> list:
+        """Route a provider to its search implementation (Identity, not name)."""
+        if provider is self._subdl:
+            return await self._search_subdl(query)
+        if provider is self._subsource:
+            return await self._search_subsource(query)
+        if provider is self._opensubtitles:
+            return await self._search_opensubtitles(query)
+        raise ValueError(f"unknown provider {provider!r}")
+
+    def _provider_api_key(self, provider, query: ReferenceQuery) -> str | None:
+        if provider is self._subdl:
+            return query.api_keys.get("subdl")
+        if provider is self._subsource:
+            return query.api_keys.get("subsource")
+        if provider is self._opensubtitles:
+            return query.api_keys.get("opensubtitles")
+        return None
+
+    async def _download_candidate(
+        self, best, provider, query: ReferenceQuery
+    ) -> ResolvedReference:
+        """Download and decode the selected candidate (at most one file)."""
+        best_name = getattr(best, "release_name", "?")
+        api_key = self._provider_api_key(provider, query)
+        decision_kind = "hash" if getattr(best, "is_hash_match", False) else "edition"
+        logger.info(
+            "[reference] downloading reference %r (score=%d, lang=%s) via %s (kind=%s)",
+            best_name,
+            score_candidate(query.target_filename, best),
+            getattr(best, "lang", "?"),
+            self._provider_label(provider),
+            decision_kind,
+        )
+        try:
+            raw = await provider.download_archive(best.download_url, api_key=api_key)
+        except Exception as exc:
+            logger.warning("[reference] download failed: %s", exc)
+            return ResolvedReference(None)
+        if not raw:
+            logger.warning("[reference] empty download payload for %r", best_name)
+            return ResolvedReference(None)
+
+        decoded = self._decode_payload(
+            raw,
+            best_name,
+            season=query.season if query else None,
+            episode=query.episode if query else None,
+        )
+        if not decoded or len(decoded) <= self.min_bytes:
+            logger.warning(
+                "[reference] decoded content too small/empty for %r (%d bytes)",
+                best_name,
+                len(decoded) if decoded else 0,
+            )
+            return ResolvedReference(None)
+        logger.info("[reference] decoded %d bytes for %r", len(decoded), best_name)
+        # BluRay and REMUX share the same retail-disc master, so a REMUX target
+        # against a BluRay (or REMUX) reference is a confirmed retail pair.
+        bluray_match = is_retail_disc_source(
+            _source_kind(query.target_filename)
+        ) and is_retail_disc_source(_source_kind(best_name))
+        return ResolvedReference(
+            decoded.decode("utf-8", "replace"),
+            kind=decision_kind,
+            bluray_match=bluray_match,
+            candidate=best_name,
+        )
+
+    async def _download_reference(
+        self, releases, provider, api_key: str | None, query: ReferenceQuery
+    ) -> ResolvedReference:
+        """Backward-compatible helper: select + download from one provider's list."""
+        if not releases:
+            logger.info("[reference] provider returned no candidate releases")
+            return ResolvedReference(None)
+        best = _select_reference(list(releases), query)
+        if best is None:
+            logger.warning("[reference] aborting: no season/episode-matched reference")
+            return ResolvedReference(None)
+        return await self._download_candidate(best, provider, query)
 
     def _select_zip_member(
         self,
@@ -335,72 +453,6 @@ class ExternalExactStrategy:
     ) -> bytes | None:
         """Return subtitle bytes from a raw download, extracting ZIP archives."""
         return decode_payload(raw, release_name, season, episode, self.min_bytes)
-
-    async def _download_reference(
-        self, releases, provider, api_key: str | None, query: ReferenceQuery
-    ) -> ResolvedReference:
-        """Download the best-scoring season/episode-matched reference.
-
-        Selection is permissive: any matching season/episode is eligible and the
-        highest weighted score wins (never abort on a low score). A candidate is
-        not rejected for release group/source/resolution/edition. ``bluray_match``
-        records a bilaterally verified BluRay/REMUX source pair for recap handling.
-        """
-        if not releases:
-            logger.info("[reference] provider returned no candidate releases")
-            return ResolvedReference(None)
-
-        best = _select_reference(releases, query)
-        if best is None:
-            logger.warning(
-                "[reference] aborting: no season/episode-matched reference"
-            )
-            return ResolvedReference(None)
-        best_name = getattr(best, "release_name", "?")
-        decision_kind = "hash" if getattr(best, "is_hash_match", False) else "edition"
-        logger.info(
-            "[reference] selected reference %r (score=%d, lang=%s) via %s (kind=%s)",
-            best_name,
-            score_candidate(query.target_filename, best),
-            getattr(best, "lang", "?"),
-            getattr(provider, "name", type(provider).__name__),
-            decision_kind,
-        )
-        try:
-            raw = await provider.download_archive(best.download_url, api_key=api_key)
-        except Exception as exc:
-            logger.warning("[reference] download failed: %s", exc)
-            return ResolvedReference(None)
-        if not raw:
-            logger.warning("[reference] empty download payload for %r", best.release_name)
-            return ResolvedReference(None)
-
-        decoded = self._decode_payload(
-            raw,
-            best_name,
-            season=query.season if query else None,
-            episode=query.episode if query else None,
-        )
-        if not decoded:
-            logger.warning("[reference] no subtitle content decoded for %r", best.release_name)
-            return ResolvedReference(None)
-        logger.info(
-            "[reference] decoded %d bytes for %r",
-            len(decoded),
-            getattr(best, "release_name", "?"),
-        )
-        # BluRay and REMUX share the same retail-disc master, so a REMUX target
-        # against a BluRay (or REMUX) reference is a confirmed retail pair and
-        # must unlock the series recap allowance just like BluRay/BluRay.
-        bluray_match = is_retail_disc_source(
-            _source_kind(query.target_filename)
-        ) and is_retail_disc_source(_source_kind(best_name))
-        return ResolvedReference(
-            decoded.decode("utf-8", "replace"),
-            kind=decision_kind,
-            bluray_match=bluray_match,
-            candidate=best_name,
-        )
 
     def _match_filename(self, query: ReferenceQuery) -> str | None:
         """Use the filename only when it carries scene tokens; otherwise match
@@ -424,12 +476,11 @@ class ExternalExactStrategy:
     async def _search_tiers(self, search, query: ReferenceQuery, provider_name: str) -> list:
         """Tier 1 episode query, enriched by a Tier 2 season query when needed.
 
-        Tier 2 results are appended after Tier 1 (deduplicated by download
-        URL) so per-episode files keep priority and the tree still decides.
+        Tier 2 results are appended after Tier 1 (deduplicated by download URL)
+        so per-episode files keep priority.
         """
-        strict = bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True))
         tier1 = await search(episode=query.episode)
-        if not self._needs_season_enrichment(tier1, query, strict):
+        if not self._needs_season_enrichment(tier1, query):
             return list(tier1)
         logger.info(
             "[reference] %s Tier 1 lacks %s-family candidates; querying season %s catalog",
@@ -443,7 +494,7 @@ class ExternalExactStrategy:
             rel for rel in tier2 if getattr(rel, "download_url", None) not in seen
         ]
 
-    async def _fetch_subdl(self, query: ReferenceQuery) -> ResolvedReference:
+    async def _search_subdl(self, query: ReferenceQuery) -> list:
         api_key = query.api_keys.get("subdl")
 
         async def _search(episode: int | None):
@@ -457,10 +508,9 @@ class ExternalExactStrategy:
                 target_filename=self._match_filename(query),
             )
 
-        releases = await self._search_tiers(_search, query, "subdl")
-        return await self._download_reference(releases, self._subdl, api_key, query)
+        return await self._search_tiers(_search, query, "subdl")
 
-    async def _fetch_subsource(self, query: ReferenceQuery) -> ResolvedReference:
+    async def _search_subsource(self, query: ReferenceQuery) -> list:
         api_key = query.api_keys.get("subsource")
 
         async def _search(episode: int | None):
@@ -474,10 +524,9 @@ class ExternalExactStrategy:
                 target_filename=self._match_filename(query),
             )
 
-        releases = await self._search_tiers(_search, query, "subsource")
-        return await self._download_reference(releases, self._subsource, api_key, query)
+        return await self._search_tiers(_search, query, "subsource")
 
-    async def _fetch_opensubtitles(self, query: ReferenceQuery) -> ResolvedReference:
+    async def _search_opensubtitles(self, query: ReferenceQuery) -> list:
         api_key = query.api_keys.get("opensubtitles")
 
         async def _search(episode: int | None):
@@ -491,5 +540,4 @@ class ExternalExactStrategy:
                 target_filename=self._match_filename(query),
             )
 
-        releases = await self._search_tiers(_search, query, "opensubtitles")
-        return await self._download_reference(releases, self._opensubtitles, api_key, query)
+        return await self._search_tiers(_search, query, "opensubtitles")

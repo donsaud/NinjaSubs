@@ -1264,10 +1264,10 @@ def test_score_candidate_webdl_beats_generic_bluray():
 
     webdl = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-BTN.srt")
     bluray = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt")
-    # source 30 + platform 20 + resolution 10 + codec 5 + en 10 + non-HI 5
-    assert score_candidate(_MAD_MEN_TARGET, webdl) == 80
-    # only en 10 + non-HI 5 (BluRay conflicts with WEB-DL; nothing else shared)
-    assert score_candidate(_MAD_MEN_TARGET, bluray) == 15
+    # source 30 + platform 20 + resolution 10 + codec 5 + episode 10 + en 10 + non-HI 5
+    assert score_candidate(_MAD_MEN_TARGET, webdl) == 90
+    # res-near 5 + episode 10 + en 10 + non-HI 5 (BluRay conflicts with WEB-DL)
+    assert score_candidate(_MAD_MEN_TARGET, bluray) == 30
     assert score_candidate(_MAD_MEN_TARGET, webdl) > score_candidate(_MAD_MEN_TARGET, bluray)
 
 
@@ -1276,9 +1276,9 @@ def test_score_candidate_group_match_non_english_beats_generic_english():
 
     wadu_es = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-WADU.srt", lang="spa")
     generic_en = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="eng")
-    # group 50 + source 30 + platform 20 + resolution 10 + codec 5 + alt-lang 5 + non-HI 5
-    assert score_candidate(_MAD_MEN_TARGET, wadu_es) == 125
-    assert score_candidate(_MAD_MEN_TARGET, generic_en) == 60
+    # group 50 + source 30 + platform 20 + res 10 + codec 5 + episode 10 + alt-lang 5 + non-HI 5
+    assert score_candidate(_MAD_MEN_TARGET, wadu_es) == 135
+    assert score_candidate(_MAD_MEN_TARGET, generic_en) == 70
     assert score_candidate(_MAD_MEN_TARGET, wadu_es) > score_candidate(_MAD_MEN_TARGET, generic_en)
 
 
@@ -1313,5 +1313,59 @@ def test_select_reference_group_language_beats_generic_english():
     generic_en = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt", lang="eng")
     wadu_fr = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.H.265-WADU.srt", lang="fra")
     assert _select_reference([generic_en, wadu_fr], _mad_men_query()) is wadu_fr
+
+
+@pytest.mark.asyncio
+async def test_cross_provider_scoring_beats_first_provider(tmp_path):
+    """The first provider to answer must not win: score the pool globally.
+
+    Regression for Mad Men: subdl's 720p WEB-DL season pack must lose to an
+    episode-specific streaming WEB-DL reference from another provider.
+    """
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    class _Provider:
+        def __init__(self, name, releases):
+            self.name = name
+            self._releases = releases
+            self.downloaded: list[str] = []
+
+        async def search_subtitles(self, **kwargs):
+            return list(self._releases)
+
+        async def download_archive(self, url, api_key=None):
+            self.downloaded.append(url)
+            return BIG
+
+    subdl = _Provider(
+        "subdl",
+        [
+            SubtitleRelease(
+                release_name="Mad.Men.S01.720p.WEB-DL.AAC2.0.H264-BTN.srt",
+                download_url="http://pack", provider="subdl", lang="eng",
+            )
+        ],
+    )
+    opensubtitles = _Provider(
+        "opensubtitles",
+        [
+            SubtitleRelease(
+                release_name="Mad.Men.S01E02.Ladies.Room.1080p.AMZN.WEB-DL.DDP5.1.H.264-SLiGNOME.srt",
+                download_url="http://amzn", provider="opensubtitles", lang="eng",
+            )
+        ],
+    )
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=None,
+        opensubtitles_provider=opensubtitles,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        timeout=1.0,
+    )
+    content = await strategy.resolve(_mad_men_query())
+    assert content is not None
+    assert opensubtitles.downloaded == ["http://amzn"]
+    assert subdl.downloaded == []
 
 
