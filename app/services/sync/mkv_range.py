@@ -5,7 +5,8 @@ Remote debrid/usenet streams serve HTTP Range requests quickly but feed
 ffmpeg must read tens of MB of video to reach the first cue). This module takes
 a single-shot head sample instead:
 
-* fetch one contiguous range from offset 0 (``head_bytes``);
+* fetch one contiguous range from offset 0 (75 MiB for 4K/high-bitrate or
+  unknown-size files, else 30 MiB);
 * parse the EBML container linearly in memory: ``Tracks``, then every
   ``Cluster`` in the sample;
 * decode the prioritized ``S_TEXT/UTF8`` candidate track's subtitle blocks;
@@ -20,6 +21,7 @@ not used. Forced/signs/songs/commentary tracks are deprioritised.
 from __future__ import annotations
 
 import logging
+import re
 import struct
 from typing import TYPE_CHECKING
 
@@ -62,12 +64,17 @@ _ENGLISH = frozenset({"eng", "en", "english"})
 _LOW_PRIORITY_NAME_MARKERS = ("forced", "stripped", "signs", "songs", "commentary")
 _PREFERRED_NAME_MARKERS = ("sdh", "full")
 
-# Single-window head probe: one contiguous range read from offset 0, demuxed
-# linearly in memory. This issues ``Range: bytes=0-26214400`` (~25 MiB). A track
-# that yields at least ``_MIN_EMBEDDED_CUES`` cues is accepted as a partial
-# reference; anything less returns None so we fall back to external providers.
-_HEAD_SAMPLE_BYTES = 25 * 1024 * 1024 + 1
-_MIN_EMBEDDED_CUES = 60
+# Adaptive single-window head probe: one contiguous range read from offset 0,
+# demuxed linearly in memory. The Range ends match the requested
+# ``bytes=0-31457280`` (30 MiB) and ``bytes=0-78643200`` (75 MiB), so the byte
+# counts are one larger than the MiB value. 4K/high-bitrate (or unknown-size)
+# files get the larger window so enough clusters land in the single sample. A
+# track that yields at least ``_MIN_EMBEDDED_CUES`` cues is accepted as a
+# partial reference; anything less returns None for immediate external fallback.
+_STANDARD_HEAD_BYTES = 30 * 1024 * 1024 + 1  # Range: bytes=0-31457280
+_LARGE_HEAD_BYTES = 75 * 1024 * 1024 + 1  # Range: bytes=0-78643200
+_LARGE_FILE_THRESHOLD = 4 * 1024 * 1024 * 1024  # 4 GiB
+_MIN_EMBEDDED_CUES = 50
 
 
 class MKVRangeError(Exception):
@@ -288,6 +295,37 @@ async def _fetch(client: httpx.AsyncClient, url: str, start: int, size: int) -> 
     return resp.content or b""
 
 
+async def _probe_file_size(client: httpx.AsyncClient, url: str) -> int | None:
+    """Best-effort total file size from a zero-byte range response.
+
+    Only consulted when the caller cannot supply ``video_size``; never raises.
+    """
+    try:
+        resp = await client.get(url, headers={"Range": "bytes=0-0"}, follow_redirects=True)
+        headers = resp.headers
+    except Exception:  # noqa: BLE001 - size is only an optimisation
+        return None
+    try:
+        content_range = headers.get("content-range") or ""
+    except Exception:  # noqa: BLE001 - headers may be absent/mocked
+        return None
+    match = re.search(r"/(\d+)\s*$", content_range)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _choose_head_bytes(file_size: int | None) -> int:
+    """Pick the single head-probe window for the detected file size.
+
+    4K/high-bitrate (or unknown-size) files get the larger 75 MiB window;
+    standard files (``<= 4 GiB``) use 30 MiB.
+    """
+    if file_size is None or file_size > _LARGE_FILE_THRESHOLD:
+        return _LARGE_HEAD_BYTES
+    return _STANDARD_HEAD_BYTES
+
+
 def _srt_timestamp(ms: int) -> str:
     ms = max(0, ms)
     h, rem = divmod(ms, 3_600_000)
@@ -318,23 +356,34 @@ async def extract_embedded_srt(
     *,
     want_language: str = "eng",
     timeout: float = 8.5,
-    head_bytes: int = _HEAD_SAMPLE_BYTES,
+    file_size: int | None = None,
+    head_bytes: int | None = None,
     min_cues: int = _MIN_EMBEDDED_CUES,
 ) -> bytes | None:
     """Sample the head of a remote MKV and demux its subtitle track in memory.
 
-    A single contiguous range request (offset 0, ``head_bytes`` long) is fetched
-    and parsed linearly; the first prioritized ``S_TEXT/UTF8`` candidate that
-    yields at least ``min_cues`` cues is returned as raw (partial) SRT bytes.
-    Returns ``None`` when the container is unsupported or no candidate reaches
-    the cue bar — never a truncated reference. Never raises.
+    The probe window is chosen from the file size (``file_size``, else a
+    best-effort Content-Range probe): 75 MiB for 4K/high-bitrate (``> 4 GiB`` or
+    unknown) files, 30 MiB otherwise — always fetched as a single contiguous
+    range request from offset 0. The first prioritized ``S_TEXT/UTF8`` candidate
+    that yields at least ``min_cues`` cues is returned as raw (partial) SRT
+    bytes; otherwise ``None`` (never a truncated reference). Never raises.
     """
     import asyncio
 
     async def _run() -> bytes | None:
         # Single-window head probe: one contiguous range request, then linear
         # in-memory EBML demuxing (no Cues traversal, no iterative requests).
-        sample = await _fetch(client, stream_url, 0, head_bytes)
+        effective_size = file_size
+        if effective_size is None:
+            effective_size = await _probe_file_size(client, stream_url)
+        window = head_bytes if head_bytes is not None else _choose_head_bytes(effective_size)
+        logger.info(
+            "[reference] range MKV extraction: head probe %d MiB (file_size=%s)",
+            window // (1024 * 1024),
+            effective_size,
+        )
+        sample = await _fetch(client, stream_url, 0, window)
         seg_start, seg_end = find_segment(sample)
         base = seg_start
         window_end = min(seg_end, len(sample)) if seg_end <= len(sample) else len(sample)

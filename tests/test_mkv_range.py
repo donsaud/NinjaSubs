@@ -2,6 +2,7 @@
 
 import logging
 import struct
+from types import SimpleNamespace
 
 import pytest
 
@@ -257,12 +258,43 @@ async def test_extract_logs_zero_subtitle_tracks(monkeypatch, caplog):
 # --------------------------------------------------------------------------- #
 # Single-window head extraction
 # --------------------------------------------------------------------------- #
+def _single_track_mkv(cues: int = 80) -> bytes:
+    return _build_mkv(
+        [_track_entry(5, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng")],
+        [(1000, _blocks_for(5, cues, "L"))],
+    )
+
+
+class _RangeClient:
+    """Serves ``data[start:end+1]`` and records every Range header."""
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.ranges: list[str] = []
+
+    async def get(self, url, headers=None, follow_redirects=True):
+        rng = (headers or {}).get("Range", "")
+        self.ranges.append(rng)
+        if rng == "bytes=0-0":
+            return SimpleNamespace(
+                status_code=206,
+                headers={"content-range": f"bytes 0-0/{len(self.data)}"},
+                content=b"\x00",
+            )
+        start, end = rng.replace("bytes=", "").split("-")
+        return SimpleNamespace(status_code=206, headers={}, content=self.data[int(start) : int(end) + 1])
+
+
+def test_choose_head_bytes_thresholds():
+    assert M._choose_head_bytes(2 * 1024**3) == M._STANDARD_HEAD_BYTES
+    assert M._choose_head_bytes(4 * 1024**3) == M._STANDARD_HEAD_BYTES  # <= 4 GiB
+    assert M._choose_head_bytes(4 * 1024**3 + 1) == M._LARGE_HEAD_BYTES
+    assert M._choose_head_bytes(None) == M._LARGE_HEAD_BYTES
+
+
 @pytest.mark.asyncio
 async def test_extract_uses_single_head_request(monkeypatch):
-    data = _build_mkv(
-        [_track_entry(5, M._TRACK_TYPE_SUBTITLE, b"S_TEXT/UTF8", b"eng")],
-        [(1000, _blocks_for(5, 80, "L"))],
-    )
+    data = _single_track_mkv()
     calls: list[tuple[int, int]] = []
 
     async def fake_fetch(client, url, start, size):
@@ -270,10 +302,79 @@ async def test_extract_uses_single_head_request(monkeypatch):
         return data[start : start + size]
 
     monkeypatch.setattr(M, "_fetch", fake_fetch)
+    out = await M.extract_embedded_srt(
+        "http://host/movie.mkv", object(), timeout=5.0, file_size=2 * 1024**3
+    )
+
+    assert out is not None
+    assert calls == [(0, M._STANDARD_HEAD_BYTES)]
+
+
+@pytest.mark.asyncio
+async def test_head_probe_range_headers_adaptive():
+    data = _single_track_mkv()
+
+    standard = _RangeClient(data)
+    out_std = await M.extract_embedded_srt(
+        "http://host/movie.mkv", standard, timeout=5.0, file_size=2 * 1024**3
+    )
+    assert standard.ranges == ["bytes=0-31457280"]
+    assert out_std is not None
+
+    large = _RangeClient(data)
+    out_4k = await M.extract_embedded_srt(
+        "http://host/movie.mkv", large, timeout=5.0, file_size=8 * 1024**3
+    )
+    assert large.ranges == ["bytes=0-78643200"]
+    assert out_4k is not None
+
+
+@pytest.mark.asyncio
+async def test_head_probe_large_when_size_unknown(monkeypatch):
+    data = _single_track_mkv()
+    calls: list[tuple[int, int]] = []
+
+    async def fake_fetch(client, url, start, size):
+        calls.append((start, size))
+        return data[start : start + size]
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    # ``object()`` has no ``.get`` -> the Content-Range probe fails -> unknown.
     out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
 
     assert out is not None
-    assert calls == [(0, M._HEAD_SAMPLE_BYTES)]
+    assert calls == [(0, M._LARGE_HEAD_BYTES)]
+
+
+@pytest.mark.asyncio
+async def test_head_probe_uses_content_range_when_unknown(monkeypatch):
+    data = _single_track_mkv()
+    calls: list[tuple[int, int]] = []
+
+    async def fake_fetch(client, url, start, size):
+        calls.append((start, size))
+        return data[start : start + size]
+
+    async def fake_probe(client, url):
+        return 2 * 1024**3
+
+    monkeypatch.setattr(M, "_fetch", fake_fetch)
+    monkeypatch.setattr(M, "_probe_file_size", fake_probe)
+    out = await M.extract_embedded_srt("http://host/movie.mkv", object(), timeout=5.0)
+
+    assert out is not None
+    assert calls == [(0, M._STANDARD_HEAD_BYTES)]
+
+
+@pytest.mark.asyncio
+async def test_probe_file_size_parses_content_range():
+    client = _RangeClient(b"x" * 12345)
+    assert await M._probe_file_size(client, "http://host/movie.mkv") == 12345
+
+
+@pytest.mark.asyncio
+async def test_probe_file_size_degrades_to_none():
+    assert await M._probe_file_size(object(), "http://host/movie.mkv") is None
 
 
 @pytest.mark.asyncio

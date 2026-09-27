@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 # external tier's 5 kB.
 _MIN_REFERENCE_BYTES = 100
 _ENGLISH_TAGS = frozenset({"eng", "en"})
+
+
+def _coerce_file_size(value: object) -> int | None:
+    """Parse a ``video_size`` value (int or numeric string) to a positive int."""
+    try:
+        size = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return size if size > 0 else None
 # Only text subtitle codecs can be converted to SRT; image-based tracks
 # (PGS/VobSub/DVB) are unusable as a reference and must fall through to the
 # MovieHash tier.
@@ -120,7 +129,10 @@ class EmbeddedStrategy:
             try:
                 ranged = await asyncio.wait_for(
                     extract_embedded_srt(
-                        stream_url, self._client, timeout=self.range_timeout
+                        stream_url,
+                        self._client,
+                        timeout=self.range_timeout,
+                        file_size=_coerce_file_size(query.video_size),
                     ),
                     self.range_timeout + 1.0,
                 )
@@ -196,6 +208,7 @@ class EmbeddedStrategy:
                 stream_url,
                 self._client,
                 timeout=self.warm_timeout,
+                file_size=_coerce_file_size(query.video_size),
             )
         except Exception as exc:  # noqa: BLE001 - background best effort
             logger.info("[reference] embedded warm-up extraction failed: %s", exc)
