@@ -54,30 +54,9 @@ class Settings(BaseSettings):
     REFERENCE_CACHE_DIR: str | None = None
     REFERENCE_CACHE_TTL_SECONDS: float = 2592000.0  # 30 days
 
-    # Reference decision policy: fail closed unless the tree confirms the
-    # exact team/edition. Relax only to tolerate unknown edition markers.
+    # Legacy reference strictness flag (kept for configuration compatibility;
+    # the sync pipeline now accepts any season/episode-matched reference).
     SYNC_REQUIRE_EXACT_MATCH: bool = True
-
-    # Embedded-track reference extraction (Tier 2): ffprobe/ffmpeg binaries.
-    FFPROBE_PATH: str = "ffprobe"
-    FFMPEG_PATH: str = "ffmpeg"
-
-    # Fallback Stremio stream-addon base URL (optional): lets the generic
-    # stream resolver find a direct stream URL from the playing filename so the
-    # embedded/MovieHash tiers have something to probe. Any Stremio stream addon
-    # works (Torrentio, Comet, MediaFusion, AIOStreams). Users may override this
-    # per-config via the "Stream Addon URL" field; this env value is the fallback
-    # when they supply none. e.g. http://aiostreams:3000 or http://aiostreams:3000/<token>
-    AIOSTREAMS_URL: str | None = None
-    AIOSTREAMS_TIMEOUT: float = 1.2
-
-    # Remote stream MovieHash probe: two 64 KiB range fetches, bounded budget.
-    STREAM_HASH_TIMEOUT: float = 1.5
-
-    # Allow LAN/private (RFC1918) stream hosts for server-side probing. Common
-    # for self-hosted setups where AIOStreams/debrid proxies are on the LAN
-    # (e.g. http://192.168.x.x:4000/...). Cloud-metadata/link-local stay blocked.
-    ALLOW_PRIVATE_STREAM_URLS: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",
