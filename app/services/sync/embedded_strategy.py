@@ -57,7 +57,7 @@ class EmbeddedStrategy:
         extract_timeout: float = 8.0,
         range_timeout: float = 8.5,
         inline_range: bool = False,
-        warm_timeout: float = 300.0,
+        warm_timeout: float = 60.0,
         min_bytes: int = _MIN_REFERENCE_BYTES,
         cache: ReferenceDiskCache | None = None,
     ) -> None:
