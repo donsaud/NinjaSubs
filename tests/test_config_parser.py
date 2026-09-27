@@ -210,3 +210,15 @@ def test_auto_sync_config_roundtrip_and_backward_compat():
     assert parse_user_config(encode_user_config(auto_sync=True)).auto_sync is True
     # Legacy/absent value defaults to False.
     assert parse_user_config("subdl=k1").auto_sync is False
+
+
+def test_stream_addon_url_config_roundtrip_and_backward_compat():
+    """stream_addon_url round-trips and is absent-safe for old URLs."""
+    url = "https://torrentio.strem.fun/manifest.json"
+    assert parse_user_config(encode_user_config(stream_addon_url=url)).stream_addon_url == url
+    # Absent value defaults to empty (env fallback handled by the resolver).
+    assert parse_user_config(encode_user_config()).stream_addon_url == ""
+    assert parse_user_config("subdl=k1").stream_addon_url == ""
+    # Query-string format also accepted.
+    qs = parse_user_config("subdl=k1&stream_addon_url=https%3A%2F%2Fcomet.example.com")
+    assert qs.stream_addon_url == "https://comet.example.com"

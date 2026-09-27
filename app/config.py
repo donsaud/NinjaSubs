@@ -62,9 +62,12 @@ class Settings(BaseSettings):
     FFPROBE_PATH: str = "ffprobe"
     FFMPEG_PATH: str = "ffmpeg"
 
-    # Internal AIOStreams bridge (optional): resolves a direct stream URL from
-    # the playing filename so the embedded/MovieHash tiers have something to
-    # probe. e.g. http://aiostreams:3000 or http://aiostreams:3000/<token>
+    # Fallback Stremio stream-addon base URL (optional): lets the generic
+    # stream resolver find a direct stream URL from the playing filename so the
+    # embedded/MovieHash tiers have something to probe. Any Stremio stream addon
+    # works (Torrentio, Comet, MediaFusion, AIOStreams). Users may override this
+    # per-config via the "Stream Addon URL" field; this env value is the fallback
+    # when they supply none. e.g. http://aiostreams:3000 or http://aiostreams:3000/<token>
     AIOSTREAMS_URL: str | None = None
     AIOSTREAMS_TIMEOUT: float = 1.2
 

@@ -41,7 +41,6 @@ from app.services.aggregator import (
     format_informative_badge,
 )
 from app.services.cache import clear_subtitle_cache
-from app.services.sync.aiostreams import AIOStreamsClient
 from app.services.sync.embedded_strategy import EmbeddedStrategy
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.hash_strategy import HashExactStrategy
@@ -50,6 +49,7 @@ from app.services.sync.matching import (
     prefer_meaningful_release_name,
 )
 from app.services.sync.orchestrator import SyncOrchestrator
+from app.services.sync.stream_resolver import StreamResolver
 from app.services.sync_cache import SyncCache
 from app.services.sync_service import SubtitleSyncService
 from app.utils.ass_converter import convert_ass_to_srt_bytes
@@ -223,6 +223,7 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
     initial_opensubtitles = (
         prefs.opensubtitles_key if prefs.opensubtitles_key != settings.OPENSUBTITLES_API_KEY else ""
     )
+    initial_stream_addon = prefs.stream_addon_url
     initial_exclude_hi = "checked" if prefs.exclude_hi else ""
 
     # User-selectable subtitle badge style (prefilled on the config page)
@@ -285,6 +286,7 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
             .replace("{{initial_subdl}}", initial_subdl)
             .replace("{{initial_subsource}}", initial_subsource)
             .replace("{{initial_opensubtitles}}", initial_opensubtitles)
+            .replace("{{initial_stream_addon}}", initial_stream_addon)
             .replace("{{initial_exclude_hi}}", initial_exclude_hi)
             .replace("{{initial_phase2_json}}", initial_phase2_json)
             .replace("{{language_options_html}}", language_options_html)
@@ -621,6 +623,7 @@ async def _fetch_subtitles_handler(
             "subdl_key": prefs.subdl_key,
             "subsource_key": prefs.subsource_key,
             "opensubtitles_key": prefs.opensubtitles_key,
+            "stream_addon_url": prefs.stream_addon_url,
             "lang": rel_lang,
             "uploader": getattr(rel, "uploader", "") or "",
             "hearing_impaired": bool(getattr(rel, "hearing_impaired", False)),
@@ -1141,6 +1144,10 @@ def _sync_meta_for_user(meta: dict | None, context: dict | None, prefs: UserPref
     if prefs is not None:
         for name in ("subdl_key", "subsource_key", "opensubtitles_key"):
             merged[name] = getattr(prefs, name) or ""
+        # Only override a stream-addon URL when the user actually supplied one.
+        addon = getattr(prefs, "stream_addon_url", "") or ""
+        if addon:
+            merged["stream_addon_url"] = addon
     return merged
 
 
@@ -1166,14 +1173,14 @@ def _build_sync_orchestrator() -> SyncOrchestrator | None:
     """
     if _http_client is None:
         return None
-    aiostreams = None
-    aiostreams_url = (getattr(settings, "AIOSTREAMS_URL", None) or "").strip()
-    if aiostreams_url:
-        aiostreams = AIOStreamsClient(
-            _http_client,
-            aiostreams_url,
-            timeout=float(getattr(settings, "AIOSTREAMS_TIMEOUT", 1.2)),
-        )
+    # Generic Stremio stream resolver. A per-user addon URL is supplied on each
+    # request (Torrentio/Comet/MediaFusion/AIOStreams); AIOSTREAMS_URL is the
+    # environment fallback used when the user supplies none.
+    stream_resolver = StreamResolver(
+        _http_client,
+        getattr(settings, "AIOSTREAMS_URL", "") or "",
+        timeout=float(getattr(settings, "AIOSTREAMS_TIMEOUT", 1.2)),
+    )
     return SyncOrchestrator(
         hash_strategy=HashExactStrategy(
             OpenSubtitlesProvider(_http_client),
@@ -1185,7 +1192,7 @@ def _build_sync_orchestrator() -> SyncOrchestrator | None:
             subdl_provider=SubdlProvider(_http_client),
             subsource_provider=SubsourceProvider(_http_client),
         ),
-        aiostreams=aiostreams,
+        aiostreams=stream_resolver,
         sync_service=_sync_service,
         sync_cache=_sync_cache,
     )
