@@ -1,10 +1,15 @@
-"""Secondary sync strategy: external exact-match reference download.
+"""Secondary sync strategy: external reference download.
 
-Races SubDL and SubSource for the first *valid* result (a fast failure such as
-SubDL HTTP 429 never cancels a slower provider), applies the
-explicit decision tree (team > edition > abort), downloads at most one file,
-and persists it to the reference disk cache. Anything the tree cannot confirm
-aborts here so the orchestrator serves the original subtitle.
+Races SubDL, SubSource, and OpenSubtitles for the first *valid* result (a fast
+failure such as SubDL HTTP 429 never cancels a slower provider), scores the
+candidates against the target video, downloads the best one, and persists it to
+the reference disk cache.
+
+``alass`` only anchors speech-timing intervals, so any high-accuracy official
+track is a usable reference — not just English. Candidates are ranked by a
+weighted score (release group, source family, streaming service, resolution,
+codec, language priority, non-HI). If no candidate scores, the first
+season/episode match is used rather than aborting.
 """
 
 from __future__ import annotations
@@ -12,14 +17,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from app.config import settings
 from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.decode import decode_payload, select_zip_member
 from app.services.sync.matching import (
+    _codec_kind,
+    _release_group,
+    _resolution,
     _season_number,
     _source_kind,
+    _sources_compatible,
     candidate_episode_number,
     is_informative_release_name,
     is_retail_disc_source,
@@ -36,17 +46,106 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT = 5.0
 _MIN_REFERENCE_BYTES = 5120
 
+# Language codes searched/fetched for the *reference* track (independent of the
+# user's subtitle-language preference): common retail tracks are all valid
+# timing anchors for alass. ISO-639-1 here; providers normalize to their own.
+_REFERENCE_LANGUAGES = ("en", "es", "fr", "de", "it")
+
+# Weighted-scoring weights for candidate reference selection.
+_GROUP_SCORE = 50  # exact release group
+_SOURCE_SCORE = 30  # shared source family (web-dl/web, bluray/remux)
+_PLATFORM_SCORE = 20  # shared streaming service (HMAX/ATVP/NF/AMZN/DSNP)
+_RESOLUTION_SCORE = 10  # shared resolution
+_CODEC_SCORE = 5  # shared codec (x265/HEVC/x264)
+_EN_SCORE = 10  # English preferred on ties
+_ALT_LANG_SCORE = 5  # es / fr / de / it
+_NON_HI_SCORE = 5  # standard dialogue over hearing-impaired
+
+_LANG_SCORES = {
+    "eng": _EN_SCORE,
+    "en": _EN_SCORE,
+    "spa": _ALT_LANG_SCORE,
+    "es": _ALT_LANG_SCORE,
+    "fra": _ALT_LANG_SCORE,
+    "fr": _ALT_LANG_SCORE,
+    "deu": _ALT_LANG_SCORE,
+    "de": _ALT_LANG_SCORE,
+    "ita": _ALT_LANG_SCORE,
+    "it": _ALT_LANG_SCORE,
+}
+
+_PLATFORM_PATTERNS = {
+    "hmax": re.compile(r"(?i)\b(?:hmax|hbo[\s._-]?max)\b"),
+    "atvp": re.compile(r"(?i)\b(?:atvp|apple[\s._-]?tv)\b"),
+    "nf": re.compile(r"(?i)\bnf\b"),
+    "amzn": re.compile(r"(?i)\bamzn\b"),
+    "dsnp": re.compile(r"(?i)\bdsnp\b"),
+    "hulu": re.compile(r"(?i)\bhulu\b"),
+    "pcok": re.compile(r"(?i)\bpcok\b"),
+    "itunes": re.compile(r"(?i)\bitunes\b"),
+    "stan": re.compile(r"(?i)\bstan\b"),
+}
+
 
 def _release_name(release) -> str:
     return str(getattr(release, "release_name", "") or "")
 
 
-def _select_reference(releases, query: ReferenceQuery):
-    """Pick the top season/episode-matched English reference, or ``None``.
+def _platform_tags(name: str | None) -> frozenset[str]:
+    """Streaming-service tags present in a release name (HMAX/NF/AMZN/...)."""
+    lowered = name or ""
+    return frozenset(tag for tag, pattern in _PLATFORM_PATTERNS.items() if pattern.search(lowered))
 
-    Deliberately ignores release group, source, resolution and edition tags — a
-    matching season/episode is enough for ``alass`` to anchor the timing. A
-    byte-exact MovieHash match and non-HI subtitles are preferred when present.
+
+def score_candidate(target_name: str | None, release) -> int:
+    """Weighted score for one candidate reference against the target video.
+
+    Weights: exact release group ``+50``, matching source family ``+30``, shared
+    streaming service ``+20``, resolution ``+10``, codec ``+5``, language
+    priority ``+10`` (English) / ``+5`` (es/fr/de/it), non-HI ``+5``.
+    """
+    cand_name = _release_name(release)
+    if not cand_name:
+        return 0
+    score = 0
+
+    target_group = (_release_group(target_name) or "").lower()
+    if target_group:
+        cand_group = (_release_group(cand_name) or "").lower()
+        cand_tokens = set(re.findall(r"[a-z0-9]+", cand_name.lower()))
+        if cand_group == target_group or target_group in cand_tokens:
+            score += _GROUP_SCORE
+
+    target_source = _source_kind(target_name)
+    cand_source = _source_kind(cand_name)
+    if target_source and cand_source and _sources_compatible(target_source, cand_source):
+        score += _SOURCE_SCORE
+
+    if _platform_tags(target_name) & _platform_tags(cand_name):
+        score += _PLATFORM_SCORE
+
+    target_res = _resolution(target_name)
+    if target_res and target_res == _resolution(cand_name):
+        score += _RESOLUTION_SCORE
+
+    target_codec = _codec_kind(target_name)
+    if target_codec and target_codec == _codec_kind(cand_name):
+        score += _CODEC_SCORE
+
+    score += _LANG_SCORES.get(str(getattr(release, "lang", "") or "").strip().lower(), 0)
+
+    if not getattr(release, "hearing_impaired", False):
+        score += _NON_HI_SCORE
+    return score
+
+
+def _select_reference(releases, query: ReferenceQuery):
+    """Pick the best season/episode-matched reference by weighted score.
+
+    Eligible candidates (matching season/episode) are sorted by score
+    descending; ties keep provider order. A byte-exact MovieHash match always
+    wins. An all-zero field falls back to the first available candidate rather
+    than aborting — ``None`` is returned only when nothing matches S/E.
     """
     pool = list(releases or [])
     if not pool:
@@ -64,14 +163,23 @@ def _select_reference(releases, query: ReferenceQuery):
         ]
     if not pool:
         return None
-    pool.sort(
-        key=lambda rel: (
-            0 if getattr(rel, "is_hash_match", False) else 1,
-            1 if getattr(rel, "hearing_impaired", False) else 0,
-            0 if str(getattr(rel, "lang", "") or "").lower().startswith("en") else 1,
-        )
+
+    scored = [(score_candidate(query.target_filename, rel), rel) for rel in pool]
+    # Hash-confirmed tracks are byte-exact ground truth; otherwise the highest
+    # weighted score wins, preserving provider order on ties.
+    scored.sort(
+        key=lambda item: (1 if getattr(item[1], "is_hash_match", False) else 0, item[0]),
+        reverse=True,
     )
-    return pool[0]
+    for score, rel in scored[:5]:
+        logger.info(
+            "[reference] candidate score=%d lang=%s hash=%s %r",
+            score,
+            getattr(rel, "lang", "?"),
+            bool(getattr(rel, "is_hash_match", False)),
+            _release_name(rel),
+        )
+    return scored[0][1]
 
 
 class ExternalExactStrategy:
@@ -231,12 +339,12 @@ class ExternalExactStrategy:
     async def _download_reference(
         self, releases, provider, api_key: str | None, query: ReferenceQuery
     ) -> ResolvedReference:
-        """Download the best season/episode-matched English reference.
+        """Download the best-scoring season/episode-matched reference.
 
-        Selection is intentionally permissive: a matching season/episode is
-        enough, so a candidate is never rejected for its release group, source,
-        resolution or edition tags. ``bluray_match`` still records a bilaterally
-        verified BluRay source pair for downstream recap handling.
+        Selection is permissive: any matching season/episode is eligible and the
+        highest weighted score wins (never abort on a low score). A candidate is
+        not rejected for release group/source/resolution/edition. ``bluray_match``
+        records a bilaterally verified BluRay/REMUX source pair for recap handling.
         """
         if not releases:
             logger.info("[reference] provider returned no candidate releases")
@@ -245,14 +353,16 @@ class ExternalExactStrategy:
         best = _select_reference(releases, query)
         if best is None:
             logger.warning(
-                "[reference] aborting: no season/episode-matched English reference"
+                "[reference] aborting: no season/episode-matched reference"
             )
             return ResolvedReference(None)
         best_name = getattr(best, "release_name", "?")
         decision_kind = "hash" if getattr(best, "is_hash_match", False) else "edition"
         logger.info(
-            "[reference] selected English reference %r via %s (kind=%s)",
+            "[reference] selected reference %r (score=%d, lang=%s) via %s (kind=%s)",
             best_name,
+            score_candidate(query.target_filename, best),
+            getattr(best, "lang", "?"),
             getattr(provider, "name", type(provider).__name__),
             decision_kind,
         )
@@ -343,7 +453,7 @@ class ExternalExactStrategy:
                 season=query.season,
                 episode=episode,
                 api_key=api_key,
-                languages=list(query.languages),
+                languages=list(_REFERENCE_LANGUAGES),
                 target_filename=self._match_filename(query),
             )
 
@@ -360,7 +470,7 @@ class ExternalExactStrategy:
                 season=query.season,
                 episode=episode,
                 api_key=api_key,
-                languages=list(query.languages),
+                languages=list(_REFERENCE_LANGUAGES),
                 target_filename=self._match_filename(query),
             )
 
@@ -377,7 +487,7 @@ class ExternalExactStrategy:
                 season=query.season,
                 episode=episode,
                 api_key=api_key,
-                languages=list(query.languages),
+                languages=list(_REFERENCE_LANGUAGES),
                 target_filename=self._match_filename(query),
             )
 

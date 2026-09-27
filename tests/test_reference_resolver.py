@@ -321,7 +321,7 @@ async def test_fast_failure_does_not_cancel_slow_provider():
 
 
 @pytest.mark.asyncio
-async def test_resolver_logs_evaluated_candidates(caplog):
+async def test_resolver_logs_scored_candidates(caplog):
     class _P:
         async def search_subtitles(self, **kwargs):
             return [
@@ -346,7 +346,8 @@ async def test_resolver_logs_evaluated_candidates(caplog):
                 target_filename="Dexter.S08E01.1080p.BluRay.x265-GRP.mkv",
             )
         )
-    assert "selected English reference" in caplog.text
+    assert "candidate score=" in caplog.text
+    assert "selected reference" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -641,8 +642,8 @@ def test_release_group_extraction():
 
 
 @pytest.mark.asyncio
-async def test_resolver_ignores_release_group():
-    """End to end: release group is not a filter — the top candidate wins."""
+async def test_resolver_prefers_exact_release_group():
+    """End to end: the exact release group scores highest and wins."""
 
     class _P:
         def __init__(self):
@@ -678,7 +679,7 @@ async def test_resolver_ignores_release_group():
         )
     )
     assert content is not None
-    assert provider.downloaded == ["http://tigole"]
+    assert provider.downloaded == ["http://fsihd"]
 
 
 def test_cache_stem_pins_stream_edition():
@@ -780,8 +781,8 @@ def test_season_episode_provider_query_formats():
 
 
 @pytest.mark.asyncio
-async def test_resolver_uses_first_movie_candidate():
-    """End to end: the top same-imdb candidate is used regardless of source."""
+async def test_resolver_prefers_matching_group_and_source():
+    """End to end: the group+source-matching candidate outscores a generic one."""
 
     class _P:
         def __init__(self):
@@ -813,7 +814,7 @@ async def test_resolver_uses_first_movie_candidate():
         )
     )
     assert content is not None
-    assert provider.downloaded == ["http://other"]
+    assert provider.downloaded == ["http://chd"]
 
 
 @pytest.mark.asyncio
@@ -890,8 +891,8 @@ async def test_resolver_downloads_edition_matched_bluray():
 
 
 @pytest.mark.asyncio
-async def test_resolver_accepts_cross_source_reference():
-    """End to end: source type is not a filter — the top candidate is used."""
+async def test_resolver_scores_matching_source_highest():
+    """End to end: the same-source-family candidate outscores a cross-source one."""
 
     class _P:
         def __init__(self):
@@ -922,7 +923,7 @@ async def test_resolver_accepts_cross_source_reference():
         )
     )
     assert content is not None
-    assert provider.downloaded == ["http://publichd"]
+    assert provider.downloaded == ["http://demand"]
 
 
 def test_member_episode_explicit_part_forms():
@@ -1229,5 +1230,88 @@ def test_reference_group_rank_prefers_retail_encodes():
     assert reference_group_rank("Movie.2024.1080p.WEB-DL.x264.YIFY.srt") == 2
     assert reference_group_rank("Movie.2024.1080p.BluRay.x264-NTb.srt") == 1
     assert reference_group_rank("Movie.2024.1080p.BluRay.srt") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Weighted multi-language reference scoring
+# --------------------------------------------------------------------------- #
+_MAD_MEN_TARGET = (
+    "Mad.Men.S01E02.Ladies.Room.REPACK.2160p.HMAX.WEB-DL."
+    "DDP5.1.DV.HDR.H.265-WADU.mkv"
+)
+
+
+def _cand(release_name, *, lang="eng", hi=False, hash_match=False):
+    return SubtitleRelease(
+        release_name=release_name,
+        download_url=f"http://cdn/{release_name}",
+        provider="subdl",
+        lang=lang,
+        hearing_impaired=hi,
+        is_hash_match=hash_match,
+    )
+
+
+def _mad_men_query():
+    return ReferenceQuery(
+        imdb_id="tt1", media_type="series", season=1, episode=2,
+        target_filename=_MAD_MEN_TARGET,
+    )
+
+
+def test_score_candidate_webdl_beats_generic_bluray():
+    from app.services.sync.external_strategy import score_candidate
+
+    webdl = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-BTN.srt")
+    bluray = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt")
+    # source 30 + platform 20 + resolution 10 + codec 5 + en 10 + non-HI 5
+    assert score_candidate(_MAD_MEN_TARGET, webdl) == 80
+    # only en 10 + non-HI 5 (BluRay conflicts with WEB-DL; nothing else shared)
+    assert score_candidate(_MAD_MEN_TARGET, bluray) == 15
+    assert score_candidate(_MAD_MEN_TARGET, webdl) > score_candidate(_MAD_MEN_TARGET, bluray)
+
+
+def test_score_candidate_group_match_non_english_beats_generic_english():
+    from app.services.sync.external_strategy import score_candidate
+
+    wadu_es = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-WADU.srt", lang="spa")
+    generic_en = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="eng")
+    # group 50 + source 30 + platform 20 + resolution 10 + codec 5 + alt-lang 5 + non-HI 5
+    assert score_candidate(_MAD_MEN_TARGET, wadu_es) == 125
+    assert score_candidate(_MAD_MEN_TARGET, generic_en) == 60
+    assert score_candidate(_MAD_MEN_TARGET, wadu_es) > score_candidate(_MAD_MEN_TARGET, generic_en)
+
+
+def test_score_candidate_prefers_english_on_ties():
+    from app.services.sync.external_strategy import score_candidate
+
+    en = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="eng")
+    fr = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="fra")
+    assert score_candidate(_MAD_MEN_TARGET, en) == score_candidate(_MAD_MEN_TARGET, fr) + 5
+
+
+def test_select_reference_picks_highest_scoring_candidate():
+    from app.services.sync.external_strategy import _select_reference
+
+    bluray = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt")
+    webdl = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.H.265-BTN.srt")
+    assert _select_reference([bluray, webdl], _mad_men_query()) is webdl
+
+
+def test_select_reference_falls_back_to_first_when_all_score_zero():
+    from app.services.sync.external_strategy import _select_reference
+
+    # HI + non-priority language + no shared metadata => score 0 for both.
+    first = _cand("Mad.Men.S01E02.release.one.srt", lang="por", hi=True)
+    second = _cand("Mad.Men.S01E02.release.two.srt", lang="por", hi=True)
+    assert _select_reference([first, second], _mad_men_query()) is first
+
+
+def test_select_reference_group_language_beats_generic_english():
+    from app.services.sync.external_strategy import _select_reference
+
+    generic_en = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt", lang="eng")
+    wadu_fr = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.H.265-WADU.srt", lang="fra")
+    assert _select_reference([generic_en, wadu_fr], _mad_men_query()) is wadu_fr
 
 
