@@ -441,10 +441,15 @@ class SubtitleSyncService:
     # content with a bilaterally confirmed BluRay source is that recap cut,
     # not a sync collapse, so the ceiling is raised for exactly that case.
     MAX_ALLOWED_RECAP_SHIFT = 120.0
-    # A *uniform* constant offset (e.g. a longer studio logo/bumper) may exceed
-    # the strict edition ceiling up to this bound; variable/split shifts stay
-    # on the strict ceiling.
+    # A *uniform* constant offset on a TRUSTED reference (embedded track =
+    # the video's own bytes) may exceed the strict edition ceiling up to this
+    # bound; variable/split shifts stay on the strict ceiling.
     MAX_ALLOWED_UNIFORM_SHIFT = 30.0
+    # A best-effort EDITION reference comes from a *different* release whose
+    # intro/bumper may not match the playing video at all. Applying a large
+    # constant offset would then mis-time an otherwise-correct subtitle, so an
+    # edition sync is trusted only for minor (<= 3s) constant corrections.
+    MAX_ALLOWED_EDITION_UNIFORM_SHIFT = 3.0
 
     def sync(
         self,
@@ -625,27 +630,42 @@ class SubtitleSyncService:
                                 spread,
                             )
                             return None
-                    elif (
-                        spread <= _UNIFORM_SHIFT_SPREAD_SECONDS
-                        and abs(peak) <= self.MAX_ALLOWED_UNIFORM_SHIFT
-                    ):
-                        # Constant intro/logo/bumper offset: no drift, safe.
-                        logger.info(
-                            "[sync] uniform constant offset %+.2fs accepted "
-                            "(intro/bumper difference, spread %.2fs, no drift)",
-                            peak,
-                            spread,
+                    else:
+                        uniform_cap = (
+                            self.MAX_ALLOWED_UNIFORM_SHIFT
+                            if reference_partial
+                            else self.MAX_ALLOWED_EDITION_UNIFORM_SHIFT
                         )
-                    elif abs(peak) > self.MAX_ALLOWED_EDITION_SHIFT:
-                        logger.warning(
-                            "[sync] safety guardrail triggered: variable shift "
-                            "(%+.2fs, spread %.2fs) exceeds max safe threshold for "
-                            "generic edition; rejecting sync to prevent mis-timing "
-                            "(reference likely a different cut of the video)",
-                            peak,
-                            spread,
-                        )
-                        return None
+                        if spread <= _UNIFORM_SHIFT_SPREAD_SECONDS:
+                            if abs(peak) <= uniform_cap:
+                                logger.info(
+                                    "[sync] uniform constant offset %+.2fs accepted "
+                                    "(minor constant correction, spread %.2fs)",
+                                    peak,
+                                    spread,
+                                )
+                            else:
+                                logger.warning(
+                                    "[sync] safety guardrail triggered: uniform shift "
+                                    "(%+.2fs, spread %.2fs) exceeds the edition bound "
+                                    "(%.1fs) for a cross-release reference; rejecting "
+                                    "sync to avoid mis-timing an already-correct "
+                                    "subtitle (reference bumper/cut differs)",
+                                    peak,
+                                    spread,
+                                    uniform_cap,
+                                )
+                                return None
+                        elif abs(peak) > self.MAX_ALLOWED_EDITION_SHIFT:
+                            logger.warning(
+                                "[sync] safety guardrail triggered: variable shift "
+                                "(%+.2fs, spread %.2fs) exceeds max safe threshold for "
+                                "generic edition; rejecting sync to prevent mis-timing "
+                                "(reference likely a different cut of the video)",
+                                peak,
+                                spread,
+                            )
+                            return None
             else:
                 logger.info("[sync] applied shift: no cues parsed for comparison")
             return synced

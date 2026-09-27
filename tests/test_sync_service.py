@@ -44,7 +44,7 @@ def test_sync_returns_output_on_success(monkeypatch):
     def fake_run(command, capture_output=True, timeout=None):
         out_path = command[3]
         with open(out_path, "w", encoding="utf-8") as handle:
-            handle.write(_shifted_output(5, text="Synced"))
+            handle.write(_shifted_output(3, text="Synced"))
         return SimpleNamespace(returncode=0, stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -140,7 +140,7 @@ def test_zip_extracted_reference_feeds_alass(monkeypatch):
 
     def fake_run(command, capture_output=True, timeout=None):
         with open(command[3], "w", encoding="utf-8") as handle:
-            handle.write(_shifted_output(5, text="Synced from zip"))
+            handle.write(_shifted_output(3, text="Synced from zip"))
         return SimpleNamespace(returncode=0, stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -678,18 +678,32 @@ def test_timeline_rejection_source_confirmed_widens_band():
     )
 
 
-def test_guardrail_accepts_uniform_movie_offset(monkeypatch, caplog):
-    """Into the Wild: a near-uniform +10.3s movie offset is accepted as uniform."""
+def test_guardrail_accepts_small_uniform_movie_offset(monkeypatch, caplog):
+    """A small constant edition correction (<= 3s) is applied."""
     target = _span_srt(60, 6000.0)
-    _mock_alass_output(monkeypatch, _offset_srt(target, 10.3))
+    _mock_alass_output(monkeypatch, _offset_srt(target, 2.0))
     with caplog.at_level("INFO"):
         out = SubtitleSyncService().sync(target, target, decision_kind="edition")
     assert out is not None
     assert "uniform constant offset" in caplog.text
 
 
+def test_guardrail_rejects_large_uniform_edition_offset(monkeypatch, caplog):
+    """Into the Wild: a +10.3s uniform shift vs a DIFFERENT release is refused.
+
+    The reference's intro/bumper does not match the playing video, so applying
+    the offset would mis-time an otherwise-correct subtitle.
+    """
+    target = _span_srt(60, 6000.0)
+    _mock_alass_output(monkeypatch, _offset_srt(target, 10.3))
+    with caplog.at_level("WARNING"):
+        out = SubtitleSyncService().sync(target, target, decision_kind="edition")
+    assert out is None
+    assert "safety guardrail triggered" in caplog.text
+
+
 def test_guardrail_trims_single_outlier_cue(monkeypatch, caplog):
-    """11 cues at ~+9.7s plus one +6.9s outlier is still a uniform offset."""
+    """A trusted (partial/embedded) reference tolerates a large uniform offset."""
     target = _span_srt(12, 6000.0)
     blocks = target.strip().split("\n\n")
     synced = "\n\n".join(
@@ -697,7 +711,9 @@ def test_guardrail_trims_single_outlier_cue(monkeypatch, caplog):
     ) + "\n"
     _mock_alass_output(monkeypatch, synced)
     with caplog.at_level("INFO"):
-        out = SubtitleSyncService().sync(target, target, decision_kind="edition")
+        out = SubtitleSyncService().sync(
+            target, target, decision_kind="embedded", reference_partial=True
+        )
     assert out is not None
     assert "uniform constant offset" in caplog.text
 
