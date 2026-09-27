@@ -72,6 +72,38 @@ def test_sync_uses_split_penalty_and_cleans_temp_files(monkeypatch):
     assert all(not os.path.exists(p) for p in captured["temp_paths"])
 
 
+def test_alass_command_passes_reference_then_target(monkeypatch):
+    """alass syntax is `alass <reference> <incorrect> <output>` (kaegi/alass).
+
+    argv[1] must be the trusted reference file and argv[2] the target to fix;
+    the output is written as `<target>.synced.srt`.
+    """
+    service = SubtitleSyncService()
+    captured = {}
+
+    def fake_run(command, capture_output=True, timeout=None):
+        captured["command"] = command
+        captured["reference"] = open(command[1], encoding="utf-8").read()
+        captured["target"] = open(command[2], encoding="utf-8").read()
+        with open(command[3], "w", encoding="utf-8") as handle:
+            handle.write(command[2])  # content irrelevant; path is what we assert
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    service.sync(_srt("TARGET_MARKER"), _srt("REFERENCE_MARKER"))
+
+    command = captured["command"]
+    # argv[1] reference, argv[2] target, argv[3] = <target>.synced.srt
+    assert "REFERENCE_MARKER" in captured["reference"]
+    assert "TARGET_MARKER" not in captured["reference"]
+    assert "TARGET_MARKER" in captured["target"]
+    assert "REFERENCE_MARKER" not in captured["target"]
+    assert command[3] == command[2] + ".synced.srt"
+    # Sanity: argv is exactly [alass, reference, target, output, "--split-penalty", "7.0"].
+    assert command[0] == service.alass_path
+    assert command[4:] == ["--split-penalty", "7.0"]
+
+
 def test_sync_returns_none_on_nonzero_exit_and_timeout(monkeypatch):
     service = SubtitleSyncService()
 

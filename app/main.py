@@ -1214,17 +1214,17 @@ async def _maybe_sync_subtitle(
 
     Requires BOTH the server-level ``ENABLE_SUBTITLE_SYNC`` flag and the user's
     ``auto_sync`` preference. The inline wait is bounded by
-    ``SYNC_TOTAL_REQUEST_BUDGET`` seconds so a slow provider/alass run can never
-    blow past the player's ~8-12s subtitle timeout: on expiry the original bytes
-    are served immediately while the detached task keeps running to populate the
-    ``final_sub`` cache for subsequent requests.
+    ``SYNC_TOTAL_REQUEST_BUDGET`` seconds so a slow provider/alass run cannot
+    block forever: on expiry the original bytes are served immediately while the
+    detached task keeps running to populate the ``final_sub`` cache for
+    subsequent requests.
     """
     orchestrator = _get_sync_orchestrator()
     if orchestrator is None:
         logger.warning("[sync] skipped: HTTP client unavailable, cannot resolve reference")
         return sub_bytes
 
-    budget = float(getattr(settings, "SYNC_TOTAL_REQUEST_BUDGET", 7.5))
+    budget = float(getattr(settings, "SYNC_TOTAL_REQUEST_BUDGET", 15.0))
     task = asyncio.ensure_future(
         orchestrator.evaluate_and_sync(sub_bytes, meta, target_id, auto_sync=auto_sync)
     )

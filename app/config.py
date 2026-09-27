@@ -45,10 +45,11 @@ class Settings(BaseSettings):
     ALASS_TIMEOUT_SECONDS: float = 10.0
     ALASS_MAX_CONCURRENT_SYNCS: int = 1
     REDIS_URL: str | None = None
-    # Hard inline budget for sync during a player request. ExoPlayer drops
-    # subtitles after ~8-12s, so past this we serve the original and let the
-    # (still-running) sync warm the cache for the next request.
-    SYNC_TOTAL_REQUEST_BUDGET: float = 9.0
+    # Hard inline budget for sync during a player request. Downloads from the
+    # reference providers + alass routinely take ~10s, so the budget is generous;
+    # past it we serve the original and let the (still-running) sync warm the
+    # cache for the next request.
+    SYNC_TOTAL_REQUEST_BUDGET: float = 15.0
 
     # Persistent English-reference disk cache (30 days) for the sync pipeline.
     REFERENCE_CACHE_DIR: str | None = None
