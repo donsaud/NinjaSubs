@@ -88,6 +88,34 @@ class ReferenceDiskCache:
         """Decision-metadata sidecar paired with a cached reference file."""
         return path.with_suffix(path.suffix + ".json")
 
+    @classmethod
+    def _remove(cls, path: Path) -> bool:
+        """Delete a payload and its sidecar; ``True`` when the payload existed."""
+        try:
+            existed = path.is_file()
+            path.unlink(missing_ok=True)
+            cls._sidecar_path(path).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("[reference] failed to evict %s: %s", path.name, exc)
+            return False
+        return existed
+
+    def delete(self, query: ReferenceQuery) -> bool:
+        """Evict every cached entry for a query stem.
+
+        A cached reference is only ever proven against the exact target
+        subtitle that triggered its write. A different candidate for the same
+        video can share that stem yet have an unrelated cue layout, so a
+        reference that fails target cue-sanity must be dropped rather than
+        re-read and re-rejected on every subsequent request.
+        """
+        removed = False
+        for path in self._paths(query):
+            if self._remove(path):
+                removed = True
+                logger.info("[reference] evicted unusable cache entry: %s", path.name)
+        return removed
+
     def _read_verdict(self, path: Path, stem: str, text: str) -> tuple[str, bool, str, bool] | None:
         """Recover ``(kind, bluray_match, candidate, partial)`` for a cache file.
 
@@ -134,10 +162,8 @@ class ReferenceDiskCache:
             except OSError:
                 continue
             if age > self.ttl:
-                with contextlib.suppress(OSError):
-                    path.unlink()
-                    self._sidecar_path(path).unlink()
-                logger.info("[reference] expired cache entry removed: %s", path.name)
+                if self._remove(path):
+                    logger.info("[reference] expired cache entry removed: %s", path.name)
                 continue
             try:
                 text = path.read_text(encoding="utf-8")

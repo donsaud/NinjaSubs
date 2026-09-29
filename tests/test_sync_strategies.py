@@ -1210,3 +1210,118 @@ async def test_stale_cached_reference_is_revalidated_and_replaced(tmp_path):
     assert resolved.text is not None
     assert subsource.downloaded == ["http://ep5"]
     assert resolved.candidate == single.release_name
+    # The rejected reference must be gone from disk, not merely bypassed: a
+    # stale entry otherwise survives the 30-day TTL and is re-read (and
+    # re-rejected) on every later request for this stem.
+    assert cache.get(_series_query()) is not None  # the good one replaced it
+    assert bad_ref.decode() not in {
+        (p.read_text(encoding="utf-8"))
+        for p in cache.root.glob(f"{_series_query().cache_stem}_*.srt")
+    }
+
+
+@pytest.mark.asyncio
+async def test_rejected_candidate_is_not_redownloaded_after_cache_eviction(tmp_path):
+    """A candidate proven bad for this stem is not fetched again after an eviction.
+
+    This is the exact wasteful path seen in production: a cached reference
+    fails cue-sanity, is evicted, and the deterministic fan-out then restarts
+    from the same ranked list and re-downloads the very candidate that just
+    failed. The memo must stop that second download.
+    """
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    bad_ref = _dialogue(10_510)  # ~96s off: a different cut
+    good_ref = _dialogue(106_950)  # correct cut
+
+    # `bad` is a tighter release-name match to the target (identical group
+    # token) so it outranks `good` and is always attempted first, then walked
+    # past.
+    bad = SubtitleRelease(
+        release_name="Dexter.S08E05.1080p.BluRay.TrueHD5.1.AVC-NORDiC.srt",
+        download_url="http://bad", provider="subdl", lang="eng",
+    )
+    good = SubtitleRelease(
+        release_name="Dexter.S08E05.720p.BluRay.x264-DEMAND.srt",
+        download_url="http://good", provider="subdl", lang="eng",
+    )
+
+    class _Provider:
+        name = "subdl"
+
+        def __init__(self):
+            self.downloaded: list[str] = []
+
+        async def search_subtitles(self, **kwargs):
+            return [bad, good]
+
+        async def download_archive(self, url, api_key=None):
+            self.downloaded.append(url)
+            return bad_ref if url == "http://bad" else good_ref
+
+    provider = _Provider()
+    cache = ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100)
+    strategy = ExternalExactStrategy(
+        subdl_provider=provider,
+        cache=cache,
+        min_bytes=100,
+        timeout=1.0,
+    )
+    target_text = _dialogue(106_950).decode()
+
+    def _validator(reference_text: str) -> bool:
+        from app.services.subtitle_matcher import (
+            FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            validate_cue_sanity,
+        )
+
+        return bool(
+            validate_cue_sanity(
+                target_text,
+                reference_text,
+                threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            )["ok"]
+        )
+
+    query = _series_query()
+    # Seed the cache with the reference that does NOT fit this target, exactly
+    # as a previous target for the same video would have written it.
+    cache.set(query, "subdl", bad_ref.decode(), kind="edition", candidate=bad.release_name)
+
+    first = await strategy.resolve_with_provenance(query, update_validator=_validator)
+    assert first.text is not None
+    # The stale entry is evicted, the bad candidate is tried once and rejected,
+    # then the good one wins.
+    assert provider.downloaded == ["http://bad", "http://good"]
+
+    # Now simulate the next request: evict the freshly cached good entry (as a
+    # differing target would), forcing a full re-resolve. The memo must stop
+    # `http://bad` from being downloaded a second time. `http://good` is
+    # re-fetched because it succeeded rather than being rejected, and the cache
+    # entry that held it was just removed.
+    cache.delete(query)
+    second = await strategy.resolve_with_provenance(query, update_validator=_validator)
+    assert second.text is not None
+    assert provider.downloaded.count("http://bad") == 1, (
+        f"the rejected candidate was re-downloaded after eviction: {provider.downloaded}"
+    )
+
+
+def test_reference_cache_delete_removes_payload_and_sidecar(tmp_path):
+    """`delete` clears the SRT and its verdict sidecar, and reports whether it removed one."""
+    from app.services.sync.cache import ReferenceDiskCache
+
+    cache = ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100)
+    query = _series_query()
+    cache.set(query, "subdl", _dialogue(106_950).decode(), kind="edition", candidate="x")
+
+    assert list(cache.root.glob(f"{query.cache_stem}_*.srt"))
+    assert cache.delete(query) is True
+    assert not list(cache.root.glob(f"{query.cache_stem}_*.srt"))
+    # No orphaned sidecar is left behind to be re-read as provenance.
+    assert not list(cache.root.glob(f"{query.cache_stem}_*.json"))
+    # Deleting again is a no-op, not an error.
+    assert cache.delete(query) is False
+    assert cache.get(query) is None

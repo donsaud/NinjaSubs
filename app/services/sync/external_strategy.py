@@ -349,6 +349,20 @@ class ExternalExactStrategy:
         self.timeout = timeout
         self.min_bytes = min_bytes
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
+        # Candidate releases already proven unusable for a given query stem.
+        # Keyed by stem so one episode's rejections never leak into another's.
+        self._rejected: dict[str, set[str]] = {}
+
+    @staticmethod
+    def _candidate_key(candidate) -> str:
+        """Stable identity for a candidate release across provider fan-outs."""
+        return str(getattr(candidate, "download_url", "") or getattr(candidate, "release_name", ""))
+
+    def _is_rejected(self, stem: str, candidate) -> bool:
+        return self._candidate_key(candidate) in self._rejected.get(stem, set())
+
+    def _mark_rejected(self, stem: str, candidate) -> None:
+        self._rejected.setdefault(stem, set()).add(self._candidate_key(candidate))
 
     async def resolve(self, query: ReferenceQuery) -> str | None:
         """Return the best reference subtitle (> ``min_bytes``) or ``None``."""
@@ -378,10 +392,18 @@ class ExternalExactStrategy:
         if cached is not None:
             if validate is None or validate(cached.text or ""):
                 return cached
+            # The cached reference was proven against whichever target
+            # subtitle wrote it, and that proof is not transferable: this
+            # candidate can be a different cut, so the same reference now
+            # fails. Evict it, otherwise every later request re-reads the same
+            # unusable entry and re-runs the full provider fan-out only to
+            # fail identically.
             logger.warning(
-                "[reference] cached reference %r failed target cue-sanity; re-resolving",
+                "[reference] cached reference %r failed target cue-sanity; "
+                "evicting and re-resolving",
                 cached.candidate,
             )
+            self.cache.delete(query)
 
         providers = [
             p for p in (self._subdl, self._subsource, self._opensubtitles) if p is not None
@@ -417,10 +439,17 @@ class ExternalExactStrategy:
 
         max_attempts = 6
         attempts = 0
+        stem = query.cache_stem
 
         for cand in ranked:
             cand_provider = provider_of.get(id(cand))
             if cand_provider is None:
+                continue
+
+            # A candidate that already failed cue-sanity for this exact stem is
+            # not re-downloaded: the verdict is deterministic, so retrying it
+            # burns a download and provider rate limit to reach the same result.
+            if self._is_rejected(stem, cand):
                 continue
 
             provider_lbl = self._provider_label(cand_provider)
@@ -458,6 +487,7 @@ class ExternalExactStrategy:
             cand_result = await self._download_candidate(cand, cand_provider, query)
             if cand_result.text:
                 if validate is not None and not validate(cand_result.text):
+                    self._mark_rejected(stem, cand)
                     logger.warning(
                         "[reference] candidate %r (provider=%s) failed target cue-sanity; trying next candidate",
                         getattr(cand, "release_name", "?"),
