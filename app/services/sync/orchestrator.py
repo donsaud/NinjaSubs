@@ -23,6 +23,7 @@ from app.services.subtitle_matcher import (
     ALIGNED_OFFSET_THRESHOLD_S,
     FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
     median_cue_offset,
+    parse_srt_cues,
     validate_cue_sanity,
 )
 from app.services.sync.alignment import (
@@ -518,8 +519,18 @@ class SyncOrchestrator:
             if offset is not None and abs(offset) < ALIGNED_OFFSET_THRESHOLD_S:
                 # No re-timing needed. Classify explicitly so "already aligned"
                 # is a measured claim, not an assumption.
+                # Same handoff as the post-alass path: parse the text alass
+                # would have been given, then hand the collection over.
+                target_cues = parse_srt_cues(target_text)
+                logger.info(
+                    "[sync] verifier input: target_raw_chars=%d "
+                    "target_parsed_cue_count=%d verifier_target_cue_count=%d",
+                    len(target_text),
+                    len(target_cues),
+                    len(target_cues),
+                )
                 evaluation = self._analyzer.analyze(
-                    target_text,
+                    target_cues,
                     None,
                     reference,
                     alass_applied=False,
@@ -590,8 +601,25 @@ class SyncOrchestrator:
                 # analyzer classifies and explains rather than overruling them.
                 # Otherwise a stricter new metric would silently change which
                 # subtitles are served, which is exactly the coupling to avoid.
+                #
+                # The target cues are parsed HERE, from the exact text alass was
+                # given, and handed over as a collection. The analyzer accepts
+                # either raw text or cues; it used to be given the text and
+                # reparse it with its own ``parse_srt_cues``. Two parsers with
+                # two accepted timestamp grammars, and a real trace where the
+                # sync service counted 584 target cues while the verifier was
+                # handed 0. Parsing at the boundary makes
+                # ``pre-alass count == verifier count`` an invariant.
+                target_cues = parse_srt_cues(target_text)
+                logger.info(
+                    "[sync] verifier input: target_raw_chars=%d "
+                    "target_parsed_cue_count=%d verifier_target_cue_count=%d",
+                    len(target_text),
+                    len(target_cues),
+                    len(target_cues),
+                )
                 evaluation = self._analyzer.analyze(
-                    target_text,
+                    target_cues,
                     synced,
                     reference,
                     alass_applied=True,

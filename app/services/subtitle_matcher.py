@@ -2614,8 +2614,15 @@ def parse_srt_cues(text: str) -> list[tuple[int, int, str]]:
         ts_idx = next((i for i, line in enumerate(lines) if "-->" in line), None)
         if ts_idx is None:
             continue
+        # The hours field is optional here, exactly as it is in the sync path's
+        # own ``_TIMESPAN_LINE_REGEX`` and in alass's input handling. A real
+        # provider SRT using ``MM:SS,mmm`` used to parse to ZERO cues here
+        # while every other timing consumer in the system counted all of them,
+        # so the verifier was handed an empty target for a subtitle the sync
+        # service had just parsed successfully. ``_to_ms`` already understood
+        # the two-part form; this regex was what made that unreachable.
         m = re.search(
-            r"(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})",
+            r"((?:\d{1,2}:)?\d{1,2}:\d{2}[,.]\d{1,3})\s*-->\s*((?:\d{1,2}:)?\d{1,2}:\d{2}[,.]\d{1,3})",
             lines[ts_idx],
         )
         if not m:
