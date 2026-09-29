@@ -25,7 +25,7 @@ from app.services.subtitle_matcher import (
     validate_cue_sanity,
 )
 from app.services.sync.matching import is_informative_release_name
-from app.services.sync.query import ReferenceQuery, ResolvedReference
+from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync_cache import SyncCache
 from app.utils.cleaners import strip_intro_credits
 
@@ -101,13 +101,16 @@ class SyncOrchestrator:
             strats.append(("hash-exact", self._hash_strategy))
         return strats
 
-    def _build_query(self, meta: dict, target_id: str | None = None) -> ReferenceQuery:
+    def _build_query(
+        self, meta: dict, target_id: str | None = None, target_text: str | None = None
+    ) -> ReferenceQuery:
         return ReferenceQuery(
             imdb_id=str(meta.get("imdb_id") or ""),
             target_filename=meta.get("target_filename") or meta.get("release_name"),
-            target_sub_release_name=meta.get("release_name"),
             target_sub_id=target_id or meta.get("sub_id"),
+            target_sub_release_name=meta.get("release_name"),
             target_download_url=meta.get("download_url"),
+            target_cue_digest=fingerprint_target_cues(target_text),
             media_type=str(meta.get("media_type") or "movie"),
             title=meta.get("title"),
             year=_parse_year(meta.get("year")),
@@ -218,7 +221,6 @@ class SyncOrchestrator:
                 )
                 return cached
 
-        query = self._build_query(meta, target_id=target_id)
         if self._sync_cache is not None and await self._sync_cache.is_failed(resolution_key):
             logger.info(
                 "[sync] negative cache hit for %s -> skipping provider fan-out",
@@ -229,6 +231,7 @@ class SyncOrchestrator:
         from app.extractor import decode_subtitle_bytes
 
         target_text = decode_subtitle_bytes(sub_bytes, lang=meta.get("lang"))
+        query = self._build_query(meta, target_id=target_id, target_text=target_text)
 
         if self._sync_service is None:  # pragma: no cover - defensive
             logger.warning("[sync] no sync service configured -> serving original subtitle")

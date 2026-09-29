@@ -349,8 +349,9 @@ class ExternalExactStrategy:
         self.timeout = timeout
         self.min_bytes = min_bytes
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
-        # Candidate releases already proven unusable for a given query stem.
-        # Keyed by stem so one episode's rejections never leak into another's.
+        # Candidate releases already proven unusable for a target-scoped query.
+        # Keyed by the full cache stem so one subtitle's rejections never leak
+        # into another subtitle with a different cue layout.
         self._rejected: dict[str, set[str]] = {}
 
     @staticmethod
@@ -446,9 +447,10 @@ class ExternalExactStrategy:
             if cand_provider is None:
                 continue
 
-            # A candidate that already failed cue-sanity for this exact stem is
-            # not re-downloaded: the verdict is deterministic, so retrying it
-            # burns a download and provider rate limit to reach the same result.
+            # A candidate that already failed cue-sanity for this exact target
+            # scope is not re-downloaded: the verdict is deterministic, so
+            # retrying it burns a download and provider rate limit to reach the
+            # same result.
             if self._is_rejected(stem, cand):
                 continue
 

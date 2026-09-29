@@ -9,6 +9,57 @@ from dataclasses import dataclass, field
 
 from app.services.sync.matching import _release_group
 
+_TARGET_CUE_RANGE_RE = re.compile(
+    r"(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})"
+    r"\s*-->\s*"
+    r"(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})"
+)
+_TARGET_CUE_SAMPLE = 8
+
+
+def _cue_timestamp_ms(hours: str | None, minutes: str, seconds: str, millis: str) -> int | None:
+    """Convert one timestamp to milliseconds, or ``None`` when out of range."""
+    try:
+        total = (
+            int(hours or 0) * 3_600_000
+            + int(minutes) * 60_000
+            + int(seconds) * 1_000
+            + int(millis.ljust(3, "0"))
+        )
+    except (TypeError, ValueError):
+        return None
+    if int(minutes) > 59 or int(seconds) > 59:
+        return None
+    return total
+
+
+def fingerprint_target_cues(target_text: str | bytes | None) -> str | None:
+    """Fingerprint a target subtitle's initial cue timings, ignoring dialogue text.
+
+    Only timing anchors matter for reference reuse: two subtitle IDs with the
+    same initial cue grid may safely share a validated reference, while any
+    timing difference must isolate their cache entries. Cue numbers, speaker
+    text, whitespace, and SRT/VTT timestamp punctuation do not affect the digest.
+    """
+    if target_text is None:
+        return None
+    if isinstance(target_text, bytes):
+        text = target_text.decode("utf-8", errors="ignore")
+    else:
+        text = target_text
+    pairs: list[str] = []
+    for match in _TARGET_CUE_RANGE_RE.finditer(text.lstrip("\ufeff")):
+        start = _cue_timestamp_ms(match.group(1), match.group(2), match.group(3), match.group(4))
+        end = _cue_timestamp_ms(match.group(5), match.group(6), match.group(7), match.group(8))
+        if start is None or end is None or end <= start:
+            continue
+        pairs.append(f"{start}-{end}")
+        if len(pairs) >= _TARGET_CUE_SAMPLE:
+            break
+    if not pairs:
+        return None
+    return hashlib.sha256("|".join(pairs).encode("utf-8")).hexdigest()[:16]
+
 
 @dataclass
 class ReferenceQuery:
@@ -30,6 +81,7 @@ class ReferenceQuery:
     target_download_url: str | None = None
     target_sub_id: str | None = None
     target_sub_release_name: str | None = None
+    target_cue_digest: str | None = None
 
     @property
     def is_series(self) -> bool:
@@ -45,13 +97,33 @@ class ReferenceQuery:
         group = self.release_group or _release_group(self.target_filename) or "unknown"
         return re.sub(r"[^A-Za-z0-9]+", "", group) or "unknown"
 
+    @staticmethod
+    def _target_scope(target_cue_digest: str | None, target_sub_id: str | None) -> str:
+        """Scope a cache stem to the target subtitle's cue layout when known.
+
+        A matching cue-layout digest allows reference reuse across subtitle IDs
+        with identical timing. A subtitle ID alone is a safe fallback scope when
+        cues cannot be fingerprinted; an empty scope preserves legacy stems for
+        queries that predate target-aware caching.
+        """
+        digest = re.sub(r"[^0-9a-f]+", "", (target_cue_digest or "").strip().lower())
+        if digest:
+            return f"t{digest[:16]}"
+        sub_id = (target_sub_id or "").strip().lower()
+        if sub_id:
+            return "i" + hashlib.sha256(sub_id.encode("utf-8")).hexdigest()[:12]
+        return ""
+
     @property
     def cache_stem(self) -> str:
-        """Versioned identity bound to the video, filename, and reference language.
+        """Versioned identity bound to the video and the target cue layout.
 
         A release group alone cannot distinguish that group's WEB, disc,
         extended, or remastered releases. The digest also prevents old,
-        group-only cache entries from being reused as exact references.
+        group-only cache entries from being reused as exact references. When the
+        target subtitle's initial cue timings are known, they form the final
+        stem segment; a reference proven against one cue layout can then be
+        reused for an identical layout but never for a different one.
         """
         imdb = re.sub(r"[^A-Za-z0-9]+", "", self.imdb_id or "unknown") or "unknown"
         season = str(self.season) if self.season is not None else "movie"
@@ -67,7 +139,9 @@ class ReferenceQuery:
             self.languages,
         ], ensure_ascii=False)
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
-        return f"{imdb}_{season}_{episode}_{self.effective_group}_v2_{digest}"
+        stem = f"{imdb}_{season}_{episode}_{self.effective_group}_v2_{digest}"
+        scope = self._target_scope(self.target_cue_digest, self.target_sub_id)
+        return f"{stem}_{scope}" if scope else stem
 
 
 @dataclass(frozen=True)

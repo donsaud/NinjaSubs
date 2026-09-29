@@ -649,6 +649,80 @@ async def test_orchestrator_negative_cache_skips_provider_fanout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_failed_reference_short_circuits_repeat_request(monkeypatch, tmp_path):
+    """A cue-sanity failure is remembered, so the next request does no downloads."""
+    from app.config import settings as app_settings
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
+    target = _dialogue(10_160, marker="reference line target", cues=30)
+    wrong_cut = _dialogue(106_950, marker="reference line wrong cut", cues=30)
+    release = SubtitleRelease(
+        release_name="Dexter.S08E05.720p.BluRay.x264-NORDiC.srt",
+        download_url="http://wrong-cut",
+        provider="subdl",
+        lang="eng",
+    )
+
+    class _CountingProvider:
+        name = "subdl"
+
+        def __init__(self):
+            self.searches = 0
+            self.downloaded: list[str] = []
+
+        async def search_subtitles(self, **kwargs):
+            self.searches += 1
+            return [release]
+
+        async def download_archive(self, url, api_key=None):
+            self.downloaded.append(url)
+            return wrong_cut
+
+    provider = _CountingProvider()
+    strategy = ExternalExactStrategy(
+        subdl_provider=provider,
+        subsource_provider=None,
+        opensubtitles_provider=None,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        min_bytes=100,
+        timeout=1.0,
+    )
+    sync_cache = SyncCache()
+    orch = SyncOrchestrator(
+        hash_strategy=_FakeStrategy(None),
+        external_strategy=strategy,
+        sync_service=_FakeSyncService(),
+        sync_cache=sync_cache,
+    )
+    meta = {
+        "imdb_id": "tt0773262",
+        "media_type": "series",
+        "season": 8,
+        "episode": 5,
+        "lang": "ara",
+        "target_filename": SEASON_PACK_TARGET,
+    }
+
+    first = await orch.evaluate_and_sync(target, meta, "wrong-cut-sub", True)
+    assert first == target
+    assert provider.searches == 1
+    assert provider.downloaded == ["http://wrong-cut"]
+    assert orch._sync_service.calls == 0
+
+    resolution_key = orch._flight_key(meta, "wrong-cut-sub", target)
+    assert await sync_cache.is_failed(resolution_key) is True
+
+    second = await orch.evaluate_and_sync(target, meta, "wrong-cut-sub", True)
+    assert second == target
+    assert provider.searches == 1
+    assert provider.downloaded == ["http://wrong-cut"]
+    assert orch._sync_service.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_external_reference_remux_target_is_retail_pair():
     """A REMUX stream against a BluRay reference must set bluray_match."""
     import io

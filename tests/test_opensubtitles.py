@@ -20,8 +20,11 @@ def client():
 
 
 @pytest.mark.asyncio
-async def test_opensubtitles_missing_api_key_returns_empty():
+async def test_opensubtitles_missing_api_key_returns_empty(monkeypatch):
     """When no API key is provided and none in env settings, search immediately returns empty list."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "OPENSUBTITLES_API_KEY", "")
     mock_client = AsyncMock(spec=httpx.AsyncClient)
     provider = OpenSubtitlesProvider(mock_client)
 

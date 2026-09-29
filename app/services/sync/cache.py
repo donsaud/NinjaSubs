@@ -26,12 +26,13 @@ _KNOWN_KINDS = ("team", "edition", "hash", "embedded")
 class ReferenceDiskCache:
     """Persistent on-disk cache of resolved English reference subtitles.
 
-    Files live at ``{root}/{query.cache_stem}_{source}_{kind}.srt``
-    and expire after a generous TTL so repeated subtitle switches for the same
-    episode never re-hit (rate-limited) download APIs. The group segment keeps
-    different stream editions (``FSiHD`` vs ``YIFY``) on separate timings, and
-    the kind segment preserves the tree verdict so a cached team reference is
-    never downgraded to ``edition`` on recovery.
+    Files live at ``{root}/{query.cache_stem}_{source}_{kind}.srt`` and expire
+    after a generous TTL so repeated subtitle switches for the same episode
+    never re-hit (rate-limited) download APIs. The group segment keeps
+    different stream editions (``FSiHD`` vs ``YIFY``) on separate timings, the
+    target scope keeps different subtitle cue layouts separate, and the kind
+    segment preserves the tree verdict so a cached team reference is never
+    downgraded to ``edition`` on recovery.
     """
 
     def __init__(
@@ -101,11 +102,11 @@ class ReferenceDiskCache:
         return existed
 
     def delete(self, query: ReferenceQuery) -> bool:
-        """Evict every cached entry for a query stem.
+        """Evict every cached entry for a target-scoped query stem.
 
-        A cached reference is only ever proven against the exact target
-        subtitle that triggered its write. A different candidate for the same
-        video can share that stem yet have an unrelated cue layout, so a
+        A cached reference is only ever proven against the target cue layout
+        that triggered its write. A different candidate for the same video can
+        share the unscoped stem yet have an unrelated cue layout, so a
         reference that fails target cue-sanity must be dropped rather than
         re-read and re-rejected on every subsequent request.
         """
@@ -209,8 +210,9 @@ class ReferenceDiskCache:
         """Atomically persist a resolved reference, dropping stale variants.
 
         A best-effort ``edition`` save never evicts an exact-kind entry
-        (team / hash / embedded) for the same stem. The verdict sidecar
-        records what the filename alone cannot (notably ``bluray_match``).
+        (team / hash / embedded) for the same target-scoped stem. The verdict
+        sidecar records what the filename alone cannot (notably
+        ``bluray_match``).
         """
         if not text:
             return

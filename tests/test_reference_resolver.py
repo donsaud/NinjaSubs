@@ -706,6 +706,66 @@ def test_cache_stem_pins_stream_edition():
     assert explicit.cache_stem.startswith("tt1_movie_x_PiR8_v2_")
 
 
+def test_cache_stem_scopes_distinct_subtitle_targets(tmp_path):
+    """Two subtitle IDs for one video must not share a cached reference."""
+    from app.services.sync.cache import ReferenceDiskCache
+
+    video = {
+        "imdb_id": "tt0773262",
+        "media_type": "series",
+        "season": 8,
+        "episode": 5,
+        "target_filename": "Dexter.s8e05.1080p.BluRay-PiR8.mkv",
+    }
+    target_a = ReferenceQuery(**video, target_sub_id="sub-a", target_cue_digest="abc123")
+    target_b = ReferenceQuery(**video, target_sub_id="sub-b", target_cue_digest="def456")
+    assert target_a.cache_stem != target_b.cache_stem
+
+    cache = ReferenceDiskCache(root=tmp_path / "disk", ttl=3600.0, min_bytes=100)
+    cache.set(target_a, "subdl", _valid_reference_text(), kind="edition", candidate="a")
+    assert cache.get(target_a) is not None
+    assert cache.get(target_b) is None
+
+
+def test_cache_stem_shares_identical_target_cue_layouts(tmp_path):
+    """Identical initial cue timings may reuse a validated reference."""
+    from app.services.sync.cache import ReferenceDiskCache
+
+    video = {
+        "imdb_id": "tt0773262",
+        "media_type": "series",
+        "season": 8,
+        "episode": 5,
+        "target_filename": "Dexter.s8e05.1080p.BluRay-PiR8.mkv",
+    }
+    first_id = ReferenceQuery(**video, target_sub_id="sub-a", target_cue_digest="abc123")
+    second_id = ReferenceQuery(**video, target_sub_id="sub-c", target_cue_digest="abc123")
+    assert first_id.cache_stem == second_id.cache_stem
+
+    cache = ReferenceDiskCache(root=tmp_path / "disk", ttl=3600.0, min_bytes=100)
+    cache.set(first_id, "subdl", _valid_reference_text(), kind="edition", candidate="a")
+    assert cache.get(second_id) is not None
+
+
+def test_target_cue_digest_ignores_text_but_not_timing():
+    """The layout fingerprint is timing-only and format-insensitive."""
+    from app.services.sync.query import fingerprint_target_cues
+
+    srt = (
+        "1\n00:10:09,500 --> 00:10:11,000\nFirst line\n\n"
+        "2\n00:10:12,000 --> 00:10:13,500\nSecond line\n"
+    )
+    same_timing = srt.replace("First line", "سطر أول").replace("Second line", "سطر ثان")
+    vtt_timing = srt.replace(",", ".")
+    shifted_timing = srt.replace("00:10:09,500", "00:01:46,000", 1)
+
+    assert fingerprint_target_cues(srt) == fingerprint_target_cues(same_timing)
+    assert fingerprint_target_cues(srt) == fingerprint_target_cues(vtt_timing)
+    assert fingerprint_target_cues(srt) == fingerprint_target_cues(srt.encode())
+    assert fingerprint_target_cues(srt) != fingerprint_target_cues(shifted_timing)
+    assert fingerprint_target_cues(b"not a subtitle") is None
+
+
 @pytest.mark.asyncio
 async def test_different_editions_do_not_share_cached_reference(tmp_path):
     """FSiHD and YIFY releases of one movie must resolve/cache independently."""
