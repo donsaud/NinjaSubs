@@ -194,3 +194,25 @@ class ResolvedReference:
     shadow_comparison_class: str | None = None
     shadow_additional_fetches: int = 0
     shadow_switch_labels: list[str] = field(default_factory=list)
+    # --- experimental pool expansion (measurement only) ------------------- #
+    # Whether spending one extra download actually widened the evidence, and
+    # what it cost. Never any part of the production decision.
+    shadow_expansion_eligible: bool = False
+    shadow_expansion_refusal: str | None = None
+    shadow_expansion_outcome: str | None = None
+    shadow_extra_fetch_attempts: int = 0
+    shadow_extra_fetch_successes: int = 0
+    shadow_extra_fetch_failures: int = 0
+    shadow_extra_fetch_network_fetches: int = 0
+    shadow_extra_fetch_bytes: int | None = None
+    shadow_extra_fetch_latency_ms: float | None = None
+    shadow_pool_size_before: int = 0
+    shadow_independent_groups_before: int = 0
+    shadow_pool_size_after: int = 0
+    shadow_independent_groups_after: int = 0
+    shadow_meaningful_before: bool = False
+    shadow_meaningful_after: bool = False
+    shadow_extra_duplicate_timing_grid: bool | None = None
+    shadow_extra_candidate_provider: str | None = None
+    shadow_extra_candidate_match_tier: str | None = None
+    shadow_extra_candidate_source_class: str | None = None

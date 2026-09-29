@@ -849,6 +849,14 @@ def main(argv: list[str] | None = None) -> int:
         help="compare the shadow (v2) reference selector against the current one",
     )
     parser.add_argument(
+        "--fetch-limit-comparison",
+        action="store_true",
+        help=(
+            "observational FETCH_LIMIT 0 vs 1 comparison from existing telemetry; "
+            "never re-runs production requests"
+        ),
+    )
+    parser.add_argument(
         "--shadow-replay",
         metavar="CASE_ID",
         help=(
@@ -879,6 +887,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nstructured output written to {args.json_out}", file=sys.stderr)
         return 0
 
+    if args.fetch_limit_comparison:
+        comparison = fetch_limit_comparison(quality.records)
+        return _emit(comparison, _render_fetch_limit_comparison(comparison))
     if args.shadow_replay:
         return _emit(
             *shadow_replay_analysis(quality.records, args.shadow_replay, args.path)
@@ -1059,6 +1070,176 @@ def reference_investigation_candidates(a: dict[str, Any]) -> list[str]:
 _TRUST_STRENGTH = {"verified": 3, "strong": 2, "acceptable": 1, "unknown": 0}
 
 
+def _render_fetch_limit_comparison(c: dict[str, Any]) -> str:
+    out: list[str] = []
+    add = out.append
+    add("SHADOW POOL FETCH LIMIT 0 vs 1")
+    add("=" * 74)
+    add("Observational only. No production request was re-run.")
+    add("")
+    add(f"  Records with expansion permitted : {c['fetch_limit_1_records']}")
+    add(f"  Records without expansion        : {c['fetch_limit_0_records']}")
+    add("")
+    if c["status"] == "INSUFFICIENT_SAMPLE":
+        add(f"  INSUFFICIENT_SAMPLE: {c['fetch_limit_1_records']} expansion records, "
+            f"need {c['required_sample']}.")
+        add("  Collect more before reading anything into this comparison.")
+        return "\n".join(out)
+    add(f"  Independent timing groups, limit 0: {c['independent_groups_limit_0']}")
+    add(f"  Independent timing groups, limit 1: {c['independent_groups_limit_1']}")
+    add(f"  Meaningful comparisons, limit 0:   {_pct(c['meaningful_limit_0'])}")
+    add(f"  Meaningful comparisons, limit 1:   {_pct(c['meaningful_limit_1'])}")
+    add(f"  Total extra network fetches: {c['network_fetches_total']}")
+    if c.get("marginal_meaningful_rate") is not None:
+        add(f"  Marginal meaningful rate: {_pct(c['marginal_meaningful_rate'])}")
+    add("")
+    add("  These two groups are different requests, not a controlled A/B split,")
+    add("  so differences may reflect which requests were eligible rather than")
+    add("  the fetch budget. Read as an indication, not a measured effect.")
+    return "\n".join(out)
+
+
+def _expansion_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """What one extra download did to the evidence, and what it cost.
+
+    Reports facts only. Whether the trade was acceptable is a human decision,
+    so nothing here emits a recommendation.
+
+    Mirrors the outcome vocabulary of app.services.sync.shadow_expansion (this
+    tool stays stdlib-only; see test_shadow_comparison_class_literals_match_the_selector
+    and test_shadow_expansion_outcome_literals_match_the_module).
+    """
+    outcomes = (
+        "NOT_ATTEMPTED",
+        "NO_ADDITIONAL_VALUE",
+        "ADDED_DUPLICATE_GROUP",
+        "ADDED_NEW_TIMING_GROUP",
+        "ENABLED_MEANINGFUL_COMPARISON",
+        "CAUSED_FETCH_FAILURE",
+    )
+    eligible = [r for r in records if r.get("shadow_expansion_eligible")]
+    attempted = [r for r in records if (r.get("shadow_extra_fetch_attempts") or 0) > 0]
+    succeeded = [r for r in records if (r.get("shadow_extra_fetch_successes") or 0) > 0]
+    bytes_known = [r for r in succeeded if r.get("shadow_extra_fetch_bytes") is not None]
+    lat_known = [r for r in succeeded if r.get("shadow_extra_fetch_latency_ms") is not None]
+
+    by_outcome = {name: 0 for name in outcomes}
+    for r in records:
+        name = str(r.get("shadow_expansion_outcome") or "NOT_ATTEMPTED")
+        by_outcome[name] = by_outcome.get(name, 0) + 1
+
+    def _sum(key: str) -> int:
+        return sum(int(r.get(key) or 0) for r in records)
+
+    def _mean(key: str, subset: list[dict[str, Any]]) -> float | None:
+        vals = [r[key] for r in subset if r.get(key) is not None]
+        return round(sum(vals) / len(vals), 3) if vals else None
+
+    def _enabled(r: dict[str, Any]) -> bool:
+        return bool(r.get("shadow_meaningful_after"))
+
+    new_groups = by_outcome.get("ADDED_NEW_TIMING_GROUP", 0) + by_outcome.get(
+        "ENABLED_MEANINGFUL_COMPARISON", 0
+    )
+    # Marginal rate is only meaningful on a non-trivial eligible sample.
+    eligible_n = len(eligible)
+    marginal = None
+    if eligible_n >= MIN_EXPANSION_SAMPLE:
+        marginal = round(new_groups / eligible_n, 4)
+
+    return {
+        "eligible_requests": eligible_n,
+        "expansion_attempts": len(attempted),
+        "successful_extra_candidates": len(succeeded),
+        "fetch_failures": by_outcome.get("CAUSED_FETCH_FAILURE", 0),
+        "network_fetches": _sum("shadow_extra_fetch_network_fetches"),
+        "cache_reuses": _sum("shadow_extra_fetch_cache_reuses"),
+        "refusal_reasons": dict(
+            Counter(
+                str(r.get("shadow_expansion_refusal") or "unknown")
+                for r in records
+                if not r.get("shadow_expansion_eligible")
+            ).most_common()
+        ),
+        "independent_groups_before": _mean(
+            "shadow_independent_groups_before", attempted
+        ),
+        "independent_groups_after": _mean(
+            "shadow_independent_groups_after", attempted
+        ),
+        "pool_size_before": _mean("shadow_pool_size_before", attempted),
+        "pool_size_after": _mean("shadow_pool_size_after", attempted),
+        "meanful_before_count": sum(1 for r in attempted if r.get("shadow_meaningful_before")),
+        "meanful_after_count": sum(1 for r in attempted if _enabled(r)),
+        "outcomes": by_outcome,
+        "duplicate_timing_grid": sum(
+            1 for r in succeeded if r.get("shadow_extra_duplicate_timing_grid")
+        ),
+        "bytes_total": sum(int(r["shadow_extra_fetch_bytes"]) for r in bytes_known) or None,
+        "bytes_unknown": len(succeeded) - len(bytes_known),
+        "mean_bytes": _mean("shadow_extra_fetch_bytes", bytes_known),
+        "mean_latency_ms": _mean("shadow_extra_fetch_latency_ms", lat_known),
+        "latency_unknown": len(succeeded) - len(lat_known),
+        "extra_candidate_by_provider": dict(
+            Counter(
+                str(r.get("shadow_extra_candidate_provider") or "unknown")
+                for r in succeeded
+            ).most_common()
+        ),
+        "extra_candidate_by_match_tier": dict(
+            Counter(
+                str(r.get("shadow_extra_candidate_match_tier") or "unknown")
+                for r in succeeded
+            ).most_common()
+        ),
+        "marginal_meaningful_rate": marginal,
+        "marginal_sample_sufficient": marginal is not None,
+    }
+
+
+def fetch_limit_comparison(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Observational FETCH_LIMIT 0 vs 1, from telemetry already collected.
+
+    No production request is re-run. Records written with a limit of 0 are
+    compared against those written with a limit of 1, and only means are
+    reported; nothing here re-decides the policy.
+    """
+    expansion = _expansion_analysis(records)
+    with_fetch = [r for r in records if r.get("shadow_expansion_eligible")]
+    zero_limit = [r for r in records if not r.get("shadow_expansion_eligible")]
+    n = len(with_fetch)
+    enough = n >= MIN_EXPANSION_SAMPLE
+
+    def _groups(subset: list[dict[str, Any]], key: str) -> float | None:
+        vals = [r[key] for r in subset if r.get(key) is not None]
+        return round(sum(vals) / len(vals), 3) if vals else None
+
+    return {
+        "status": "OK" if enough else "INSUFFICIENT_SAMPLE",
+        "fetch_limit_1_records": n,
+        "fetch_limit_0_records": len(zero_limit),
+        "required_sample": MIN_EXPANSION_SAMPLE,
+        "independent_groups_limit_0": _groups(
+            zero_limit, "shadow_independent_groups_after"
+        ),
+        "independent_groups_limit_1": _groups(with_fetch, "shadow_independent_groups_after"),
+        "meaningful_limit_0": round(
+            sum(1 for r in zero_limit if r.get("shadow_meaningful_after"))
+            / len(zero_limit),
+            4,
+        )
+        if zero_limit
+        else None,
+        "meaningful_limit_1": round(
+            sum(1 for r in with_fetch if r.get("shadow_meaningful_after")) / n, 4
+        )
+        if n
+        else None,
+        "network_fetches_total": expansion["network_fetches"],
+        "marginal_meaningful_rate": expansion["marginal_meaningful_rate"],
+    }
+
+
 def shadow_replay_analysis(
     records: list[dict[str, Any]], case_id: str, audit_path: Path
 ) -> tuple[dict[str, Any], str]:
@@ -1101,6 +1282,10 @@ def shadow_replay_analysis(
     add("  No approximate result is produced. Collecting the reference payloads")
     add("  needed for a true replay is a separate, opt-in change.")
     return unavailable, "\n".join(out)
+
+
+# Below this many eligible expansion requests a rate is not stated at all.
+MIN_EXPANSION_SAMPLE = 30
 
 
 def shadow_comparison_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1167,6 +1352,8 @@ def shadow_comparison_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
     non_comparable = [r for r in compared if _classify(r) != COMPARISON_MEANINGFUL]
     meaningful_changed = [r for r in meaningful if r.get("shadow_reference_changed")]
 
+    expansion = _expansion_analysis(compared)
+
     coverage = {
         "serve_records": len(serve),
         "with_pool": len(with_pool),
@@ -1216,6 +1403,7 @@ def shadow_comparison_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
         else None,
         "non_comparable": len(non_comparable),
         "pool_coverage": coverage,
+        "expansion": expansion,
         "comparison_class_counts": dict(Counter(_classify(r) for r in compared).most_common()),
         "change_reasons": dict(by_reason.most_common()),
         "meaningful_change_reasons": dict(
@@ -1316,6 +1504,62 @@ def render_shadow_report(a: dict[str, Any]) -> str:
         add("Counterfactual quality labels (not a quality claim)")
         for label, count in a["switch_labels"].items():
             add(f"  {count:>4}  {label}")
+
+    exp = a.get("expansion") or {}
+    if exp:
+        add("")
+        add("Shadow Pool Expansion (experimental, opt-in)")
+        add("-" * 74)
+        add(f"  Requests eligible for expansion: {exp.get('eligible_requests', 0)}")
+        add(f"  Expansion attempts: {exp.get('expansion_attempts', 0)}")
+        add(f"  Successful extra candidates: {exp.get('successful_extra_candidates', 0)}")
+        add(f"  Network fetches: {exp.get('network_fetches', 0)}")
+        add(f"  Cache reuses: {exp.get('cache_reuses', 0)}")
+        if exp.get("mean_latency_ms") is not None:
+            add(f"  Mean extra-fetch latency: {exp['mean_latency_ms']} ms")
+        else:
+            add("  Mean extra-fetch latency: unknown")
+        if exp.get("mean_bytes") is not None:
+            add(f"  Mean extra-fetch bytes: {exp['mean_bytes']}")
+        else:
+            add("  Mean extra-fetch bytes: unknown")
+        if exp.get("bytes_unknown"):
+            add(f"  Requests with unknown byte count: {exp['bytes_unknown']}")
+        if exp.get("latency_unknown"):
+            add(f"  Requests with unknown latency: {exp['latency_unknown']}")
+        add("")
+        add("  Independent groups before: " f"{exp.get('independent_groups_before')}")
+        add("  Independent groups after:  " f"{exp.get('independent_groups_after')}")
+        add("  Pool size before: " f"{exp.get('pool_size_before')}")
+        add("  Pool size after:  " f"{exp.get('pool_size_after')}")
+        add(f"  Meaningful comparisons before: {exp.get('meanful_before_count', 0)}")
+        add(f"  Meaningful comparisons after:  {exp.get('meanful_after_count', 0)}")
+        add("")
+        add("  Expansion outcomes")
+        for name, count in (exp.get("outcomes") or {}).items():
+            add(f"    {count:>4}  {name}")
+        dup = exp.get("duplicate_timing_grid") or 0
+        if dup:
+            add("")
+            add(f"  {dup} successful extra candidates shared an existing timing grid")
+            add("  and therefore added no independent evidence.")
+        if exp.get("marginal_meaningful_rate") is not None:
+            add("")
+            add(
+                "  Marginal meaningful-comparison rate: "
+                f"{_pct(exp['marginal_meaningful_rate'])} of eligible requests"
+            )
+        else:
+            add("")
+            add("  INSUFFICIENT_SAMPLE: too few eligible requests to state a rate.")
+        if exp.get("refusal_reasons"):
+            add("")
+            add("  Why expansion was not attempted")
+            for reason, count in exp["refusal_reasons"].items():
+                add(f"    {count:>4}  {reason}")
+        add("")
+        add("  These are observations. Whether one extra download is worth its cost")
+        add("  is not decided here.")
     add(rule)
     add(f"  serve records            : {a['serve_records']}")
     add(f"  legacy references graded : {a['legacy_assessed']}")

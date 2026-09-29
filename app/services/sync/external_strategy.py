@@ -18,9 +18,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from app.services.subtitle_matcher import extract_metadata
 from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.decode import (
     decode_payload,
@@ -595,17 +597,24 @@ class ExternalExactStrategy:
         shadow_comparison = None
         shadow_pool = None
         shadow_switch_labels: list[str] = []
-        additional_fetches = 0
         try:
             from app.config import settings as app_settings
+            from app.services.sync.audit import AUDIT_LOG as sync_audit
             from app.services.sync.reference_v2 import (
-                _identity as _reference_identity,
-            )
-            from app.services.sync.reference_v2 import (
+                COMPARISON_MEANINGFUL,
                 build_shadow_pool,
                 classify_shadow_switch,
                 compare_selections,
                 select_reference_v2,
+            )
+            from app.services.sync.reference_v2 import (
+                _identity as _reference_identity,
+            )
+            from app.services.sync.shadow_expansion import (
+                ExpansionTelemetry,
+                choose_expansion_candidate,
+                classify_expansion,
+                resolve_fetch_budget,
             )
 
             pool_limit = int(getattr(app_settings, "REFERENCE_SHADOW_POOL_LIMIT", 4) or 0)
@@ -626,31 +635,95 @@ class ExternalExactStrategy:
                 if id(c) in provider_of
             ]
 
-            if fetch_limit > 0:
-                # Opt-in only. Candidates already downloaded are excluded, and
-                # the count is recorded so the extra cost is measurable rather
-                # than an invisible download multiplier.
-                for provider, name in discovered:
-                    if additional_fetches >= fetch_limit:
-                        break
-                    if (provider, name) in payloads:
-                        continue
+            # --- experimental pool expansion (measurement only) ------------- #
+            # Everything above is unchanged production behaviour. What follows
+            # runs only when the audit log is actually recording, the operator
+            # configured a budget, the target is fingerprinted, and the existing
+            # pool cannot support a comparison. Its only output is a payload for
+            # the shadow pool plus telemetry; the legacy `text` is never touched.
+            expansion = ExpansionTelemetry()
+            pool_before = build_shadow_pool(
+                query.target_filename if query else None,
+                discovered,
+                payloads,
+                limit=pool_limit,
+            )
+            budget = resolve_fetch_budget(
+                configured_limit=fetch_limit,
+                audit_enabled=bool(sync_audit.enabled),
+                target_filename=query.target_filename if query else None,
+                comparison_class=pool_before.comparison_class,
+            )
+            expansion.eligible = budget.allowed > 0
+            expansion.refusal = budget.reason
+            expansion.pool_size_before = pool_before.pool_size
+            expansion.independent_groups_before = pool_before.independent_groups
+            expansion.meaningful_before = (
+                pool_before.comparison_class == COMPARISON_MEANINGFUL
+            )
+
+            if budget.allowed > 0:
+                choice = choose_expansion_candidate(
+                    query.target_filename if query else None,
+                    discovered,
+                    payloads,
+                    rejected=[
+                        (self._provider_label(provider_of[id(c)]), _release_name(c))
+                        for c in ranked
+                        if id(c) in provider_of and self._is_rejected(stem, c)
+                    ],
+                )
+                if choice is not None:
                     cand = next(
-                        (c for c in ranked if _release_name(c) == name and id(c) in provider_of),
+                        (
+                            c
+                            for c in ranked
+                            if _release_name(c) == choice.release_name
+                            and id(c) in provider_of
+                            and self._provider_label(provider_of[id(c)]) == choice.provider
+                        ),
                         None,
                     )
-                    if cand is None or self._is_rejected(stem, cand):
-                        continue
-                    cand_provider = provider_of.get(id(cand))
-                    if cand_provider is None or cand_provider is self._opensubtitles:
-                        continue
-                    try:
-                        fetched = await self._download_candidate(cand, cand_provider, query)
-                    except Exception:
-                        continue
-                    if fetched.text:
-                        payloads[(provider, name)] = fetched.text
-                        additional_fetches += 1
+                    cand_provider = provider_of.get(id(cand)) if cand is not None else None
+                    if cand is not None and cand_provider is not None:
+                        expansion.attempts = 1
+                        expansion.candidate_provider = choice.provider
+                        try:
+                            from app.services.subtitle_matcher import (
+                                calculate_compatibility,
+                            )
+
+                            if query.target_filename:
+                                compat = calculate_compatibility(
+                                    extract_metadata(query.target_filename),
+                                    choice.release_name,
+                                )
+                                expansion.candidate_match_tier = compat.match_tier.name
+                                expansion.candidate_source_class = str(
+                                    (extract_metadata(choice.release_name) or {}).get("source")
+                                    or "unknown"
+                                )
+                        except Exception:
+                            expansion.candidate_match_tier = None
+
+                        started = time.monotonic()
+                        try:
+                            fetched = await self._download_candidate(
+                                cand, cand_provider, query
+                            )
+                        except Exception:
+                            fetched = None
+                        elapsed_ms = round((time.monotonic() - started) * 1000, 3)
+                        expansion.latency_ms = elapsed_ms
+                        expansion.network_fetches = 1
+                        if fetched is not None and fetched.text:
+                            payloads[choice.key] = fetched.text
+                            expansion.successes = 1
+                            expansion.bytes = len(fetched.text.encode("utf-8"))
+                            expansion.reasons.append(choice.reason)
+                        else:
+                            expansion.failures = 1
+                            expansion.reasons.append("extra fetch produced no payload")
 
             shadow_pool = build_shadow_pool(
                 query.target_filename if query else None,
@@ -662,6 +735,30 @@ class ExternalExactStrategy:
             selection = select_reference_v2(
                 query.target_filename if query else None, shadow_pool.references
             )
+            # What the extra fetch did to the evidence, judged after the fact
+            # from the real timing grids rather than assumed from the source.
+            expansion.pool_size_after = shadow_pool.pool_size
+            expansion.independent_groups_after = shadow_pool.independent_groups
+            expansion.meaningful_after = (
+                shadow_pool.comparison_class == COMPARISON_MEANINGFUL
+            )
+            expansion.outcome = classify_expansion(
+                eligible=expansion.eligible,
+                refusal=expansion.refusal,
+                attempted=expansion.attempts > 0,
+                succeeded=expansion.successes > 0,
+                pool_size_before=expansion.pool_size_before,
+                groups_before=expansion.independent_groups_before,
+                pool_size_after=expansion.pool_size_after,
+                groups_after=expansion.independent_groups_after,
+                meaningful_before=expansion.meaningful_before,
+                meaningful_after=expansion.meaningful_after,
+            )
+            if expansion.successes:
+                expansion.duplicate_timing_grid = (
+                    expansion.independent_groups_after
+                    == expansion.independent_groups_before
+                )
             # Same identity function on both sides, otherwise every request
             # would look like a disagreement.
             legacy_identity = _reference_identity(
@@ -736,8 +833,41 @@ class ExternalExactStrategy:
                 shadow_pool.independent_groups if shadow_pool else 0
             ),
             shadow_comparison_class=shadow_pool.comparison_class if shadow_pool else None,
-            shadow_additional_fetches=additional_fetches,
+            shadow_additional_fetches=expansion.successes if expansion else 0,
             shadow_switch_labels=shadow_switch_labels,
+            shadow_expansion_eligible=bool(expansion.eligible) if expansion else False,
+            shadow_expansion_refusal=expansion.refusal if expansion else None,
+            shadow_expansion_outcome=expansion.outcome if expansion else None,
+            shadow_extra_fetch_attempts=expansion.attempts if expansion else 0,
+            shadow_extra_fetch_successes=expansion.successes if expansion else 0,
+            shadow_extra_fetch_failures=expansion.failures if expansion else 0,
+            shadow_extra_fetch_network_fetches=(
+                expansion.network_fetches if expansion else 0
+            ),
+            shadow_extra_fetch_bytes=expansion.bytes if expansion else None,
+            shadow_extra_fetch_latency_ms=expansion.latency_ms if expansion else None,
+            shadow_pool_size_before=expansion.pool_size_before if expansion else 0,
+            shadow_independent_groups_before=(
+                expansion.independent_groups_before if expansion else 0
+            ),
+            shadow_pool_size_after=expansion.pool_size_after if expansion else 0,
+            shadow_independent_groups_after=(
+                expansion.independent_groups_after if expansion else 0
+            ),
+            shadow_meaningful_before=expansion.meaningful_before if expansion else False,
+            shadow_meaningful_after=expansion.meaningful_after if expansion else False,
+            shadow_extra_duplicate_timing_grid=(
+                expansion.duplicate_timing_grid if expansion else None
+            ),
+            shadow_extra_candidate_provider=(
+                expansion.candidate_provider if expansion else None
+            ),
+            shadow_extra_candidate_match_tier=(
+                expansion.candidate_match_tier if expansion else None
+            ),
+            shadow_extra_candidate_source_class=(
+                expansion.candidate_source_class if expansion else None
+            ),
         )
 
     def _provider_label(self, provider) -> str:

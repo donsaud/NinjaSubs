@@ -161,6 +161,31 @@ class SyncDecisionRecord(BaseModel):
     shadow_comparison_class: str | None = None
     shadow_additional_fetches: int = 0
     shadow_switch_labels: list[str] = Field(default_factory=list)
+    # --- experimental pool expansion (measurement only) -------------------- #
+    # Whether one extra download actually widened the evidence, and what it
+    # cost. Reported as facts; the tool does not decide whether it was worth it.
+    shadow_expansion_eligible: bool = False
+    shadow_expansion_refusal: str | None = None
+    # NOT_ATTEMPTED | NO_ADDITIONAL_VALUE | ADDED_DUPLICATE_GROUP |
+    # ADDED_NEW_TIMING_GROUP | ENABLED_MEANINGFUL_COMPARISON | CAUSED_FETCH_FAILURE
+    shadow_expansion_outcome: str | None = None
+    shadow_extra_fetch_attempts: int = 0
+    shadow_extra_fetch_successes: int = 0
+    shadow_extra_fetch_failures: int = 0
+    shadow_extra_fetch_network_fetches: int = 0
+    shadow_extra_fetch_cache_reuses: int = 0
+    shadow_extra_fetch_bytes: int | None = None
+    shadow_extra_fetch_latency_ms: float | None = None
+    shadow_pool_size_before: int = 0
+    shadow_independent_groups_before: int = 0
+    shadow_pool_size_after: int = 0
+    shadow_independent_groups_after: int = 0
+    shadow_meaningful_before: bool = False
+    shadow_meaningful_after: bool = False
+    shadow_extra_duplicate_timing_grid: bool | None = None
+    shadow_extra_candidate_provider: str | None = None
+    shadow_extra_candidate_match_tier: str | None = None
+    shadow_extra_candidate_source_class: str | None = None
     # Legacy pick was only acceptable/unknown, the shadow pick was stronger,
     # and the decision did not verify. A flag to investigate, never a cause.
     potential_reference_selection_issue: bool = False
@@ -446,6 +471,43 @@ def record_for_evaluation(
         shadow_switch_labels=[
             sanitize_reason(r) for r in (getattr(reference, "shadow_switch_labels", None) or [])
         ],
+        shadow_expansion_eligible=bool(
+            getattr(reference, "shadow_expansion_eligible", False)
+        ),
+        shadow_expansion_refusal=getattr(reference, "shadow_expansion_refusal", None),
+        shadow_expansion_outcome=getattr(reference, "shadow_expansion_outcome", None),
+        shadow_extra_fetch_attempts=getattr(reference, "shadow_extra_fetch_attempts", 0),
+        shadow_extra_fetch_successes=getattr(reference, "shadow_extra_fetch_successes", 0),
+        shadow_extra_fetch_failures=getattr(reference, "shadow_extra_fetch_failures", 0),
+        shadow_extra_fetch_network_fetches=getattr(
+            reference, "shadow_extra_fetch_network_fetches", 0
+        ),
+        shadow_extra_fetch_bytes=getattr(reference, "shadow_extra_fetch_bytes", None),
+        shadow_extra_fetch_latency_ms=getattr(
+            reference, "shadow_extra_fetch_latency_ms", None
+        ),
+        shadow_pool_size_before=getattr(reference, "shadow_pool_size_before", 0),
+        shadow_independent_groups_before=getattr(
+            reference, "shadow_independent_groups_before", 0
+        ),
+        shadow_pool_size_after=getattr(reference, "shadow_pool_size_after", 0),
+        shadow_independent_groups_after=getattr(
+            reference, "shadow_independent_groups_after", 0
+        ),
+        shadow_meaningful_before=bool(getattr(reference, "shadow_meaningful_before", False)),
+        shadow_meaningful_after=bool(getattr(reference, "shadow_meaningful_after", False)),
+        shadow_extra_duplicate_timing_grid=getattr(
+            reference, "shadow_extra_duplicate_timing_grid", None
+        ),
+        shadow_extra_candidate_provider=getattr(
+            reference, "shadow_extra_candidate_provider", None
+        ),
+        shadow_extra_candidate_match_tier=getattr(
+            reference, "shadow_extra_candidate_match_tier", None
+        ),
+        shadow_extra_candidate_source_class=getattr(
+            reference, "shadow_extra_candidate_source_class", None
+        ),
         release_source=release_facts.get("release_source"),
         release_resolution=release_facts.get("release_resolution"),
         release_edition=release_facts.get("release_edition"),

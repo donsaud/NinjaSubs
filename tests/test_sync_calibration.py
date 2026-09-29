@@ -358,6 +358,23 @@ def test_shadow_comparison_class_literals_match_the_selector():
     assert f'COMPARISON_MEANINGFUL = "{reference_v2.COMPARISON_MEANINGFUL}"' in source
 
 
+def test_shadow_expansion_outcome_literals_match_the_module():
+    """The tool mirrors the expansion outcome vocabulary; it must not drift.
+
+    The calibration tool is stdlib-only by design, so it cannot import the
+    experimental module that defines these.
+    """
+    from app.services.sync import shadow_expansion
+
+    source = _TOOL.read_text(encoding="utf-8")
+    assert f'"{shadow_expansion.EXPANSION_NOT_ATTEMPTED}"' in source
+    assert f'"{shadow_expansion.EXPANSION_NO_VALUE}"' in source
+    assert f'"{shadow_expansion.EXPANSION_DUPLICATE_GROUP}"' in source
+    assert f'"{shadow_expansion.EXPANSION_NEW_TIMING_GROUP}"' in source
+    assert f'"{shadow_expansion.EXPANSION_ENABLED_COMPARISON}"' in source
+    assert f'"{shadow_expansion.EXPANSION_FETCH_FAILURE}"' in source
+
+
 def test_tool_writes_nothing_to_the_repo_by_default(tmp_path):
     records = [_record(subtitle_id=f"s{i}") for i in range(5)]
     path = _write(tmp_path, records)
