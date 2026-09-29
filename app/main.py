@@ -43,6 +43,7 @@ from app.services.aggregator import (
 from app.services.cache import clear_subtitle_cache
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.matching import (
+    has_video_fingerprint,
     is_informative_release_name,
     prefer_meaningful_release_name,
 )
@@ -551,6 +552,44 @@ async def _fetch_subtitles_handler(
     video_size = stream_params.get("video_size")
     stream_url = request.query_params.get("stream_url") or request.query_params.get("streamUrl")
 
+    # Diagnostics: distinguish "Stremio sent no video fingerprint" (catalogue
+    # request with no resolved stream) from an internal loss. Anything arriving
+    # in `extra`/query but missing here would be a parsing bug.
+    has_fingerprint = has_video_fingerprint(
+        {
+            "target_filename": target_filename,
+            "video_hash": video_hash,
+            "video_size": video_size,
+            "stream_url": stream_url,
+        }
+    )
+    if has_fingerprint:
+        logger.info(
+            "[fingerprint] video context present for %s S%sE%s: filename=%r video_hash=%r "
+            "video_size=%r stream_url=%s",
+            parsed.imdb_id,
+            season,
+            episode,
+            target_filename,
+            bool(video_hash),
+            video_size,
+            "yes" if stream_url else "no",
+        )
+    else:
+        logger.info(
+            "[fingerprint] NO video context for %s S%sE%s (extra=%s, filename=%s, "
+            "videoSize=%s, stream_url=%s); Stremio requested subtitles without a "
+            "resolved stream, so the target edition is genuinely unknown and "
+            "synchronization cannot be verified",
+            parsed.imdb_id,
+            season,
+            episode,
+            "present" if extra else "absent",
+            "absent" if target_filename is None else "present",
+            "absent" if video_size is None else "present",
+            "absent" if not stream_url else "present",
+        )
+
     # Check if cache bypass requested via query params or headers
     bypass_cache = bool(
         request.query_params.get("nocache")
@@ -628,7 +667,14 @@ async def _fetch_subtitles_handler(
         else:
             source_tag = "SubDL"
 
-        # Store metadata for on-demand fetch (including effective API keys and language)
+        # Store metadata for on-demand fetch (including effective API keys and language).
+        # target_filename is the TARGET VIDEO filename only. Stremio omits it
+        # entirely when the subtitle request does not originate from a resolved
+        # stream (e.g. requested from the series/episode catalogue). Never
+        # substitute the subtitle's own release name: it would be stored, carried
+        # through the subtitle URL, and later mistaken for a real video
+        # fingerprint, turning "unknown edition" into a confident wrong one.
+        # display_release_name keeps the candidate's name available to the UI.
         meta_dict = {
             "sub_id": sub_id,
             "imdb_id": parsed.imdb_id,
@@ -636,7 +682,16 @@ async def _fetch_subtitles_handler(
             "provider": rel.provider,
             "download_url": rel.download_url,
             "release_name": rel.release_name,
-            "target_filename": target_filename or rel.release_name,
+            "display_release_name": rel.release_name,
+            "target_filename": target_filename,
+            "has_video_fingerprint": has_video_fingerprint(
+                {
+                    "target_filename": target_filename,
+                    "video_hash": video_hash,
+                    "video_size": video_size,
+                    "stream_url": stream_url,
+                }
+            ),
             "season": season,
             "episode": episode,
             "subdl_key": prefs.subdl_key,
@@ -739,7 +794,8 @@ async def _fetch_subtitles_handler(
 
     logger.info(
         f"Returning {len(unique_items)} ranked subtitles for {raw_id} "
-        f"(Target stream: '{target_filename or 'None'}')"
+        f"(Target stream: '{target_filename or 'None'}'"
+        f"{'' if has_fingerprint else '; no video fingerprint -> unrankable by edition'})"
     )
     return SubtitlesResponse(subtitles=unique_items)
 
@@ -1140,24 +1196,31 @@ def _merge_sync_meta(meta: dict | None, context: dict | None) -> dict:
     # that carries the real scene name. Resolve the meaningful segment for both
     # edition matching and cache fingerprinting, preferring whichever of the
     # cached/context filenames is informative, then the stream URL's path.
+    #
+    # The subtitle's own release_name is only a legitimate last resort when a
+    # real (if uninformative) video fingerprint exists, e.g. `videoplayback.mp4`
+    # for a debrid stream. When Stremio sent no video context at all there is
+    # nothing to improve, and promoting the subtitle name would fabricate a
+    # target edition out of catalogue-only metadata.
+    fingerprint_present = has_video_fingerprint(merged, context)
+    candidates = [merged.get("target_filename"), context.get("target_filename")]
+    if fingerprint_present:
+        candidates += [merged.get("release_name"), context.get("release_name")]
+
     meaningful = ""
-    for candidate in (
-        merged.get("target_filename"),
-        context.get("target_filename"),
-        merged.get("release_name"),
-        context.get("release_name"),
-    ):
+    for candidate in candidates:
         resolved = prefer_meaningful_release_name(candidate)
         if is_informative_release_name(resolved):
             meaningful = resolved
             break
-    if not meaningful:
+    if not meaningful and fingerprint_present:
         stream_path = urllib.parse.urlparse(str(merged.get("stream_url") or "")).path
         derived = prefer_meaningful_release_name(stream_path)
         if is_informative_release_name(derived):
             meaningful = derived
     if meaningful:
         merged["target_filename"] = meaningful
+    merged.setdefault("has_video_fingerprint", fingerprint_present)
     return merged
 
 

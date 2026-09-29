@@ -1,5 +1,6 @@
 """Contract tests for Stremio Addon Protocol v3 endpoints and JSON schemas."""
 
+import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -154,7 +155,11 @@ async def test_subtitles_endpoint_schema_movie(client):
             # Validate each item strictly matches required Stremio/Nuvio contract
             for item in subs:
                 assert "id" in item and len(item["id"]) > 0
-                assert "url" in item and item["url"].endswith(".srt")
+                # The subtitle PATH must carry the format extension. A media
+                # context query string may follow it (imdb/season/episode/
+                # videosize), so assert on the path rather than the whole URL.
+                assert "url" in item
+                assert urllib.parse.urlparse(item["url"]).path.endswith(".srt")
                 assert item["lang"] == "ara"
                 assert "[" in item["title"] and "%]" in item["title"]
                 assert "[SubDL]" in item["title"] or "[SubSource]" in item["title"]
@@ -381,8 +386,9 @@ async def test_subtitles_endpoint_accurately_reports_format(client):
             subs = data["subtitles"]
             assert len(subs) == 3
 
-            # Check that each format and URL extension matches the source format
-            formats_found = {s["format"]: s["url"] for s in subs}
+            # Check that each format and URL extension matches the source format.
+            # Assert on the path: a media context query string may follow it.
+            formats_found = {s["format"]: urllib.parse.urlparse(s["url"]).path for s in subs}
             assert "srt" in formats_found and formats_found["srt"].endswith(".srt")
             assert "ass" in formats_found and formats_found["ass"].endswith(".ass")
             assert "vtt" in formats_found and formats_found["vtt"].endswith(".vtt")

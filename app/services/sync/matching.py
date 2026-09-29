@@ -501,6 +501,39 @@ def prefer_meaningful_release_name(value: str | None) -> str:
     return basename
 
 
+# Fields that only ever describe the *target video*. A metadata object may carry
+# title/year/season/episode (Cinemeta catalogue data) while every one of these is
+# absent, which means the request carried no stream fingerprint at all.
+_VIDEO_FINGERPRINT_FIELDS = (
+    "target_filename",
+    "video_hash",
+    "video_size",
+    "stream_url",
+)
+
+
+def has_video_fingerprint(*sources: Any) -> bool:
+    """True when at least one real target-video signal is present.
+
+    Distinguishes two states that look alike in a metadata dict:
+
+    * catalogue context only (title/year/season/episode from Cinemeta, no video
+      fingerprint) - the subtitle request did not originate from a resolved
+      stream, so the target's edition is genuinely unknown;
+    * a real video fingerprint (filename, hash, size, or stream URL).
+
+    Callers use this to fail closed on synchronization evidence instead of
+    substituting a subtitle release name for the missing video filename.
+    """
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for field in _VIDEO_FINGERPRINT_FIELDS:
+            if source.get(field) not in (None, ""):
+                return True
+    return False
+
+
 _TITLE_SPLIT_REGEX = re.compile(
     r"(?i)(?:^|[\s._\-()\[\]])(?:"
     r"s\d{1,2}[\s._-]*e\d{1,3}(?:[\s._-]*e\d{1,3})*|"

@@ -104,9 +104,14 @@ class SyncOrchestrator:
     def _build_query(
         self, meta: dict, target_id: str | None = None, target_text: str | None = None
     ) -> ReferenceQuery:
+        # target_filename is the target VIDEO filename only. The candidate's own
+        # release_name must never stand in for it: doing so would hand reference
+        # tiering a fabricated edition (e.g. "Dexter.2006.S08E05.srt" yields no
+        # source/resolution/group, demoting every reference to TIER_FALLBACK)
+        # when the request in fact carried no video fingerprint at all.
         return ReferenceQuery(
             imdb_id=str(meta.get("imdb_id") or ""),
-            target_filename=meta.get("target_filename") or meta.get("release_name"),
+            target_filename=meta.get("target_filename"),
             target_sub_id=target_id or meta.get("sub_id"),
             target_sub_release_name=meta.get("release_name"),
             target_download_url=meta.get("download_url"),
@@ -331,8 +336,11 @@ class SyncOrchestrator:
                     await self._sync_cache.set(resolution_key, sub_bytes)
                 return sub_bytes
 
+            # "Relaxed" means the target name carries no edition signal, so the
+            # timeline gate must be tighter. An absent target_filename is the
+            # strongest form of that: it is never borrowed from the subtitle.
             relaxed = decision_kind == "edition" and not is_informative_release_name(
-                meta.get("target_filename") or meta.get("release_name")
+                meta.get("target_filename")
             )
             reference_partial = bool(getattr(resolved, "partial", False))
 
