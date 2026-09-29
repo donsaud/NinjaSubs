@@ -69,11 +69,94 @@ class VideoFailureReason(str, Enum):
     NO_VIDEO = "VIDEO_PROFILE_UNAVAILABLE"
     EXTRACTION_FAILED = "VIDEO_PROFILE_EXTRACTION_FAILED"
     NO_AUDIO_STREAM = "VIDEO_AUDIO_STREAM_MISSING"
+    AUDIO_STREAM_AMBIGUOUS = "AUDIO_STREAM_AMBIGUOUS"
     TOO_FEW_LANDMARKS = "VIDEO_EVIDENCE_INSUFFICIENT"
     DURATION_MISMATCH = "VIDEO_DURATION_MISMATCH"
     AUDIO_ACTIVITY_MISMATCH = "AUDIO_ACTIVITY_MISMATCH"
     SCENE_STRUCTURE_MISMATCH = "SCENE_STRUCTURE_MISMATCH"
     NONE = "VIDEO_EVIDENCE_NONE"
+
+
+class AudioStreamChoice(BaseModel):
+    """Which audio stream the timeline is read from, and why.
+
+    Real files carry commentary, description, alternate-language and SDH
+    tracks. Reading the wrong one produces landmarks for the wrong content, so
+    the choice is made from container metadata only, recorded explicitly, and
+    refused when it cannot be established.
+    """
+
+    index: int | None = None
+    reason: str = "unknown"
+    #: Disposition and tag signals that drove the decision, for diagnosis.
+    signals: list[str] = Field(default_factory=list)
+    ambiguous: bool = False
+
+
+#: Disposition/tags that identify a track as NOT the programme audio.
+_NON_PROGRAMME_HINTS = (
+    "commentary",
+    "description",
+    "sdh",
+    "hearing impaired",
+    "audio description",
+    "narration",
+    "alternate",
+)
+
+
+def select_audio_stream(streams: list[dict]) -> AudioStreamChoice:
+    """Pick the programme audio deterministically, or refuse to guess.
+
+    Uses only container metadata. No speech recognition, and no assumption that
+    the first track is the right one. When the choice cannot be established
+    confidently the result is ambiguous, and the caller abstains.
+    """
+    audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if not audio:
+        return AudioStreamChoice(reason="no_audio_stream", ambiguous=True)
+    if len(audio) == 1:
+        return AudioStreamChoice(index=0, reason="single_audio_stream")
+
+    signals: list[str] = []
+    # Container metadata first: the default disposition is the main track.
+    for position, stream in enumerate(audio):
+        disposition = stream.get("disposition") or {}
+        if disposition.get("default"):
+            signals.append(f"stream {position} has default disposition")
+            return AudioStreamChoice(
+                index=position, reason="default_disposition", signals=signals
+            )
+
+    # Otherwise exclude anything tagged as not-programme audio.
+    programme: list[int] = []
+    for position, stream in enumerate(audio):
+        tags = {
+            str(value).lower()
+            for value in (stream.get("tags") or {}).values()
+        }
+        label = tags | {
+            str(value).lower() for value in (stream.get("tags") or {}).keys()
+        }
+        if any(hint in tag for hint in _NON_PROGRAMME_HINTS for tag in label):
+            signals.append(f"stream {position} excluded: tagged {sorted(label)[:3]}")
+            continue
+        programme.append(position)
+
+    if len(programme) == 1:
+        return AudioStreamChoice(
+            index=programme[0],
+            reason="only_untagged_programme_stream",
+            signals=signals,
+        )
+    signals.append(
+        f"{len(programme)} plausible programme streams and no default disposition"
+    )
+    # Refusing is the correct outcome: an arbitrary pick would silently compare
+    # against the wrong audio.
+    return AudioStreamChoice(
+        reason="ambiguous", ambiguous=True, signals=signals
+    )
 
 
 class VideoTimelineProfile(BaseModel):
@@ -85,9 +168,19 @@ class VideoTimelineProfile(BaseModel):
     duration_ms: int | None = None
     audio_stream_count: int | None = None
     video_stream_count: int | None = None
-    #: Onset/offset times of coarse audio activity, in ms.
+    #: Which audio stream the landmarks were read from, and whether that
+    #: choice was confident. An ambiguous choice yields no landmarks at all.
+    selected_audio_stream: int | None = None
+    audio_stream_selection: str = "unknown"
+    audio_stream_ambiguous: bool = False
+    #: Container start time, in ms. Landmarks are normalised to be relative to
+    #: the programme start rather than the container start, because a file with
+    #: intro padding or a non-zero start_time would otherwise shift every
+    #: landmark and be mistaken for a different cut.
+    audio_start_time_ms: int = 0
+    #: Onset/offset times of coarse audio activity, in ms, programme-relative.
     audio_landmarks: list[int] = Field(default_factory=list)
-    #: Coarse scene-change times, in ms.
+    #: Coarse scene-change times, in ms, programme-relative.
     video_landmarks: list[int] = Field(default_factory=list)
     profile_version: int = VIDEO_PROFILE_VERSION
     #: Wall-clock cost of extraction, for the performance report.
@@ -126,6 +219,13 @@ class VideoTimelineEvidence(BaseModel):
     scene_landmark_count: int = 0
     reference_span_ms: int | None = None
     video_duration_ms: int | None = None
+    # Raw extraction context, recorded so a reader can see what the signal was
+    # actually built from rather than a single collapsed number.
+    audio_stream_count: int | None = None
+    selected_audio_stream: int | None = None
+    audio_stream_selection: str | None = None
+    audio_landmarks: list[int] = Field(default_factory=list)
+    scene_landmarks: list[int] = Field(default_factory=list)
     # The global shift that best explains the subtitle's structure, and how
     # well each half of the timeline agrees with it. A real match or a real
     # global offset keeps the halves consistent; a spliced edit does not.
@@ -234,7 +334,11 @@ def probe_container(path: Path, *, timeout: float) -> dict | None:
 
 
 def detect_audio_activity(
-    path: Path, *, duration_ms: int | None, timeout: float
+    path: Path,
+    *,
+    duration_ms: int | None,
+    timeout: float,
+    stream_index: int | None = None,
 ) -> list[int]:
     """Coarse activity boundaries via silencedetect.
 
@@ -243,6 +347,8 @@ def detect_audio_activity(
     which moves these boundaries; a global subtitle offset does not.
     """
     if not shutil.which("ffmpeg"):
+        return []
+    if stream_index is None:
         return []
     # A coarse activity floor keeps the cost bounded on long files. The
     # threshold is deliberately generous: only long silences count.
@@ -253,7 +359,7 @@ def detect_audio_activity(
         "-i",
         str(path),
         "-map",
-        "0:a:0?",
+        f"0:{stream_index}",
         "-af",
         f"silencedetect=noise=-45dB:d={MIN_SILENCE_MS / 1000:.3f}",
         "-f",
@@ -264,11 +370,7 @@ def detect_audio_activity(
         result = _run(command, timeout)
     except (OSError, subprocess.SubprocessError):
         return []
-    if duration_ms:
-        result.stdout = f"{result.stdout}\n{result.stderr or ''}"
-        text = result.stdout
-    else:
-        text = f"{result.stdout}\n{result.stderr or ''}"
+    text = f"{result.stdout}\n{result.stderr or ''}"
     landmarks: list[int] = []
     for line in text.splitlines():
         if "silence_start:" not in line and "silence_end:" not in line:
@@ -359,8 +461,6 @@ def extract_video_profile(
         return None
 
     streams = container.get("streams") or []
-    audio_count = sum(1 for s in streams if s.get("codec_type") == "audio")
-    video_count = sum(1 for s in streams if s.get("codec_type") == "video")
     fmt = container.get("format") or {}
     duration_ms: int | None = None
     raw_duration = fmt.get("duration")
@@ -370,22 +470,60 @@ def extract_video_profile(
         except (TypeError, ValueError):
             duration_ms = None
 
-    audio_landmarks = (
-        detect_audio_activity(media, duration_ms=duration_ms, timeout=timeout)
-        if audio_count
-        else []
-    )
-    video_landmarks = (
-        detect_scene_boundaries(media, duration_ms=duration_ms, timeout=timeout)
-        if (include_video_landmarks and video_count)
-        else []
-    )
+    # §12: a container start time is not a programme start time. Landmarks are
+    # normalised to be programme-relative, or a file with intro padding would
+    # look like a different cut.
+    start_ms = 0
+    for key in ("start_time",):
+        raw_start = fmt.get(key)
+        if raw_start not in (None, "N/A"):
+            try:
+                start_ms = int(float(raw_start) * 1000)
+            except (TypeError, ValueError):
+                start_ms = 0
+            break
+
+    choice = select_audio_stream(streams)
+    audio_count = sum(1 for s in streams if s.get("codec_type") == "audio")
+    video_count = sum(1 for s in streams if s.get("codec_type") == "video")
+
+    audio_landmarks: list[int] = []
+    video_landmarks: list[int] = []
+    if choice.index is not None and not choice.ambiguous:
+        stream = streams[choice.index] if choice.index < len(streams) else None
+        # Prefer the stream's own start time; fall back to the container's.
+        stream_start = start_ms
+        if stream is not None:
+            raw = (stream.get("start_time"))
+            if raw not in (None, "N/A"):
+                try:
+                    stream_start = int(float(raw) * 1000)
+                except (TypeError, ValueError):
+                    stream_start = start_ms
+        audio_landmarks = [
+            max(0, value - stream_start)
+            for value in detect_audio_activity(
+                media, duration_ms=duration_ms, timeout=timeout, stream_index=choice.index
+            )
+        ]
+        if include_video_landmarks and video_count:
+            video_landmarks = [
+                max(0, value - start_ms)
+                for value in detect_scene_boundaries(
+                    media, duration_ms=duration_ms, timeout=timeout
+                )
+            ]
+
     return VideoTimelineProfile(
         duration_ms=duration_ms,
         audio_stream_count=audio_count,
         video_stream_count=video_count,
-        audio_landmarks=audio_landmarks,
-        video_landmarks=video_landmarks,
+        selected_audio_stream=choice.index,
+        audio_stream_selection=choice.reason,
+        audio_stream_ambiguous=choice.ambiguous,
+        audio_start_time_ms=start_ms,
+        audio_landmarks=sorted(audio_landmarks),
+        video_landmarks=sorted(video_landmarks),
         extraction_ms=int((time.monotonic() - started) * 1000),
     )
 
@@ -534,6 +672,11 @@ def validate_timeline_against_reference(
         video_duration_ms=profile.duration_ms,
         audio_landmark_count=len(profile.audio_landmarks),
         scene_landmark_count=len(profile.video_landmarks),
+        audio_stream_count=profile.audio_stream_count,
+        selected_audio_stream=profile.selected_audio_stream,
+        audio_stream_selection=profile.audio_stream_selection,
+        audio_landmarks=list(profile.audio_landmarks),
+        scene_landmarks=list(profile.video_landmarks),
     )
     cue_starts = sorted({int(value) for value in reference_cue_starts if value >= 0})
     if cue_starts:
@@ -551,6 +694,16 @@ def validate_timeline_against_reference(
         evidence.verdict = VideoVerdict.INSUFFICIENT_EVIDENCE
         evidence.reason = VideoFailureReason.NO_AUDIO_STREAM
         evidence.detail.append("target has no audio stream to compare against")
+        return evidence
+    if profile.audio_stream_ambiguous:
+        # Several plausible programme tracks and no default disposition. Reading
+        # the wrong one would compare the subtitle against the wrong audio, so
+        # the correct outcome is to abstain rather than pick.
+        evidence.verdict = VideoVerdict.INSUFFICIENT_EVIDENCE
+        evidence.reason = VideoFailureReason.AUDIO_STREAM_AMBIGUOUS
+        evidence.detail.append(
+            "programme audio track not identifiable from container metadata"
+        )
         return evidence
 
     subtitle_landmarks = _activity_onsets_from_cues(cue_starts)

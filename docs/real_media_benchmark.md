@@ -139,3 +139,57 @@ Not this phase. It would need, at minimum:
 
 Until all three hold, the honest status is: detectable in principle, measured
 on synthetic and generated media, and unreachable on the request path.
+
+## What the hostile-audio stress run measured
+
+No real programme media was available to this repository, so the question "does
+the extractor hold up on real audio?" could not be answered with real audio.
+`tools/stress_audio_landmarks.py` attacks the extractor's actual assumptions
+with generated audio that reproduces the conditions real content creates, and
+records the result in `tests/fixtures/golden_sync/audio_stress_proxy.json`.
+That file is **proxy data** and is labelled as such in the artifact itself.
+
+The finding is uncomfortable and worth stating plainly:
+
+| scenario | landmarks found | boundaries expected | verdict |
+|---|---|---|---|
+| clean | 24 | 24 | stable |
+| uneven gain | 24 | 24 | stable |
+| rapid dialogue | 24 | 24 | stable |
+| long silences | 24 | 24 | stable |
+| transients / effects | 24 | 24 | stable |
+| **room ambience** | **0** | 24 | **structure lost** |
+| **crowd noise** | **0** | 24 | **structure lost** |
+| **music bed** | **0** | 24 | **structure lost** |
+
+**The `-45dB` floor in use recovers boundaries only from audio containing true
+digital silence.** Real programmes almost never contain it: there is always a
+room tone, an ambience bed, or music. So the signal's real-world reach is far
+narrower than the generated-media result suggested, and every case with a
+music bed or crowd scene will abstain.
+
+The failure is in the safe direction. Zero landmarks produces
+`VIDEO_EVIDENCE_INSUFFICIENT` and the validator abstains; it does not mismatch.
+That behaviour is pinned by tests.
+
+The amplitude-floor sensitivity curve shows the information is present and the
+threshold is what is wrong:
+
+| scenario | -45dB | -35dB | -30dB | -25dB | -20dB |
+|---|---|---|---|---|---|
+| ambience | 0 | 0 | 12 | 12 | 12 |
+| crowd | 0 | 0 | 12 | 12 | 12 |
+| music bed | 0 | 0 | 0 | 0 | 12 |
+| uneven gain | 12 | 12 | 12 | 11 | 8 |
+
+A higher floor recovers the structure everywhere. But no single floor serves all
+content: a music bed needs markedly more, and by -20dB the uneven-gain clip
+starts losing real boundaries (12 → 8) because quiet material is being called
+silence. A fixed dB value is therefore the wrong shape of parameter; a
+per-file adaptive floor would be the natural next step.
+
+**No threshold was changed.** This phase measures. Under the VAD decision gate
+this lands in category **B, solvable with better landmark extraction**, not
+category C. The timeline signal is not proven inadequate — it is proven to be
+misconfigured for real audio. That is a materially different conclusion, and it
+is not evidence for VAD.
