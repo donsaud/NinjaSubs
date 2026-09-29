@@ -22,11 +22,9 @@ from __future__ import annotations
 
 import urllib.parse
 
-import pytest
-
 from app.main import (
-    _merge_sync_meta,
     _media_context_from_request,
+    _merge_sync_meta,
     _subtitle_context_query,
 )
 from app.services.ranking import extract_stream_params

@@ -272,6 +272,7 @@ def classify_cut(
     structural: StructuralSimilarity | None,
     max_plausible_offset_ms: float,
     max_p95_ms: float,
+    max_drift_ms_per_minute: float,
 ) -> CutVerdict:
     """Separate a re-timable offset from a genuinely different cut.
 
@@ -279,7 +280,7 @@ def classify_cut(
     subtitle shares the cut, so the verdict needs the structural signal too:
 
     * a rigid shift with a matching structure is ``STABLE_OFFSET`` - re-timable;
-    * offsets that grow are ``DRIFT``;
+    * offsets that grow past the drift ceiling are ``DRIFT``;
     * a discontinuity with a structure that still lines up is ``PIECEWISE``
       (recap / edited scene) and stays usable;
     * an offset beyond the plausibility ceiling, or a structure that does not
@@ -298,11 +299,12 @@ def classify_cut(
             return CutVerdict.PIECEWISE
         return CutVerdict.DIFFERENT_CUT
 
-    if drift_ms_per_minute is not None and abs(drift_ms_per_minute) > 0:
-        # Drift dominates only when it is large relative to the offset itself;
-        # a constant shift produces a slope near zero.
-        if abs(drift_ms_per_minute) * 10.0 > magnitude:
-            return CutVerdict.DRIFT
+    # Drift is judged against the same ceiling the analyzer uses, so the two
+    # layers never disagree about whether a shift is progressive. Over a full
+    # episode even a modest slope accumulates into seconds, so this must not
+    # depend on the magnitude of the starting offset.
+    if drift_ms_per_minute is not None and abs(drift_ms_per_minute) > max_drift_ms_per_minute:
+        return CutVerdict.DRIFT
 
     if magnitude <= max_plausible_offset_ms:
         return CutVerdict.STABLE_OFFSET if structure_ok else CutVerdict.DIFFERENT_CUT

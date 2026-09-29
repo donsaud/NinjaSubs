@@ -189,7 +189,7 @@ def test_wrong_episode_is_rejected_by_content_filter_not_alignment():
     The alignment layer must not be responsible for content identity.
     """
     from app.models import SubtitleRelease
-    from app.services.subtitle_matcher import hard_compatibility_filter, extract_metadata
+    from app.services.subtitle_matcher import extract_metadata, hard_compatibility_filter
 
     target = extract_metadata("Dexter.S08E05.1080p.BluRay.x264-PiR8.mkv")
     wrong = extract_metadata("Dexter.S08E06.1080p.BluRay.x264-PiR8.mkv")

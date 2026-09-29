@@ -70,6 +70,12 @@ MAX_DRIFT_MS_PER_MINUTE = 120.0
 CHANGE_POINT_MS = 5000.0
 # Minimum number of aligned cues required before claiming any sync at all.
 MIN_CUES_FOR_VERIFICATION = 5
+# Minimum cue population before a *verified* claim. Measurement is possible
+# from 5 cues, but 5 cues cannot distinguish a real global re-timing from a
+# coincidence, so below this the ceiling is PROBABLE_SYNC. The false-positive
+# benchmark ("sparse_dialogue") is what sets this bar: 6 cues previously
+# produced a VERIFIED_SYNCED claim.
+MIN_CUES_FOR_VERIFIED = 12
 # Cue-count retention: fewer than this fraction of input cues surviving means
 # alass dropped real content, whatever its exit code.
 MIN_CUE_RETENTION = 0.80
@@ -422,8 +428,11 @@ class AlignmentAnalyzer:
         if not alass_applied:
             # No alignment ran. The only honest claim available is whether the
             # subtitle was *already* close to the reference.
-            return self._classify_without_alignment(
-                evaluation, target_cues, reference, target_fps, reference_fps, structural
+            return self._cap_by_evidence(
+                self._classify_without_alignment(
+                    evaluation, target_cues, reference, target_fps, reference_fps, structural
+                ),
+                len(target_cues),
             )
         if not alass_successful or not synced_cues:
             evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
@@ -443,9 +452,34 @@ class AlignmentAnalyzer:
             )
             return evaluation
 
-        return self._classify_alignment(
-            evaluation, target_cues, synced_cues, reference, structural
+        return self._cap_by_evidence(
+            self._classify_alignment(
+                evaluation, target_cues, synced_cues, reference, structural
+            ),
+            len(target_cues),
         )
+
+    def _cap_by_evidence(
+        self, evaluation: SubtitleEvaluation, cue_count: int
+    ) -> SubtitleEvaluation:
+        """Ceiling a verified claim by how much evidence actually existed.
+
+        Timings can measure cleanly from a handful of cues and still be a
+        coincidence rather than a real global re-timing. Below
+        ``MIN_CUES_FOR_VERIFIED`` the strongest defensible claim is
+        ``PROBABLE_SYNC``, however good the numbers look.
+        """
+        if (
+            cue_count < MIN_CUES_FOR_VERIFIED
+            and evaluation.sync_state
+            in (SyncState.VERIFIED_SYNCED, SyncState.VERIFIED_RESYNCED)
+        ):
+            evaluation.set_verdict(SyncState.PROBABLE_SYNC, evaluation.verification)
+            evaluation.reasons.append(
+                f"only {cue_count} cues, below the {MIN_CUES_FOR_VERIFIED} required for a "
+                "verified claim; capped at probable"
+            )
+        return evaluation
 
     def _measure(
         self, evaluation: SubtitleEvaluation, pairs: list[tuple[int, float]]
@@ -559,6 +593,7 @@ class AlignmentAnalyzer:
             structural=structural,
             max_plausible_offset_ms=MAX_PLAUSIBLE_OFFSET_MS,
             max_p95_ms=MAX_P95_MS_FOR_STABLE,
+            max_drift_ms_per_minute=MAX_DRIFT_MS_PER_MINUTE,
         )
         evaluation.cut_verdict = cut.value
         evaluation.reasons.append(f"cut classification: {cut.value}")
@@ -660,6 +695,7 @@ class AlignmentAnalyzer:
                 structural=structural,
                 max_plausible_offset_ms=MAX_PLAUSIBLE_OFFSET_MS,
                 max_p95_ms=MAX_P95_MS_FOR_STABLE,
+            max_drift_ms_per_minute=MAX_DRIFT_MS_PER_MINUTE,
             )
             evaluation.cut_verdict = cut.value
             evaluation.reasons.append(f"cut classification: {cut.value}")

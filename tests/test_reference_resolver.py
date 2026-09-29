@@ -1328,7 +1328,6 @@ def _mad_men_query():
 
 
 def test_reference_tier_webdl_beats_generic_bluray():
-    from app.services.sync.external_strategy import reference_tier
 
     webdl = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-BTN.srt")
     bluray = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt")
@@ -1340,7 +1339,6 @@ def test_reference_tier_webdl_beats_generic_bluray():
 
 
 def test_reference_tier_exact_group_beats_generic_english():
-    from app.services.sync.external_strategy import reference_tier
 
     wadu_es = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-WADU.srt", lang="spa")
     generic_en = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="eng")
@@ -1352,7 +1350,6 @@ def test_reference_tier_exact_group_beats_generic_english():
 
 
 def test_reference_tier_is_language_agnostic():
-    from app.services.sync.external_strategy import reference_tier
 
     en = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="eng")
     fr = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="fra")
