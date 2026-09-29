@@ -390,8 +390,20 @@ def test_sync_evidence_outranks_a_better_match_tier():
 
 
 def test_match_tier_still_decides_within_equal_sync_evidence():
-    hash_match = _with_sync("A.srt", None, None, match_tier=MatchTier.HASH, match_percentage=40)
-    fallback = _with_sync("B.srt", None, None, match_tier=MatchTier.FALLBACK, match_percentage=99)
+    """Content ordering defers to the matcher's own rank, not a second score.
+
+    ``sync_base_rank`` is where the matcher's MatchTier/confidence/score
+    ordering is captured. The comparator reads it rather than re-deriving the
+    hierarchy, so there is exactly one implementation of content order.
+    """
+    hash_match = _with_sync(
+        "A.srt", None, None, match_tier=MatchTier.HASH, match_percentage=40
+    )
+    hash_match.sync_base_rank = 0
+    fallback = _with_sync(
+        "B.srt", None, None, match_tier=MatchTier.FALLBACK, match_percentage=99
+    )
+    fallback.sync_base_rank = 1
     ordered = order_candidates([fallback, hash_match])
     assert ordered[0] is hash_match
 

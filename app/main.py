@@ -49,6 +49,8 @@ from app.services.sync.matching import (
     prefer_meaningful_release_name,
 )
 from app.services.sync.orchestrator import SyncOrchestrator
+from app.services.sync.ordering import order_candidates
+from app.services.sync.predictor import SyncPredictor
 from app.services.sync_cache import SyncCache
 from app.services.sync_service import SubtitleSyncService
 from app.utils.ass_converter import convert_ass_to_srt_bytes
@@ -627,6 +629,9 @@ async def _fetch_subtitles_handler(
     # verdict keeps sync_state=None, which sorts as UNVERIFIED rather than as
     # anything positive. The displayed match_percentage is untouched.
     verdict_enriched = 0
+    predictions_generated = 0
+    unknown_predictions = 0
+    cached_rejected = 0
     verdict_fingerprint = (
         _sync_cache.video_fingerprint_from_meta(
             {
@@ -642,7 +647,32 @@ async def _fetch_subtitles_handler(
         if has_fingerprint
         else None
     )
-    for rel in ranked_releases:
+    # Metadata the predictor is allowed to see. It never contains a subtitle
+    # release name, so a candidate's own name can never become target-video
+    # metadata here.
+    predictor_target_meta = {
+        "imdb_id": parsed.imdb_id,
+        "season": season,
+        "episode": episode,
+        "target_filename": target_filename,
+        "video_hash": video_hash,
+        "video_size": video_size,
+        "stream_url": stream_url,
+    }
+    predictor = SyncPredictor()
+
+    for position, rel in enumerate(ranked_releases):
+        # Capture the matcher's ordering before any sync-evidence re-sort, so
+        # content order keeps a single source of truth.
+        rel.sync_base_rank = position
+        rel_lang = str(getattr(rel, "lang", "") or "").lower()
+        # Explicit user language preference. This ranks ahead of every
+        # synchronization signal and is never reordered by one.
+        try:
+            rel.sync_lang_rank = prefs.languages.index(rel_lang)
+        except ValueError:
+            rel.sync_lang_rank = len(prefs.languages)
+
         rel_key = f"{rel.provider}:{rel.release_name}:{rel.download_url}"
         if season is not None:
             rel_key += f":s{season}"
@@ -657,9 +687,8 @@ async def _fetch_subtitles_handler(
             rel.status = "synced"
 
         # Reuse a previously MEASURED verdict for this exact video + candidate.
-        # No stored verdict leaves sync_state as None, which the comparator
-        # treats as UNVERIFIED - never as a positive claim. The displayed
-        # match_percentage is deliberately untouched.
+        # Cache dominates prediction: real evidence beats a metadata guess.
+        verdict = None
         if verdict_fingerprint:
             try:
                 verdict = await _sync_cache.get_verdict_by_ref(
@@ -667,20 +696,58 @@ async def _fetch_subtitles_handler(
                 )
             except Exception:
                 verdict = None
-            if verdict:
-                rel.sync_state = verdict.get("sync_state")
-                rel.sync_verification = "cached"
-                rel.sync_confidence = verdict.get("sync_confidence")
-                rel.sync_reasons = list(verdict.get("reasons") or [])
-                verdict_enriched += 1
+        if verdict:
+            rel.sync_state = verdict.get("sync_state")
+            rel.sync_verification = "cached"
+            rel.sync_confidence = verdict.get("sync_confidence")
+            rel.sync_reasons = list(verdict.get("reasons") or [])
+            verdict_enriched += 1
+            if rel.sync_state == "rejected":
+                cached_rejected += 1
+            continue
 
+        # Synchronization evidence is only meaningful for a language the user
+        # actually asked for. Predicting for every returned language would both
+        # waste work and let a non-requested language outrank a preferred one.
+        if rel.sync_lang_rank >= len(prefs.languages):
+            continue
+
+        # No measured evidence: predict from metadata only. This can never
+        # produce a VERIFIED_* state - the predictor has no code path to one.
+        prediction = predictor.predict(rel, predictor_target_meta)
+        predictions_generated += 1
+        if not prediction.is_actionable:
+            unknown_predictions += 1
+        rel.sync_state = prediction.predicted_state.value
+        rel.sync_verification = prediction.availability.value
+        rel.sync_confidence = prediction.confidence if prediction.is_actionable else None
+        rel.sync_reasons = list(prediction.reasons)
+
+    # Ordering: sync evidence first, then the matcher's own order. With no
+    # evidence anywhere, every key above is equal and the list is unchanged.
+    ranked_releases = order_candidates(ranked_releases)
+
+    logger.info(
+        "[sync-evidence] search_sync_cache_hits=%d predictions_generated=%d "
+        "unknown_predictions=%d cached_verified_candidates=%d "
+        "cached_rejected_candidates=%d alass_runs=0",
+        verdict_enriched,
+        predictions_generated,
+        unknown_predictions,
+        verdict_enriched - cached_rejected,
+        cached_rejected,
+    )
     if verdict_enriched:
-        logger.info(
-            "[sync-evidence] reused %d cached measured verdict(s) for %s; "
-            "displayed match_percentage unchanged",
-            verdict_enriched,
-            parsed.imdb_id,
-        )
+        for rel in ranked_releases:
+            if rel.sync_verification == "cached":
+                logger.info(
+                    "[subtitle-order] candidate=%s verification=%s sync_state=%s "
+                    "match_tier=%s reason=exact verified synchronization cache hit",
+                    rel.release_name[:80],
+                    rel.sync_verification,
+                    rel.sync_state,
+                    getattr(rel, "match_tier", None),
+                )
 
     base_url = get_base_url(request)
     subtitle_items: list[SubtitleItem] = []

@@ -111,6 +111,13 @@ class SubtitleRelease(BaseModel):
     sync_verification: str | None = None  # "verified" / "cached" / "predicted" / "unknown"
     sync_confidence: float | None = None
     sync_reasons: list[str] = Field(default_factory=list)
+    # Position assigned by the existing matcher, captured before any
+    # sync-evidence re-sort so content ordering has a single source of truth.
+    sync_base_rank: int | None = None
+    # Position of this candidate's language within the user's preferred list.
+    # User language preference is an explicit choice, so it outranks any
+    # synchronization evidence and is never overridden by it.
+    sync_lang_rank: int | None = None
 
     @model_validator(mode="after")
     def _sync_hash_flags(self):

@@ -23,6 +23,13 @@ Two deliberate refusals:
 * Synchronization state never overrides hard compatibility. A wrong episode is
   dropped upstream by ``hard_compatibility_filter``; nothing here can promote
   it.
+
+**The existing rank is reused, not recomputed.** Level 3 defers to the position
+the matcher already assigned, which is its own encoding of MatchTier ->
+confidence -> compatibility score -> tie-breakers. Re-deriving that here would
+create a second, divergent implementation of ordering that could disagree with
+the matcher. When no candidate carries synchronization evidence every level
+above is identical, so the output is byte-identical to the matcher's own order.
 """
 
 from __future__ import annotations
@@ -30,6 +37,8 @@ from __future__ import annotations
 from typing import Any
 
 from app.models import MatchTier
+from app.services.sync.alignment import VerificationAvailability
+from app.services.sync.predictor import CONFIDENCE_PREDICTION_FLOOR as PREDICTION_ACTION_FLOOR
 
 # Sync-state presentation order (lower sorts first). Mirrors SyncState.rank but
 # is declared here so ordering does not depend on enum import order.
@@ -68,6 +77,7 @@ def _availability_of(item: Any) -> str | None:
 
 
 def _tier_of(item: Any) -> int:
+    """Content tier, exposed for inspection; ordering defers to ``_base_rank``."""
     tier = getattr(item, "match_tier", None)
     if tier is None and isinstance(item, dict):
         tier = item.get("match_tier")
@@ -106,6 +116,25 @@ def _sync_confidence_of(item: Any) -> float:
     return -1.0
 
 
+def _base_rank(item: Any) -> int:
+    """Position assigned by the existing matcher, when recorded.
+
+    This is the canonical encoding of MatchTier -> confidence -> compatibility
+    score -> tie-breakers, so deferring to it keeps a single source of truth for
+    content ordering. Large default so unranked items sort after ranked ones.
+    """
+    for name in ("sync_base_rank", "base_rank"):
+        value = getattr(item, name, None)
+        if value is None and isinstance(item, dict):
+            value = item.get(name)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return 1_000_000
+
+
 def _identity(item: Any) -> tuple[str, str]:
     """Content-derived tie-breaker; independent of dict/provider ordering."""
     provider = getattr(item, "provider", None) or (
@@ -117,13 +146,54 @@ def _identity(item: Any) -> tuple[str, str]:
     return (str(provider or ""), str(name or ""))
 
 
-def comparison_key(item: Any) -> tuple:
-    """Full sort key. Exposed so the ordering is directly testable."""
+def _lang_rank(item: Any) -> int:
+    """Position of the candidate's language in the user's preferred list.
+
+    Language preference is an explicit user choice, not a heuristic, so it is
+    the leading key: no synchronization evidence may reorder languages.
+    """
+    value = getattr(item, "sync_lang_rank", None)
+    if value is None and isinstance(item, dict):
+        value = item.get("sync_lang_rank")
+    if value is not None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _normalized_evidence(item: Any) -> tuple[str | None, str | None]:
+    """Return ``(state, availability)`` after applying the prediction floor.
+
+    A ``PREDICTED`` claim below the action floor is demoted to
+    ``UNVERIFIED``/``UNKNOWN``. Enforcing this in the comparator rather than only
+    at the call site means a weak prediction cannot promote a candidate even if
+    a caller forgets to check it, so "prediction is evidence, never a claim"
+    holds structurally.
+    """
     state = _state_of(item)
+    availability = _availability_of(item)
+    if availability != VerificationAvailability.PREDICTED:
+        return state, availability
+    if _sync_confidence_of(item) < PREDICTION_ACTION_FLOOR:
+        return "unverified", "unknown"
+    return state, availability
+
+
+def comparison_key(item: Any) -> tuple:
+    """Full sort key. Exposed so the ordering is directly testable.
+
+    Precedence: user language preference, sync state, evidence availability,
+    the matcher's own rank, sync confidence, compatibility score, then stable
+    identity tie-breakers.
+    """
+    state, availability = _normalized_evidence(item)
     return (
+        _lang_rank(item),
         _STATE_ORDER.get(state, _STATE_ORDER[None]),
-        _AVAILABILITY_ORDER.get(_availability_of(item), _AVAILABILITY_ORDER[None]),
-        _tier_of(item),
+        _AVAILABILITY_ORDER.get(availability, _AVAILABILITY_ORDER[None]),
+        _base_rank(item),
         -_sync_confidence_of(item),
         -_score_of(item),
         *_identity(item),
@@ -133,8 +203,8 @@ def comparison_key(item: Any) -> tuple:
 def order_candidates(candidates: list[Any]) -> list[Any]:
     """Return candidates in deterministic presentation order.
 
-    The input is not mutated, and equal keys keep their input order, so two runs
-    over the same set always produce the same output.
+    The input is not mutated. ``sorted`` is stable, so candidates with equal
+    keys keep their input order, making repeated runs identical.
     """
     return sorted(candidates, key=comparison_key)
 
