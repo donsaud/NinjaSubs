@@ -227,6 +227,7 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
                             hearing_impaired=is_hi,
                             lang=norm_lang,
                             is_hash_match=is_hash_match,
+                            matched_by_hash=is_hash_match,
                             uploader=uploader,
                         )
                     )

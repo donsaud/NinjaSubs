@@ -726,3 +726,54 @@ async def test_orchestrator_logs_sync_cache_hit(monkeypatch, caplog):
     assert b"synced" in out
     assert orch2._external_strategy.calls == 0
     assert "cache HIT for sub=sub123" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_reference_selection_prefers_hash_matched_english(tmp_path):
+    """A MovieHash-matched English reference beats high-scoring text-only candidates."""
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy, score_candidate
+
+    class _Provider:
+        def __init__(self, releases):
+            self._releases = releases
+            self.downloaded: list[str] = []
+
+        async def search_subtitles(self, **kwargs):
+            return list(self._releases)
+
+        async def download_archive(self, url, api_key=None):
+            self.downloaded.append(url)
+            return BIG_REF
+
+    target = (
+        "Mad.Men.S01E02.Ladies.Room.REPACK.2160p.HMAX.WEB-DL.DDP5.1.DV.HDR.H.265-WADU.mkv"
+    )
+    text_only = SubtitleRelease(
+        release_name="Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-WADU.srt",
+        download_url="http://text", provider="subdl", lang="eng",
+    )
+    assert score_candidate(target, text_only) >= 100  # strong filename match, no hash
+    hashed = SubtitleRelease(
+        release_name="Mad.Men.S01E02.720p.HDTV.x264-Scene.srt",
+        download_url="http://hash", provider="opensubtitles", lang="eng",
+        matched_by_hash=True,
+    )
+    subdl = _Provider([text_only])
+    opensubtitles = _Provider([hashed])
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=None,
+        opensubtitles_provider=opensubtitles,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        timeout=1.0,
+    )
+    query = ReferenceQuery(
+        imdb_id="tt0804503", media_type="series", season=1, episode=2, target_filename=target
+    )
+    resolved = await strategy.resolve_with_provenance(query)
+    assert resolved.text is not None
+    assert resolved.kind == "hash"
+    assert opensubtitles.downloaded == ["http://hash"]
+    assert subdl.downloaded == []

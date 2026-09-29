@@ -17,7 +17,7 @@ and performance across realistic media release and subtitle combinations:
 - Section L: 50+ Candidate Performance Benchmark
 """
 
-from app.models import SubtitleRelease
+from app.models import MatchTier, SubtitleRelease
 from app.services.subtitle_matcher import (
     calculate_compatibility,
     determine_fps_relation,
@@ -1039,3 +1039,85 @@ def test_top_ranked_candidate_is_content_synchronized():
     assert validate_cue_sanity(bad, reference, same_family=True)["ok"] is False
     assert abs(median_cue_offset(good, reference) or 0) < 0.2
     assert abs(median_cue_offset(bad, reference) or 0) >= 0.2
+
+
+# --------------------------------------------------------------------------- #
+# O. MOVIEHASH ELEVATION: matched_by_hash flag, 100% rank, player labels
+# --------------------------------------------------------------------------- #
+def test_matched_by_hash_flag_takes_precedence_over_filename_match():
+    """An explicit matched_by_hash candidate outranks a 100% filename match."""
+    target = "Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.mkv"
+    filename_star = SubtitleRelease(
+        release_name="Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.srt",
+        download_url="http://1",
+        provider="subdl",
+        lang="eng",
+    )
+    assert rank_subtitles(target, [filename_star])[0].match_percentage == 100
+    hashed = SubtitleRelease(
+        release_name="Totally.Unrelated.Title.srt",
+        download_url="http://2",
+        provider="opensubtitles",
+        lang="eng",
+        matched_by_hash=True,
+    )
+    assert hashed.is_hash_match is True  # validator keeps the flags in sync
+
+    ranked = rank_subtitles(target, [filename_star, hashed])
+    assert ranked[0].release_name == hashed.release_name
+    assert ranked[0].match_percentage == 100
+    assert ranked[0].match_tier == MatchTier.HASH
+
+
+def test_synced_status_ranks_second_after_hash():
+    """A previously-synced artifact outranks filename matches but not a hash."""
+    target = "Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.mkv"
+
+    def _rel(name, **kwargs):
+        url = "http://x/" + "".join(ch for ch in name if ch.isalnum())
+        return SubtitleRelease(
+            release_name=name, download_url=url, provider="subdl", lang="eng", **kwargs
+        )
+
+    filename_star = _rel("Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.srt")
+    synced = _rel("Mad.Men.S01E02.720p.HDTV.x264-Other.srt", status="synced")
+    hashed = _rel("Something.Else.Entirely.srt", matched_by_hash=True)
+    ranked = rank_subtitles(target, [filename_star, synced, hashed])
+    assert [s.release_name for s in ranked] == [
+        hashed.release_name,
+        synced.release_name,
+        filename_star.release_name,
+    ]
+
+
+def test_exact_hash_and_synced_player_labels():
+    """Player labels surface ⚡ Exact Hash and ⚡ Synced states."""
+    from app.services.aggregator import format_informative_badge
+
+    hashed = SubtitleRelease(
+        release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
+        download_url="http://1",
+        provider="opensubtitles",
+        lang="eng",
+        matched_by_hash=True,
+    )
+    assert format_informative_badge(hashed, 100) == "[100%] ⚡ Exact Hash · FLUX"
+
+    synced = SubtitleRelease(
+        release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
+        download_url="http://2",
+        provider="subdl",
+        lang="ara",
+        match_percentage=100,
+        status="synced",
+    )
+    assert format_informative_badge(synced, 100) == "[100%] ⚡ Synced · FLUX"
+
+    plain = SubtitleRelease(
+        release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
+        download_url="http://3",
+        provider="subdl",
+        lang="ara",
+        match_percentage=100,
+    )
+    assert format_informative_badge(plain, 100) == "[100%] [SubDL] Movie.2024.1080p.BluRay.x264-FLUX"

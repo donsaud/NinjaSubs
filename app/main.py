@@ -580,6 +580,31 @@ async def _fetch_subtitles_handler(
         use_cache=not bypass_cache,
     )
 
+    # Surface previously-synced artifacts: any release that already has a synced
+    # payload cached for this stream is marked `status="synced"`, then stably
+    # re-sorted so hash matches stay first and synced items come second.
+    for rel in ranked_releases:
+        rel_key = f"{rel.provider}:{rel.release_name}:{rel.download_url}"
+        if season is not None:
+            rel_key += f":s{season}"
+        if episode is not None:
+            rel_key += f":e{episode}"
+        rel_sub_id = hashlib.sha256(rel_key.encode("utf-8")).hexdigest()[:16]
+        try:
+            synced_blob = await _sync_cache.find_synced_for(parsed.imdb_id, rel_sub_id)
+        except Exception:
+            synced_blob = None
+        if synced_blob is not None:
+            rel.status = "synced"
+    ranked_releases.sort(
+        key=lambda r: (
+            0
+            if (getattr(r, "matched_by_hash", False) or getattr(r, "is_hash_match", False))
+            else 1,
+            0 if getattr(r, "status", "") == "synced" else 1,
+        )
+    )
+
     base_url = get_base_url(request)
     subtitle_items: list[SubtitleItem] = []
 

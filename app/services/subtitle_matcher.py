@@ -1534,10 +1534,15 @@ def calculate_compatibility(
     2. Tier 1 to 4: Stage 1 Hard Exclusion Filter -> Stage 2 Soft Scoring.
     """
     if hasattr(sub_meta, "release_name") and hasattr(sub_meta, "is_hash_match"):
-        is_hash_match = is_hash_match or bool(getattr(sub_meta, "is_hash_match", False))
+        is_hash_match = is_hash_match or bool(
+            getattr(sub_meta, "is_hash_match", False)
+            or getattr(sub_meta, "matched_by_hash", False)
+        )
         s_meta = extract_metadata(sub_meta.release_name)
     elif isinstance(sub_meta, dict):
-        is_hash_match = is_hash_match or bool(sub_meta.get("is_hash_match", False))
+        is_hash_match = is_hash_match or bool(
+            sub_meta.get("is_hash_match", False) or sub_meta.get("matched_by_hash", False)
+        )
         if "title" not in sub_meta and "release_name" in sub_meta:
             s_meta = extract_metadata(sub_meta["release_name"])
         elif "title" not in sub_meta and isinstance(sub_meta.get("name"), str):
@@ -2097,7 +2102,11 @@ def deduplicate_subtitles(subtitles: list[SubtitleRelease]) -> list[SubtitleRele
     result: list[SubtitleRelease] = []
 
     def _get_quality_tuple(s: SubtitleRelease) -> tuple[int, int, int]:
-        is_hash = 1 if getattr(s, "is_hash_match", False) else 0
+        is_hash = (
+            1
+            if (getattr(s, "is_hash_match", False) or getattr(s, "matched_by_hash", False))
+            else 0
+        )
         score_val = getattr(s, "score", 0) or 0
         name_len = len(getattr(s, "release_name", "") or "")
         return (is_hash, score_val, name_len)
@@ -2230,7 +2239,9 @@ def rank_subtitles(
         )
         is_hash = bool(
             getattr(sub, "is_hash_match", False)
+            or getattr(sub, "matched_by_hash", False)
             or (sub.get("is_hash_match", False) if isinstance(sub, dict) else False)
+            or (sub.get("matched_by_hash", False) if isinstance(sub, dict) else False)
         )
 
         if target_meta:
@@ -2302,7 +2313,27 @@ def rank_subtitles(
         accepted = getattr(compat, "accepted", True) if compat else (getattr(s, "score", 0) > -500)
         acc_idx = 0 if accepted else 1
 
-        is_h = 0 if (getattr(s, "is_hash_match", False) or (compat and compat.is_hash_match)) else 1
+        is_h = (
+            0
+            if (
+                getattr(s, "is_hash_match", False)
+                or getattr(s, "matched_by_hash", False)
+                or (compat and compat.is_hash_match)
+            )
+            else 1
+        )
+        syn_idx = (
+            0
+            if (
+                (getattr(s, "status", "") or "")
+                == "synced"
+                or (
+                    isinstance(s, dict)
+                    and str(s.get("status", "") or "") == "synced"
+                )
+            )
+            else 1
+        )
 
         sc = getattr(s, "score", None) if not isinstance(s, dict) else s.get("score", 0)
         sc_val = sc if sc is not None else 0
@@ -2336,6 +2367,7 @@ def rank_subtitles(
             l_idx,
             acc_idx,
             is_h,
+            syn_idx,
             -pct_val,
             -sc_val,
             hi_rank,

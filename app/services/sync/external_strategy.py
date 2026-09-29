@@ -58,6 +58,7 @@ _REFERENCE_LANGUAGES = ("en", "ar")
 
 # Weighted-scoring weights for candidate reference selection. The goal is to pick
 # the reference whose release quality matches the playing video file.
+_HASH_MATCH_BONUS = 500  # byte-exact OpenSubtitles MovieHash: undisputed ground truth
 _GROUP_SCORE = 50  # exact release group
 _SOURCE_SCORE = 30  # shared source family (web-dl/web, bluray/remux)
 _PLATFORM_SCORE = 20  # identical streaming service (HMAX/ATVP/NF/AMZN/DSNP)
@@ -218,7 +219,9 @@ def _platform_tags(name: str | None) -> frozenset[str]:
 def score_candidate(target_name: str | None, release) -> int:
     """Weighted score for one candidate reference against the target video.
 
-    Weights: exact release group ``+50``, matching source family ``+30``,
+    A byte-exact MovieHash match earns an overwhelming ``+500`` bonus and always
+    wins. Otherwise weights: exact release group ``+50``, matching source family
+    ``+30``,
     identical streaming service ``+20`` (else same streaming family ``+10``),
     resolution ``+10`` (or ``+5`` for a 1080p neighbour of a 4K target), codec
     ``+5``, episode single ``+10`` (season pack ``-10``), language priority
@@ -228,6 +231,9 @@ def score_candidate(target_name: str | None, release) -> int:
     if not cand_name:
         return 0
     score = 0
+
+    if getattr(release, "is_hash_match", False) or getattr(release, "matched_by_hash", False):
+        score += _HASH_MATCH_BONUS
 
     target_group = (_release_group(target_name) or "").lower()
     if target_group:
@@ -660,7 +666,11 @@ class ExternalExactStrategy:
         """Download and decode the selected candidate (at most one file)."""
         best_name = getattr(best, "release_name", "?")
         api_key = self._provider_api_key(provider, query)
-        decision_kind = "hash" if getattr(best, "is_hash_match", False) else "edition"
+        decision_kind = (
+            "hash"
+            if (getattr(best, "is_hash_match", False) or getattr(best, "matched_by_hash", False))
+            else "edition"
+        )
         logger.info(
             "[reference] downloading reference %r (score=%d, lang=%s) via %s (kind=%s)",
             best_name,

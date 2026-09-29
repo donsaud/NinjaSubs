@@ -174,6 +174,41 @@ class SyncCache:
                 logger.debug("[sync-cache] redis clear_failed failed: %s", exc)
         self._local_fail.pop(fail_key, None)
 
+    async def find_synced_for(self, imdb_id: str, sub_id: str) -> bytes | None:
+        """Return a synced artifact for this subtitle, if one was cached.
+
+        Matches ``final_sub:{imdb}:...:{sub_id}:...`` keys so the listing path
+        can surface previously-synced subtitles. Best-effort: scans the
+        in-process cache and, when connected, Redis.
+        """
+        imdb = (imdb_id or "").strip()
+        sid = (sub_id or "").strip()
+        if not imdb or not sid:
+            return None
+        prefix = f"final_sub:{imdb}:"
+        needle = f":{sid}:"
+        for key in list(self._local.keys()):
+            if key.startswith(prefix) and needle in key:
+                value = self._local.get(key)
+                if value:
+                    return value
+        if self._redis is not None:
+            try:
+                cursor: int = 0
+                while True:
+                    cursor, keys = await self._redis.scan(cursor, match=f"{prefix}*", count=200)
+                    for key in keys:
+                        text = key.decode() if isinstance(key, bytes) else str(key)
+                        if needle in text:
+                            value = await self._redis.get(text)
+                            if value:
+                                return value if isinstance(value, bytes) else str(value).encode()
+                    if not cursor:
+                        break
+            except Exception as exc:  # pragma: no cover - environment dependent
+                logger.debug("[sync-cache] find_synced_for scan failed: %s", exc)
+        return None
+
     async def close(self) -> None:
         if self._redis is not None:
             try:

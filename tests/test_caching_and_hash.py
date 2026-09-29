@@ -837,9 +837,8 @@ def test_stremio_endpoint_hash_short_circuit_e2e(client):
         items = data["subtitles"]
         assert len(items) == 2
 
-        # Candidate #1: The verified hash match
-        assert "[100%] [OpenSubtitles]" in items[0]["title"]
-        assert "Gladiator.Arabic.Subtitles" in items[0]["title"]
+        # Candidate #1: The verified hash match carries the Exact Hash label
+        assert items[0]["title"] == "[100%] ⚡ Exact Hash"
 
         # Candidate #2: The text-matched release
         assert "[OpenSubtitles]" not in items[1]["title"]

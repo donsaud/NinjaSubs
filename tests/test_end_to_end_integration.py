@@ -443,8 +443,8 @@ async def test_e2e_exact_hash_priority_over_filename_match(client):
             subtitles = resp.json()["subtitles"]
             assert len(subtitles) == 2
 
-            # Hash match must be rank 1 (index 0)
-            assert subtitles[0]["title"] == "[100%] [OpenSubtitles] Movie.Different.Filename"
+            # Hash match must be rank 1 (index 0) with the Exact Hash label
+            assert subtitles[0]["title"] == "[100%] ⚡ Exact Hash"
             assert get_release_name(subtitles[0]) == "Movie.Different.Filename.srt"
             assert subtitles[1]["title"] == "[100%] [SubDL] Movie.2024.1080p.BluRay.x264-FLUX"
             assert get_release_name(subtitles[1]) == "Movie.2024.1080p.BluRay.x264-FLUX.srt"

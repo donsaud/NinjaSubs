@@ -25,6 +25,7 @@ from app.services.cache import (
     set_cached_subtitles,
 )
 from app.services.subtitle_matcher import rank_subtitles
+from app.services.sync.matching import _release_group, _source_kind
 from app.utils.language import normalize_to_iso639_2
 
 logger = logging.getLogger("uvicorn.error")
@@ -159,6 +160,19 @@ def format_informative_badge(
         source_provider = "SubDL"
 
     raw_filename = getattr(release, "release_name", "") or ""
+
+    # Special informative tags take precedence over the configurable badge:
+    # a byte-exact MovieHash match, or a previously-synced artifact, is the
+    # most trustworthy entry in the list and must be instantly recognizable.
+    if getattr(release, "matched_by_hash", False) or getattr(release, "is_hash_match", False):
+        tag = _release_group(raw_filename) or _source_kind(raw_filename) or ""
+        label = "[100%] ⚡ Exact Hash" + (f" · {tag}" if tag else "")
+        return clean_final_label(label)
+    if str(getattr(release, "status", "") or "") == "synced":
+        tag = _release_group(raw_filename) or ""
+        label = "[100%] ⚡ Synced" + (f" · {tag}" if tag else "")
+        return clean_final_label(label)
+
     clean_filename = clean_subtitle_display_name(raw_filename)
     clean_name = re.sub(r"_[a-fA-F0-9]{8,32}$", "", clean_filename)
     clean_name = clean_final_label(clean_name)

@@ -3,7 +3,7 @@
 from enum import IntEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class MatchTier(IntEnum):
@@ -96,9 +96,19 @@ class SubtitleRelease(BaseModel):
     score: int = 0
     match_percentage: int = 0
     is_hash_match: bool = False
+    matched_by_hash: bool = False  # explicit OpenSubtitles MovieHash flag (synced with is_hash_match)
+    status: str = ""  # e.g. "synced" when a synced artifact exists for the current stream
     match_tier: MatchTier | None = None
     compatibility: Any | None = None
     uploader: str = ""  # Subtitle uploader/author username, when provided upstream
+
+    @model_validator(mode="after")
+    def _sync_hash_flags(self):
+        """Keep the two MovieHash flags consistent (either implies the other)."""
+        if self.matched_by_hash or self.is_hash_match:
+            self.matched_by_hash = True
+            self.is_hash_match = True
+        return self
 
 
 # Subtitle badge components, in canonical display order.
