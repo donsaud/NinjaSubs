@@ -221,6 +221,58 @@ class SyncCache:
                 logger.debug("[sync-cache] find_synced_for scan failed: %s", exc)
         return None
 
+    async def find_synced_for_target(
+        self, imdb_id: str, season_ep: str, fingerprint: str, sub_id: str
+    ) -> bytes | None:
+        """Return a cached synced payload bound to this exact target identity.
+
+        ``find_synced_for`` matches on ``:{sub_id}:`` alone, so it will happily
+        return an artifact that was synchronized against a *different* video
+        whenever the same subtitle id exists for two targets. That is precisely
+        the false-positive this cache must not produce, so the fallback path
+        uses this stricter variant instead, which requires the key's own
+        fingerprint segment to equal the current one.
+
+        This adds no alias and widens nothing. It narrows the existing key
+        namespace to the one target the caller actually asked about, and it
+        requires the caller to have already proven a VERIFIED verdict for that
+        exact pair.
+
+        The remaining key components (decision kind, content hash) are unknown
+        before the subtitle bytes are fetched, so the match is on the prefix
+        rather than a fully reconstructed key. The prefix still pins imdb,
+        season/episode, video fingerprint and subtitle identity.
+        """
+        imdb = (imdb_id or "").strip()
+        sid = (sub_id or "").strip()
+        fp = (fingerprint or "").strip()
+        if not imdb or not sid or not fp:
+            return None
+        prefix = f"final_sub:{imdb}:{season_ep}:{fp}:{sid}"
+        head = f"{prefix}:"
+        for key in list(self._local.keys()):
+            if key == prefix or key.startswith(head):
+                value = self._local.get(key)
+                if value:
+                    return value
+        if self._redis is not None:
+            try:
+                cursor: int = 0
+                while True:
+                    cursor, keys = await self._redis.scan(cursor, match=f"{prefix}*", count=200)
+                    for key in keys:
+                        text = key.decode() if isinstance(key, bytes) else str(key)
+                        if text != prefix and not text.startswith(head):
+                            continue
+                        value = await self._redis.get(text)
+                        if value:
+                            return value if isinstance(value, bytes) else str(value).encode()
+                    if not cursor:
+                        break
+            except Exception as exc:  # pragma: no cover - environment dependent
+                logger.debug("[sync-cache] find_synced_for_target scan failed: %s", exc)
+        return None
+
     # ------------------------------------------------------------------ #
     # Measured synchronization verdicts
     # ------------------------------------------------------------------ #

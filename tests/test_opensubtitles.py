@@ -734,10 +734,19 @@ def test_exact_fallback_release_matching():
 
 
 @pytest.mark.asyncio
-async def test_subsource_fallback_refuses_generic_release():
+async def test_subsource_fallback_uses_weak_compatible_candidate_when_not_exact():
+    """No exact release is a reason to keep looking, not a reason to fail.
+
+    Previously a SubSource season pack was refused outright whenever it was not
+    the exact requested release name, so a candidate that the target's
+    compatibility engine accepts was never even downloaded, let alone tried.
+    Eligibility now stops at ``hard_compatibility_filter``; deciding whether it
+    is actually synchronizable is the pipeline's job, not the provider's.
+    """
     from app.main import _fallback_download_subsource
 
     requested_name = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
+    pack_srt = b"1\n00:00:01,000 --> 00:00:04,000\nPack candidate\n"
     download_calls: list[str] = []
 
     class _GenericSubsource:
@@ -754,9 +763,10 @@ async def test_subsource_fallback_refuses_generic_release():
 
         async def download_archive(self, download_ref, api_key=None):
             download_calls.append(download_ref)
-            raise AssertionError("generic fallback must not be downloaded")
+            return pack_srt
 
     meta: dict = {"release_name": requested_name, "uploader": "Ahmed"}
+    outcome: dict = {}
     with patch("app.main.SubsourceProvider", new=lambda client: _GenericSubsource()):
         result = await _fallback_download_subsource(
             imdb_id="tt0141842",
@@ -771,10 +781,64 @@ async def test_subsource_fallback_refuses_generic_release():
             requested_uploader="Ahmed",
             requested_hearing_impaired=False,
             meta=meta,
+            outcome=outcome,
+        )
+    assert result == pack_srt
+    assert download_calls == ["https://subsource.test/generic.zip"]
+    # The two facts are reported separately: no exact release, but one
+    # target-compatible candidate.
+    assert outcome["exact_candidates"] == 0
+    assert outcome["compatible_candidates"] == 1
+    assert outcome["category"] == "NO_EXACT_RELEASE"
+
+
+@pytest.mark.asyncio
+async def test_subsource_fallback_refuses_wrong_episode_release():
+    """Eligibility still ends at the hard filter: a wrong episode is refused."""
+    from app.main import _fallback_download_subsource
+
+    requested_name = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
+    download_calls: list[str] = []
+
+    class _WrongEpisode:
+        async def search_subtitles(self, **kwargs):
+            return [
+                SubtitleRelease(
+                    release_name="Sopranos.S01E09.1080p.WEB-DL.DD5.1.H.264-BS.srt",
+                    download_url="https://subsource.test/wrong.zip",
+                    provider="subsource",
+                    lang="ara",
+                    uploader="Ahmed",
+                )
+            ]
+
+        async def download_archive(self, download_ref, api_key=None):
+            download_calls.append(download_ref)
+            raise AssertionError("a wrong-episode candidate must never be downloaded")
+
+    meta: dict = {"release_name": requested_name, "uploader": "Ahmed"}
+    outcome: dict = {}
+    with patch("app.main.SubsourceProvider", new=lambda client: _WrongEpisode()):
+        result = await _fallback_download_subsource(
+            imdb_id="tt0141842",
+            media_type="series",
+            season=1,
+            episode=3,
+            subsource_key="test_subsource_key",
+            target_filename=requested_name,
+            lang="ara",
+            client=object(),
+            requested_release_name=requested_name,
+            requested_uploader="Ahmed",
+            requested_hearing_impaired=False,
+            meta=meta,
+            outcome=outcome,
         )
     assert result is None
     assert download_calls == []
-    assert "fallback_download_url" not in meta
+    assert outcome["category"] == "NO_COMPATIBLE_CANDIDATE"
+    assert outcome["exact_candidates"] == 0
+    assert outcome["compatible_candidates"] == 0
 
 
 @pytest.mark.asyncio

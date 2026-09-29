@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1139,6 +1140,221 @@ def _is_exact_fallback_release(
     return True
 
 
+def _classify_fallback_release(
+    base_name: str | None,
+    release: Any,
+    target_meta: dict[str, Any] | None,
+) -> tuple[str, int]:
+    """Classify a fallback candidate for ELIGIBILITY, reusing MatchTier.
+
+    Returns ``(class_name, band)``. This is not a second ranking ladder: the
+    compatibility engine and the v3 identity bands already define what matches
+    the target, so the classes are a readable label over that result.
+
+        EXACT_RELEASE        same sanitized release name as requested
+        SAME_RELEASE_FAMILY  HASH / EXACT against the base identity
+        COMPATIBLE_RELEASE   SOURCE_FAMILY against the base identity
+        WEAK_COMPATIBLE      CLOSE / FALLBACK, not hard-rejected
+        INCOMPATIBLE         rejected by hard_compatibility_filter
+
+    "not exact" and "not compatible" are different facts, and conflating them
+    is what made an absent exact release a terminal failure.
+    """
+    from app.models import MatchTier
+    from app.services.subtitle_matcher import (
+        calculate_compatibility,
+        hard_compatibility_filter,
+    )
+
+    if not base_name:
+        return "INCOMPATIBLE", 3
+    try:
+        base_meta = target_meta if target_meta is not None else extract_metadata(base_name)
+        cand_meta = extract_metadata(_candidate_release_name(release) or "")
+    except Exception:  # pragma: no cover - a malformed name is not fatal
+        return "INCOMPATIBLE", 3
+    if not base_meta or not cand_meta:
+        return "INCOMPATIBLE", 3
+
+    accepted, _reason, _method = hard_compatibility_filter(base_meta, cand_meta)
+    if not accepted:
+        return "INCOMPATIBLE", 3
+
+    compatibility = calculate_compatibility(base_meta, _candidate_release_name(release) or "")
+    band = {
+        MatchTier.HASH: 0,
+        MatchTier.EXACT: 1,
+        MatchTier.SOURCE_FAMILY: 2,
+        MatchTier.CLOSE: 3,
+        MatchTier.FALLBACK: 3,
+    }.get(compatibility.match_tier, 3)
+    if band <= 1:
+        return "SAME_RELEASE_FAMILY", band
+    if band == 2:
+        return "COMPATIBLE_RELEASE", band
+    return "WEAK_COMPATIBLE", band
+
+
+#: SubSource search results, keyed on the full query identity. A SubSource
+#: series search costs five pages of 100 rows; repeating it seconds later for
+#: the identical query is pure waste. Entries are only ever the *candidate
+#: list*, so "no exact match" and "no compatible candidate" stay separately
+#: derivable from the same cached fact and are never conflated.
+_FALLBACK_SEARCH_CACHE: dict[tuple[Any, ...], tuple[float, list[Any]]] = {}
+_FALLBACK_SEARCH_TTL_SECONDS = 60.0
+_FALLBACK_SEARCH_CACHE_MAX = 32
+
+
+def _fallback_search_key(
+    imdb_id: str,
+    is_series: bool,
+    season: int | None,
+    episode: int | None,
+    lang: str,
+    target_filename: str | None,
+) -> tuple[Any, ...]:
+    return (
+        "subsource",
+        imdb_id,
+        bool(is_series),
+        season,
+        episode,
+        (lang or "").lower(),
+        (target_filename or "").lower(),
+    )
+
+
+def _fallback_candidate_ref(
+    release: Any, provider: str, season: int | None, episode: int | None
+) -> str:
+    """Recompute the search-time subtitle id for a provider candidate.
+
+    Identical to the listing path's ``rel_sub_id`` derivation, which is the same
+    value the client echoes back as ``target_id`` and the same value the serve
+    path keys its verdict alias by. If this ever drifts, the verdict lookup
+    simply misses; it cannot produce a wrong hit.
+    """
+    rel_key = f"{provider}:{_candidate_release_name(release) or ''}:{getattr(release, 'download_url', '') or ''}"
+    if season is not None:
+        rel_key += f":s{season}"
+    if episode is not None:
+        rel_key += f":e{episode}"
+    return hashlib.sha256(rel_key.encode("utf-8")).hexdigest()[:16]
+
+
+async def _reusable_verified_fallback_sync(
+    *,
+    release: Any,
+    imdb_id: str,
+    season: int | None,
+    episode: int | None,
+    lang: str,
+    target_filename: str | None,
+) -> bytes | None:
+    """Reuse an already-verified synchronization for this exact candidate.
+
+    Asked BEFORE the fallback archive is downloaded, so a repeat request costs
+    no provider download and no alass run.
+
+    Everything here is an existing mechanism. The verdict alias exists for
+    exactly this moment -- the listing path already uses it to show "⚡ Synced"
+    before the bytes are fetched -- and the payload lookup reuses the
+    ``final_sub:`` namespace with the video fingerprint pinned.
+
+    Deliberately conservative, because a wrong hit is a wrong subtitle:
+
+    * no video fingerprint means no lookup; a verdict is never keyed to a guess
+    * the verdict must be a verified positive; a cached REJECTED/UNVERIFIED is
+      evidence to *not* serve, never a payload to return
+    * language must match, because the alias key does not carry language
+    * engine version is validated inside ``get_verdict``
+    """
+    from app.services.sync.alignment import SyncState
+
+    fingerprint_meta = {
+        "imdb_id": imdb_id,
+        "season": season,
+        "episode": episode,
+        "target_filename": target_filename,
+    }
+    from app.services.sync.matching import has_video_fingerprint
+
+    if not has_video_fingerprint(fingerprint_meta):
+        logger.info("[fallback-cache] result=miss reason=no_video_fingerprint")
+        return None
+
+    from app.services.sync_cache import SyncCache
+
+    fingerprint = SyncCache.video_fingerprint_from_meta(fingerprint_meta)
+    if not fingerprint:
+        logger.info("[fallback-cache] result=miss reason=no_video_fingerprint")
+        return None
+
+    ref = _fallback_candidate_ref(
+        release, str(getattr(release, "provider", "") or "subsource"), season, episode
+    )
+    try:
+        verdict = await _sync_cache.get_verdict_by_ref(fingerprint, ref)
+    except Exception as exc:  # pragma: no cover - cache must not break the request
+        logger.debug("[fallback-cache] verdict lookup failed: %s", exc)
+        return None
+    if not verdict:
+        logger.info(
+            "[fallback-cache] candidate=%s result=miss download_required=true", ref
+        )
+        return None
+
+    state = str(verdict.get("sync_state") or "")
+    if state not in (SyncState.VERIFIED_SYNCED.value, SyncState.VERIFIED_RESYNCED.value):
+        # §5: a negative or unverified cached verdict is never a payload.
+        logger.info(
+            "[fallback-cache] candidate=%s result=miss sync_state=%s "
+            "reason=not_a_verified_positive download_required=true",
+            ref,
+            state or "none",
+        )
+        return None
+
+    verdict_lang = str(verdict.get("language") or "").lower()
+    if verdict_lang and verdict_lang != (lang or "").lower():
+        logger.info(
+            "[fallback-cache] candidate=%s result=miss reason=language_mismatch "
+            "cached=%s requested=%s",
+            ref,
+            verdict_lang,
+            (lang or "").lower(),
+        )
+        return None
+
+    season_ep = f"s{season}e{episode}" if season is not None and episode is not None else "movie"
+    try:
+        payload = await _sync_cache.find_synced_for_target(
+            imdb_id, season_ep, fingerprint, ref
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.debug("[fallback-cache] payload lookup failed: %s", exc)
+        return None
+    if not payload:
+        # The verdict says this pair was verified, but the artifact is stored
+        # content-addressed and is not reachable without the bytes. Honest
+        # outcome: fall through to the normal download.
+        logger.info(
+            "[fallback-cache] candidate=%s result=miss sync_state=%s "
+            "reason=verified_but_artifact_unavailable download_required=true",
+            ref,
+            state,
+        )
+        return None
+
+    logger.info(
+        "[fallback-cache] candidate=%s result=hit verification=cached sync_state=%s "
+        "download_skipped=true fallback_sync_cache_hits=1",
+        ref,
+        state,
+    )
+    return payload
+
+
 async def _fallback_download_subsource(
     imdb_id: str,
     media_type: str = "series",
@@ -1152,12 +1368,22 @@ async def _fallback_download_subsource(
     requested_uploader: Any | None = None,
     requested_hearing_impaired: bool | None = None,
     meta: dict[str, Any] | None = None,
+    outcome: dict[str, Any] | None = None,
 ) -> bytes | None:
-    """Download an exact-equivalent subtitle from Subsource when primary provider fails.
+    """Download a fallback subtitle from Subsource when the primary provider fails.
 
-    The fallback never substitutes a merely similar or highest-rated release for
-    the requested subtitle. It returns bytes only for the same sanitized release
-    name (and, when known, the same uploader/HI status).
+    Exact release equivalence is preferred and is still tried first. It is not a
+    prerequisite: a candidate that is not the same release may still be exactly
+    what the target needs, and only the synchronization pipeline can decide.
+
+    "Not exact" and "not compatible" are separate facts and are counted
+    separately, so a cached empty exact-match set is never mistaken for "no
+    subtitle exists".
+
+    Returns bytes only for a candidate that passed
+    ``hard_compatibility_filter`` against the target identity. Nothing here
+    relaxes a synchronization gate: a compatible-but-unsynchronizable candidate
+    is downloaded, attempted, and then rejected downstream as before.
     """
     effective_key = (subsource_key or getattr(settings, "SUBSOURCE_API_KEY", "") or "").strip()
     if not effective_key:
@@ -1178,27 +1404,49 @@ async def _fallback_download_subsource(
         logger.info(
             f"[Subsource Fallback] Searching Subsource for {imdb_id} (series={is_series}, S:{season} E:{episode}, Lang:{lang})"
         )
-        releases = await provider.search_subtitles(
-            imdb_id=imdb_id,
-            is_series=is_series,
-            season=season,
-            episode=episode,
-            api_key=effective_key,
-            languages=[lang],
-            target_filename=target_filename,
+        cache_key = _fallback_search_key(
+            imdb_id, is_series, season, episode, lang, target_filename
         )
+        now = time.monotonic()
+        cached_search = _FALLBACK_SEARCH_CACHE.get(cache_key)
+        if cached_search and (now - cached_search[0]) < _FALLBACK_SEARCH_TTL_SECONDS:
+            releases = cached_search[1]
+            logger.info(
+                "[fallback-search] provider=subsource cache_hit=true candidates=%d",
+                len(releases),
+            )
+        else:
+            releases = await provider.search_subtitles(
+                imdb_id=imdb_id,
+                is_series=is_series,
+                season=season,
+                episode=episode,
+                api_key=effective_key,
+                languages=[lang],
+                target_filename=target_filename,
+            )
+            if len(_FALLBACK_SEARCH_CACHE) >= _FALLBACK_SEARCH_CACHE_MAX:
+                _FALLBACK_SEARCH_CACHE.clear()
+            _FALLBACK_SEARCH_CACHE[cache_key] = (now, list(releases))
+            logger.info(
+                "[fallback-search] provider=subsource cache_hit=false candidates=%d",
+                len(releases),
+            )
         if not releases:
             logger.warning(f"[Subsource Fallback] No subtitles found by Subsource for {imdb_id}")
+            if outcome is not None:
+                outcome.update(
+                    category="NO_COMPATIBLE_CANDIDATE",
+                    exact_candidates=0,
+                    compatible_candidates=0,
+                )
             return None
 
-        # Only an exact-equivalent release may stand in for the requested subtitle.
-        # This prevents every failed SubDL ID from collapsing onto SubSource's
-        # highest-rated generic file for the same episode.
-        if not _canonical_release_name(requested_release_name):
-            logger.warning(
-                "[Subsource Fallback] Missing requested release identity; refusing generic substitution."
-            )
-            return None
+        # Exact release equivalence is a strong PREFERENCE, not a prerequisite
+        # for attempting synchronization. The old rule refused here whenever no
+        # identical release name existed, so a target-compatible candidate that
+        # was perfectly synchronizable was never tried. It is still preferred,
+        # and it is still the first thing we look for.
         exact_matches = [
             release
             for release in releases
@@ -1209,20 +1457,101 @@ async def _fallback_download_subsource(
                 release,
             )
         ]
-        if not exact_matches:
+        exact_count = len(exact_matches)
+        if exact_matches:
+            best_release = exact_matches[0]
+            selection_reason = "EXACT_RELEASE"
+            match_tier = "EXACT"
+            compatible_count = None
+        else:
+            # Not exact. That is not the same as incompatible. Classify what is
+            # actually there and let the existing synchronization pipeline judge.
+            # Compatibility is measured against the TARGET identity, never
+            # against the requested subtitle's timing, so this cannot reintroduce
+            # the circular reference selection fixed in Reference Selection v3.
+            base_name = target_filename or _canonical_release_name(requested_release_name)
+            try:
+                target_meta = extract_metadata(base_name) if base_name else None
+            except Exception:  # pragma: no cover
+                target_meta = None
+            ranked: list[tuple[int, Any, str, str]] = []
+            for release in releases:
+                class_name, band = _classify_fallback_release(base_name, release, target_meta)
+                if class_name == "INCOMPATIBLE":
+                    continue
+                ranked.append((band, release, class_name, ""))
+            ranked.sort(key=lambda item: (item[0], _canonical_release_name(
+                _candidate_release_name(item[1]) or ""
+            )))
+            compatible_count = len(ranked)
+            if not ranked:
+                logger.warning(
+                    "[fallback-selection] reason=NO_COMPATIBLE_CANDIDATE exact_candidates=0 "
+                    "compatible_candidates=0 rejected_candidates=%d among=%d "
+                    "note='no exact release AND nothing target-compatible; the two are "
+                    "distinct facts'",
+                    len(releases),
+                    len(releases),
+                )
+                if outcome is not None:
+                    outcome.update(
+                        category="NO_COMPATIBLE_CANDIDATE",
+                        exact_candidates=0,
+                        compatible_candidates=0,
+                    )
+                return None
+            _band, best_release, selection_reason, _ = ranked[0]
+            match_tier = selection_reason
             logger.warning(
-                "[Subsource Fallback] No exact-equivalent release for %r (uploader=%r) among %d SubSource candidate(s).",
+                "[Subsource Fallback] No exact-equivalent release for %r (uploader=%r) among %d "
+                "SubSource candidate(s); continuing with a target-compatible candidate.",
                 requested_release_name,
                 requested_uploader,
                 len(releases),
             )
-            return None
 
-        best_release = exact_matches[0]
         logger.info(
-            f"[Subsource Fallback] Selected exact-equivalent release: '{best_release.release_name}' "
-            f"(uploader={best_release.uploader!r}, {best_release.download_url})"
+            "[fallback-selection] selected=%s reason=%s match_tier=%s exact_candidates=%s "
+            "compatible_candidates=%s",
+            _canonical_release_name(_candidate_release_name(best_release) or ""),
+            selection_reason,
+            match_tier,
+            exact_count,
+            compatible_count,
         )
+        if outcome is not None:
+            outcome.update(
+                category=(
+                    "NO_EXACT_RELEASE" if selection_reason != "EXACT_RELEASE"
+                    else "EXACT_RELEASE_SELECTED"
+                ),
+                reason=selection_reason,
+                exact_candidates=exact_count,
+                compatible_candidates=compatible_count,
+            )
+
+        # Before spending a download: has this exact candidate already been
+        # proven synchronized against this exact target? If so the work is
+        # already done and redoing it is pure cost.
+        reused = await _reusable_verified_fallback_sync(
+            release=best_release,
+            imdb_id=imdb_id,
+            season=season,
+            episode=episode,
+            lang=lang,
+            target_filename=target_filename,
+        )
+        if reused is not None:
+            if outcome is not None:
+                outcome.update(
+                    category="SYNC_CACHE_REUSE",
+                    downloads_skipped=True,
+                )
+            meta_record = meta if isinstance(meta, dict) else None
+            if meta_record is not None:
+                meta_record["provider"] = "subsource"
+                meta_record["fallback_sync_cache_reuse"] = True
+            return reused
 
         raw_data = await provider.download_archive(best_release.download_url, api_key=effective_key)
         if not raw_data:
@@ -1850,6 +2179,9 @@ async def _serve_subtitle_handler(
             target_id,
             meta.get("imdb_id"),
         )
+        fallback_outcome: dict[str, Any] = {
+            "category": "PRIMARY_PROVIDER_UNAVAILABLE",
+        }
         fallback_bytes = await _fallback_download_subsource(
             imdb_id=meta["imdb_id"],
             media_type=meta.get("media_type") or ("series" if season is not None else "movie"),
@@ -1863,8 +2195,22 @@ async def _serve_subtitle_handler(
             requested_uploader=meta.get("uploader"),
             requested_hearing_impaired=meta.get("hearing_impaired"),
             meta=meta,
+            outcome=fallback_outcome,
         )
         if not fallback_bytes:
+            # A provider outage, a missing exact release, and the absence of
+            # anything target-compatible are three different problems. The old
+            # single 502 collapsed all of them, which is why this failure was
+            # reported as a matching problem when the primary cause was a 502.
+            logger.warning(
+                "[fallback] primary_provider=%s primary_failure=PRIMARY_PROVIDER_UNAVAILABLE "
+                "fallback_provider=subsource category=%s exact_candidates=%s "
+                "compatible_candidates=%s",
+                provider_name,
+                fallback_outcome.get("category"),
+                fallback_outcome.get("exact_candidates"),
+                fallback_outcome.get("compatible_candidates"),
+            )
             return None
         logger.info(
             "Fallback to Subsource succeeded for #%s (%d bytes)", target_id, len(fallback_bytes)

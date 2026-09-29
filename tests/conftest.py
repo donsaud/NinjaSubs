@@ -159,3 +159,19 @@ def client():
     from app.main import app
 
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fallback_search_cache():
+    """Reset the SubSource fallback search cache between tests.
+
+    The cache is process-wide and intentionally so: the same query costs five
+    pages of provider rows, and repeating it seconds later is waste. In tests
+    that is just cross-test contamination, because unrelated cases share an
+    IMDb id, season, episode and language.
+    """
+    from app.main import _FALLBACK_SEARCH_CACHE
+
+    _FALLBACK_SEARCH_CACHE.clear()
+    yield
+    _FALLBACK_SEARCH_CACHE.clear()
