@@ -1069,8 +1069,12 @@ def test_matched_by_hash_flag_takes_precedence_over_filename_match():
     assert ranked[0].match_tier == MatchTier.HASH
 
 
-def test_synced_status_ranks_second_after_hash():
-    """A previously-synced artifact outranks filename matches but not a hash."""
+def test_synced_status_never_promotes_a_candidate():
+    """Cached `status="synced"` is a badge, never a ranking signal.
+
+    Regression guard: a stale sync artifact must not be floated above a
+    candidate whose release metadata actually matches the playing video.
+    """
     target = "Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.mkv"
 
     def _rel(name, **kwargs):
@@ -1079,15 +1083,37 @@ def test_synced_status_ranks_second_after_hash():
             release_name=name, download_url=url, provider="subdl", lang="eng", **kwargs
         )
 
+    # Exact release group + source match with the target.
     filename_star = _rel("Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.srt")
+    # Synced earlier, but for a different release (HDTV, different group).
     synced = _rel("Mad.Men.S01E02.720p.HDTV.x264-Other.srt", status="synced")
     hashed = _rel("Something.Else.Entirely.srt", matched_by_hash=True)
+
     ranked = rank_subtitles(target, [filename_star, synced, hashed])
     assert [s.release_name for s in ranked] == [
         hashed.release_name,
-        synced.release_name,
         filename_star.release_name,
+        synced.release_name,
     ]
+    # The badge itself is still surfaced for the UI.
+    assert ranked[-1].status == "synced"
+
+
+def test_synced_candidate_still_rises_when_metadata_matches():
+    """A synced candidate whose tokens match keeps its natural top position."""
+    target = "Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.mkv"
+
+    def _rel(name, **kwargs):
+        url = "http://x/" + "".join(ch for ch in name if ch.isalnum())
+        return SubtitleRelease(
+            release_name=name, download_url=url, provider="subdl", lang="eng", **kwargs
+        )
+
+    matched_synced = _rel("Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.srt", status="synced")
+    generic = _rel("Mad.Men.S01E02.720p.HDTV.x264-Other.srt")
+
+    ranked = rank_subtitles(target, [generic, matched_synced])
+    assert ranked[0].release_name == matched_synced.release_name
 
 
 def test_exact_hash_and_synced_player_labels():
@@ -1121,3 +1147,135 @@ def test_exact_hash_and_synced_player_labels():
         match_percentage=100,
     )
     assert format_informative_badge(plain, 100) == "[100%] [SubDL] Movie.2024.1080p.BluRay.x264-FLUX"
+
+
+# --------------------------------------------------------------------------- #
+# P. DETERMINISTIC TIER HIERARCHY
+# --------------------------------------------------------------------------- #
+# Ordering must be a strict, token-driven hierarchy. The additive soft score is
+# still reported for display, but it must never be able to reorder candidates
+# across tiers.
+
+
+def test_exact_group_outranks_generic_property_heavy_match():
+    """Tier 1 beats tier 2 even when the generic candidate matches far more props."""
+    target = "Show.S01E05.2160p.BluRay.REMUX.DV.Atmos.H.265-PiR8.mkv"
+
+    exact_group = SubtitleRelease(
+        release_name="Show.S01E05.1080p.WEB-DL.x264-PiR8.srt",
+        download_url="http://x/group",
+        provider="subdl",
+        lang="eng",
+    )
+    # No group in common, but it matches source, resolution, codec and platform.
+    generic = SubtitleRelease(
+        release_name="Show.S01E05.2160p.BluRay.REMUX.DV.Atmos.H.265-FLUX.srt",
+        download_url="http://x/generic",
+        provider="subdl",
+        lang="eng",
+    )
+
+    ranked = rank_subtitles(target, [generic, exact_group])
+    assert ranked[0].release_name == exact_group.release_name
+    assert ranked[0].match_tier == MatchTier.EXACT
+    assert ranked[0].match_percentage == 100
+    assert ranked[1].match_tier == MatchTier.SOURCE_FAMILY
+
+
+def test_exact_group_is_case_insensitive_token_match():
+    """Group matching ignores case and separator noise (PiR8 vs pir8 / Pi_R8)."""
+    target = "Show.S01E05.1080p.BluRay.x264-PiR8.mkv"
+
+    for name in (
+        "Show.S01E05.1080p.BluRay.x264-pir8.srt",
+        "Show.S01E05.1080p.BluRay.x264-Pi_R8.srt",
+        "Show.S01E05.1080p.BluRay.x264-PIR8.srt",
+    ):
+        rel = SubtitleRelease(
+            release_name=name, download_url="http://x/" + name, provider="subdl", lang="eng"
+        )
+        assert rank_subtitles(target, [rel])[0].match_tier == MatchTier.EXACT, name
+
+
+def test_known_scene_groups_beat_generic_web_release():
+    """Each canonical scene group outranks an otherwise identical generic web rip."""
+    for group in ("FLUX", "FraMeSToR", "CHD", "NTb"):
+        target = f"Show.S01E05.1080p.BluRay.x264-{group}.mkv"
+        group_rel = SubtitleRelease(
+            release_name=f"Show.S01E05.1080p.BluRay.x264-{group}.srt",
+            download_url=f"http://x/{group}",
+            provider="subdl",
+            lang="eng",
+        )
+        generic = SubtitleRelease(
+            release_name="Show.S01E05.1080p.WEB-DL.x264.mkv.srt".replace(".mkv", ""),
+            download_url=f"http://x/generic-{group}",
+            provider="subdl",
+            lang="eng",
+        )
+        ranked = rank_subtitles(target, [generic, group_rel])
+        assert ranked[0].release_name == group_rel.release_name, group
+
+
+def test_wrong_title_never_earns_a_strong_tier():
+    """A release-group collision on an unrelated title must not look perfect."""
+    target = "Shogun.2024.S01E05.1080p.DSNP.WEB-DL.H.264-FLUX.mkv"
+
+    other_work = SubtitleRelease(
+        # FLUX releases many unrelated titles, so the group matches by accident.
+        release_name="Dune.Part.Two.2024.2160p.DSNP.WEB-DL.H.265-FLUX.srt",
+        download_url="http://x/other",
+        provider="subdl",
+        lang="eng",
+    )
+    correct = SubtitleRelease(
+        release_name="Shogun.2024.S01E05.1080p.AMZN.HDTV.x264-GRP.srt",
+        download_url="http://x/correct",
+        provider="subdl",
+        lang="eng",
+    )
+
+    ranked = rank_subtitles(target, [other_work, correct])
+    assert ranked[0].release_name == correct.release_name
+    assert ranked[-1].match_tier == MatchTier.FALLBACK
+    assert ranked[-1].match_percentage == 0
+
+
+def test_year_mismatch_cannot_promote_a_candidate():
+    """A wrong-year candidate is demoted, never lifted above a correct-year one."""
+    target = "Dune.Part.Two.2024.2160p.UHD.Remux.DV.Atmos-FLUX.mkv"
+
+    wrong_year = SubtitleRelease(
+        release_name="Dune Part Two 2023 1080p BluRay.srt",
+        download_url="http://x/2023",
+        provider="subdl",
+        lang="eng",
+    )
+    right_year = SubtitleRelease(
+        release_name="Dune Part Two 2024 1080p WEB-DL.srt",
+        download_url="http://x/2024",
+        provider="subdl",
+        lang="eng",
+    )
+
+    ranked = rank_subtitles(target, [wrong_year, right_year])
+    assert ranked[0].release_name == right_year.release_name
+    assert ranked[-1].match_tier == MatchTier.FALLBACK
+
+
+def test_tier_ordering_is_stable_and_input_independent():
+    """Candidate order must not depend on provider arrival order."""
+    target = "Show.S01E05.1080p.BluRay.x264-PiR8.mkv"
+    rels = [
+        SubtitleRelease(
+            release_name=n, download_url="http://x/" + n, provider="subdl", lang="eng"
+        )
+        for n in (
+            "Show.S01E05.1080p.BluRay.x264-PiR8.srt",
+            "Show.S01E05.1080p.WEB-DL.x264.srt",
+            "Show.S01E05.720p.HDTV.x264.srt",
+        )
+    ]
+    forward = [s.release_name for s in rank_subtitles(target, rels)]
+    backward = [s.release_name for s in rank_subtitles(target, list(reversed(rels)))]
+    assert forward == backward

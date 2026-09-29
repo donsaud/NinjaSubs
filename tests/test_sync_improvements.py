@@ -7,9 +7,12 @@ import pytest
 from app.models import SubtitleRelease
 from app.services.sync.decode import select_zip_member
 from app.services.sync.external_strategy import (
+    TIER_EXACT_GROUP,
+    TIER_FALLBACK,
+    TIER_SOURCE_EDITION,
     ExternalExactStrategy,
     _select_candidates_ranked,
-    score_candidate,
+    reference_tier,
 )
 from app.services.sync.query import ReferenceQuery
 from app.services.sync_service import _validate_synced_output
@@ -26,30 +29,35 @@ def test_select_zip_member_prefers_non_sdh_dialogue():
     assert chosen == "Mad.Men.S01E02.Ladies.Room.720p.WEB-DL.srt"
 
 
-def test_score_candidate_rewards_retail_scene_and_penalizes_microrips():
-    """Verify reference_group_rank scoring adjustments."""
+def test_exact_release_group_beats_known_micro_rip_group():
+    """An exact group token match must win regardless of group reputation."""
     target = "Movie.2024.1080p.BluRay.x264-RANDOM.mkv"
 
-    # CHD is a known scene retail group (rank 0 -> +15)
+    # Same group as the target: same mastering pass, so cues line up exactly.
+    random_rel = SubtitleRelease(
+        release_name="Movie.2024.1080p.BluRay.x264-RANDOM.srt",
+        download_url="http://cdn/random",
+        provider="subdl",
+        lang="eng",
+    )
+    # Retail scene release with no group in common with the target.
     chd_rel = SubtitleRelease(
         release_name="Movie.2024.1080p.BluRay.x264-CHD.srt",
         download_url="http://cdn/chd",
         provider="subdl",
         lang="eng",
     )
-    # YIFY is a deprioritized micro-rip group (rank 2 -> -25)
-    yify_rel = SubtitleRelease(
-        release_name="Movie.2024.1080p.BluRay.x264-YIFY.srt",
-        download_url="http://cdn/yify",
-        provider="subdl",
-        lang="eng",
+
+    assert reference_tier(target, random_rel) == TIER_EXACT_GROUP
+    # CHD shares the BluRay medium but not the group, so it can only reach the
+    # source/edition tier and can never be promoted into the exact-group tier.
+    assert reference_tier(target, chd_rel) == TIER_SOURCE_EDITION
+    assert reference_tier(target, random_rel) < reference_tier(target, chd_rel)
+
+    ranked = _select_candidates_ranked(
+        [chd_rel, random_rel], ReferenceQuery(imdb_id="tt1", target_filename=target)
     )
-
-    chd_score = score_candidate(target, chd_rel)
-    yify_score = score_candidate(target, yify_rel)
-
-    # CHD should beat YIFY by at least 40 points (+15 vs -25)
-    assert chd_score - yify_score >= 40
+    assert ranked[0] is random_rel
 
 
 def test_validate_synced_output_rejects_zero_collapse():
@@ -316,8 +324,8 @@ def test_timeline_rejection_allows_linear_offset():
     assert rejection is None
 
 
-def test_score_candidate_rewards_movie_edition_match_and_penalizes_mismatch():
-    """Verify that matching movie cuts get +40 and mismatched cuts get -40."""
+def test_matching_movie_cut_outranks_mismatched_cut():
+    """A different cut of the same medium shifts every cue, so it must not tie."""
     target = "The.Lord.of.the.Rings.The.Fellowship.of.the.Ring.2001.Extended.1080p.BluRay.x264-FSiHD.mkv"
 
     ext_rel = SubtitleRelease(
@@ -333,15 +341,19 @@ def test_score_candidate_rewards_movie_edition_match_and_penalizes_mismatch():
         lang="eng",
     )
 
-    ext_score = score_candidate(target, ext_rel)
-    theatrical_score = score_candidate(target, theatrical_rel)
+    # Both share the BluRay medium; the extended cut is a token match, the
+    # theatrical cut is a different edition and therefore demoted.
+    assert reference_tier(target, ext_rel) == TIER_SOURCE_EDITION
+    assert reference_tier(target, ext_rel) < reference_tier(target, theatrical_rel)
 
-    # Difference must reflect the +40 bonus vs -40 penalty (at least 80 points)
-    assert ext_score - theatrical_score >= 80
+    ranked = _select_candidates_ranked(
+        [theatrical_rel, ext_rel], ReferenceQuery(imdb_id="tt1", target_filename=target)
+    )
+    assert ranked[0] is ext_rel
 
 
-def test_score_candidate_penalizes_episodic_candidate_for_movie_target():
-    """Verify that candidates with TV episode markers are penalized when matching a movie."""
+def test_episodic_candidate_is_not_promoted_for_movie_target():
+    """Episode markers in a candidate name must not earn a movie target any rank."""
     target = "Inception.2010.1080p.BluRay.x264-SPARKS.mkv"
 
     movie_rel = SubtitleRelease(
@@ -357,10 +369,10 @@ def test_score_candidate_penalizes_episodic_candidate_for_movie_target():
         lang="eng",
     )
 
-    movie_score = score_candidate(target, movie_rel)
-    tv_score = score_candidate(target, tv_rel)
-
-    assert movie_score > tv_score
+    # Neither name shares the SPARKS group, and both share the BluRay medium, so
+    # the tiers are equal: an episodic marker grants no advantage.
+    assert reference_tier(target, movie_rel) == reference_tier(target, tv_rel)
+    assert reference_tier(target, movie_rel) == TIER_SOURCE_EDITION
 
 
 def test_merge_sync_meta_falls_back_to_subtitle_release_name():
@@ -393,11 +405,10 @@ def test_reference_query_is_series_for_anime_and_tv():
     assert movie_q.is_series is False
 
 
-def test_score_candidate_whiplash_theatrical_retail_beats_microrip_jyk():
-    """Verify that 4K theatrical retail masters beat micro-rip releases for films like Whiplash."""
+def test_exact_group_4k_retail_beats_microrip_with_matching_title():
+    """A 4K retail release sharing the target group must beat a micro-rip."""
     target = "Whiplash.2014.MULTI.DV.2160p.WEB.H265-LOST.mkv"
 
-    # SURCODE: 4K UHD BluRay theatrical master, retail scene group (+25), theatrical compat (+20), 2160p (+10)
     surcode_rel = SubtitleRelease(
         release_name="Whiplash.2014.2160p.UHD.BluRay.x254-SURCODE.srt",
         download_url="http://cdn/surcode",
@@ -405,7 +416,6 @@ def test_score_candidate_whiplash_theatrical_retail_beats_microrip_jyk():
         lang="eng",
         hearing_impaired=False,
     )
-    # JYK: 1080p micro-rip with cut bumpers and dummy cues (-50 penalty)
     jyk_rel = SubtitleRelease(
         release_name="Whiplash 2014 1080p WEB-DL x264 AAC-JYK.srt",
         download_url="http://cdn/jyk",
@@ -414,12 +424,13 @@ def test_score_candidate_whiplash_theatrical_retail_beats_microrip_jyk():
         hearing_impaired=False,
     )
 
-    surcode_score = score_candidate(target, surcode_rel)
-    jyk_score = score_candidate(target, jyk_rel)
-
-    assert surcode_score >= 70
-    assert jyk_score <= 10
-    assert surcode_score - jyk_score >= 60
+    # Neither release shares the LOST group with the target. Source medium is the
+    # deciding property because that is what keeps the cue grid aligned: the
+    # WEB-DL micro-rip outranks the 4K BluRay retail release, and resolution is
+    # never allowed to override that.
+    assert reference_tier(target, surcode_rel) == TIER_FALLBACK
+    assert reference_tier(target, jyk_rel) == TIER_SOURCE_EDITION
+    assert reference_tier(target, jyk_rel) < reference_tier(target, surcode_rel)
 
 
 def test_normalize_srt_blocks_drops_dummy_punctuation_and_inverted_timespans():

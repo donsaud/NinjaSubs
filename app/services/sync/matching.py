@@ -306,6 +306,18 @@ _NON_GROUP_TOKENS = frozenset(
 )
 
 
+def normalize_release_group(group: str | None) -> str:
+    """Case- and separator-insensitive release-group key.
+
+    Scene tags appear as ``PiR8``, ``pir8`` and ``Pi_R8`` in the wild; all three
+    name the same group and must compare equal. Separators are removed rather
+    than collapsed so ``Pi_R8`` and ``PiR8`` land on the same key. Shared by
+    reference selection and display ranking so both agree on what "same group"
+    means.
+    """
+    return re.sub(r"[^a-z0-9]", "", (group or "").strip().lower())
+
+
 def _release_group(name: str | None) -> str | None:
     """Extract a scene release-group tag (``FSiHD``, ``mSD``, ``ImE``) or ``None``.
 

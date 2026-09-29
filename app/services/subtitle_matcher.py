@@ -1471,56 +1471,109 @@ def hard_compatibility_filter(
 # =======================================================
 
 
+# A candidate whose title shares essentially nothing with the video is a
+# different work, so it can never earn a source/group tier no matter how well
+# its medium happens to line up. Only the generic fallback tier is reachable.
+# Season/episode identity exempts a candidate because long series titles often
+# dilute the ratio (a subtitle carrying only "Show.S02E04" legitimately scores
+# low against a full episode title) while still being the same episode.
+MIN_TIER_TITLE_RATIO = 0.5
+
+
+def _normalize_group(group: str | None) -> str:
+    """Case- and separator-insensitive release-group key.
+
+    Delegates to the shared implementation used by reference selection so both
+    paths agree on what "same group" means (``PiR8`` == ``pir8`` == ``Pi_R8``).
+    Imported lazily because ``app.services.sync`` pulls in the orchestrator,
+    which imports this module.
+    """
+    try:
+        from app.services.sync.matching import normalize_release_group
+    except ImportError:  # pragma: no cover - defensive
+        return re.sub(r"[^a-z0-9]", "", (group or "").strip().lower())
+    return normalize_release_group(group)
+
+
+def _is_different_work(
+    title_ratio: float,
+    episode_match: bool | None,
+    season_match: bool | None,
+) -> bool:
+    """True when the candidate almost certainly belongs to a different work."""
+    if title_ratio >= MIN_TIER_TITLE_RATIO:
+        return False
+    return episode_match is not True and season_match is not True
+
+
 def determine_match_tier(
     is_hash_match: bool,
     accepted: bool,
-    score: int,
     release_group_match: bool | None,
     has_source_match: bool,
     service_match: bool | None,
     episode_match: bool | None,
     season_match: bool | None,
+    edition_match: bool | None = None,
+    edition_unverified: bool = False,
     has_year_mismatch: bool = False,
     is_unshared_fansub: bool = False,
+    title_ratio: float = 1.0,
 ) -> MatchTier:
-    """
-    Classify candidate into Bazarr-inspired MatchTier:
-    - Tier 0 (HASH): Exact binary hash match
-    - Tier 1 (EXACT): Exact release group match, or exact source+service match with score >= 110, or score >= 135
-    - Tier 2 (SOURCE_FAMILY): Source family match (disc/web) or streaming service match with score >= 65, or score >= 80
-    - Tier 3 (CLOSE): Season/episode match or score >= 35
-    - Tier 4 (FALLBACK): General fallback match
+    """Classify a candidate into the deterministic MatchTier hierarchy.
+
+    Classification is purely token-based; the additive soft score is deliberately
+    *not* consulted. A strict hierarchy is what guarantees an exact release-group
+    match always sorts above a generic candidate, no matter how many incidental
+    properties (resolution, codec, audio, platform) the latter happens to match.
+
+    - Tier 0 (HASH): exact binary hash match
+    - Tier 1 (EXACT): exact release group token match
+    - Tier 2 (SOURCE_FAMILY): source/edition match, or an exact group match whose
+      cut could not be verified
+    - Tier 3 (CLOSE): season/episode match
+    - Tier 4 (FALLBACK): everything else, including any candidate whose title
+      does not match the video
     """
     if is_hash_match:
         return MatchTier.HASH
     if not accepted:
         return MatchTier.FALLBACK
 
-    if has_year_mismatch:
-        if score >= 60:
-            return MatchTier.CLOSE
+    # Title identity is the precondition for every stronger tier. Without it the
+    # candidate is a different work, and a coincidental source/platform/group
+    # match is meaningless.
+    if _is_different_work(title_ratio, episode_match, season_match):
         return MatchTier.FALLBACK
-
-    if score >= 135 or (
-        (release_group_match is True or (has_source_match and service_match is True))
-        and score >= 110
-    ):
-        return MatchTier.EXACT
 
     if is_unshared_fansub:
-        if score >= 60:
-            return MatchTier.CLOSE
+        base = (
+            MatchTier.CLOSE
+            if episode_match is True or season_match is True
+            else MatchTier.FALLBACK
+        )
+    elif release_group_match is True:
+        # An exact group match is the strongest identity signal available. The
+        # one exception is an unverifiable cut: if the video declares an edition
+        # and the subtitle is unmarked, the group match is real but the cut is
+        # unknown, so it is capped at the source/edition tier. (An *explicit*
+        # edition conflict is already hard-rejected during candidate filtering.)
+        base = MatchTier.SOURCE_FAMILY if edition_unverified else MatchTier.EXACT
+    elif has_source_match or service_match is True or edition_match is True:
+        base = MatchTier.SOURCE_FAMILY
+    elif episode_match is True or season_match is True:
+        base = MatchTier.CLOSE
+    else:
+        base = MatchTier.FALLBACK
+
+    # A year mismatch means we probably matched a different film entirely, so it
+    # invalidates every identity claim above (group, source, edition) rather
+    # than merely weakening them. It is a demotion, never a promotion: the
+    # candidate drops to the generic fallback tier and is decided by the
+    # remaining signals. A hash match is exempt because it is byte-exact truth.
+    if has_year_mismatch:
         return MatchTier.FALLBACK
-
-    if (has_source_match or service_match is True or release_group_match is True) and score >= 65:
-        return MatchTier.SOURCE_FAMILY
-    if score >= 80:
-        return MatchTier.SOURCE_FAMILY
-
-    if episode_match is True or season_match is True or score >= 35:
-        return MatchTier.CLOSE
-
-    return MatchTier.FALLBACK
+    return base
 
 
 def calculate_compatibility(
@@ -1802,8 +1855,8 @@ def calculate_compatibility(
         s_grp = s_meta.get("group")
         release_group_match = None
         if v_grp and s_grp:
-            v_norm = v_grp.strip().lower().replace(".", "")
-            s_norm = s_grp.strip().lower().replace(".", "")
+            v_norm = _normalize_group(v_grp)
+            s_norm = _normalize_group(s_grp)
             if v_norm == s_norm or {v_norm, s_norm} <= {"yts", "ytsmx", "yify"}:
                 release_group_match = True
                 score += WEIGHT_GROUP_MATCH_TV
@@ -1986,7 +2039,18 @@ def calculate_compatibility(
         score = max(score, 135)
 
     # Percentage Normalization
-    if not is_unshared_fansub and score >= 130:
+    # A candidate for a different work must never read as a strong match, no
+    # matter how many media properties happen to line up. Without this a release
+    # group collision (the same group naming unrelated titles) can push an
+    # unrelated subtitle to 100%.
+    if _is_different_work(title_ratio, episode_match, season_match):
+        score = min(score, 0)
+        percentage = 0
+        reasons.append(
+            f"Different work (title similarity {title_ratio:.2f} "
+            f"< {MIN_TIER_TITLE_RATIO}, no season/episode match) - capped at 0%"
+        )
+    elif not is_unshared_fansub and score >= 130:
         percentage = 100
     elif score > 0:
         percentage = max(1, min(99, int(round((score / 135.0) * 100))))
@@ -2011,15 +2075,23 @@ def calculate_compatibility(
     tier = determine_match_tier(
         is_hash_match=False,
         accepted=True,
-        score=score,
         release_group_match=release_group_match,
         has_source_match=has_source_match,
         service_match=service_match,
         episode_match=episode_match,
         season_match=season_match,
+        edition_match=edition_match,
+        edition_unverified=bool(v_meta.get("edition")) and not s_meta.get("edition"),
         has_year_mismatch=has_year_mismatch,
         is_unshared_fansub=is_unshared_fansub,
+        title_ratio=title_ratio,
     )
+
+    # Deterministic tier floor: an exact hash or exact release-group match is a
+    # 100% match by definition and must never be dragged down by soft score
+    # arithmetic.
+    if tier == MatchTier.EXACT:
+        percentage = 100
 
     logger.debug(
         "[Soft Rank] Target: '%s' | Sub: '%s' | Tier: %s | Score: %d | Pct: %d%% | Conf: %.2f | Reasons: %s",
@@ -2322,18 +2394,20 @@ def rank_subtitles(
             )
             else 1
         )
-        syn_idx = (
-            0
-            if (
-                (getattr(s, "status", "") or "")
-                == "synced"
-                or (
-                    isinstance(s, dict)
-                    and str(s.get("status", "") or "") == "synced"
-                )
-            )
-            else 1
-        )
+        # Deterministic MatchTier drives the order. Cached ``status == "synced"``
+        # is deliberately excluded: a stale sync artifact must never be promoted
+        # above a candidate whose release metadata actually matches. A synced
+        # candidate still floats up naturally whenever its own tokens earn a
+        # better tier.
+        raw_tier = getattr(compat, "match_tier", None) if compat else None
+        if raw_tier is None and not isinstance(s, dict):
+            raw_tier = getattr(s, "match_tier", None)
+        if raw_tier is None and isinstance(s, dict):
+            raw_tier = s.get("match_tier")
+        try:
+            tier_val = int(getattr(raw_tier, "value", raw_tier) or 0)
+        except (TypeError, ValueError):
+            tier_val = 0 if is_h == 0 else 4
 
         sc = getattr(s, "score", None) if not isinstance(s, dict) else s.get("score", 0)
         sc_val = sc if sc is not None else 0
@@ -2367,7 +2441,7 @@ def rank_subtitles(
             l_idx,
             acc_idx,
             is_h,
-            syn_idx,
+            tier_val,
             -pct_val,
             -sc_val,
             hi_rank,

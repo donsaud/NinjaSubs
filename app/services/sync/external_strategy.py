@@ -28,19 +28,14 @@ from app.services.sync.decode import (
     select_zip_member,
 )
 from app.services.sync.matching import (
-    _codec_kind,
-    _regional_tags,
     _release_group,
-    _resolution,
     _season_number,
     _source_kind,
-    _sources_compatible,
     candidate_episode_number,
     guess_metadata,
     is_informative_release_name,
     is_retail_disc_source,
-    looks_like_season_pack,
-    reference_group_rank,
+    normalize_release_group,
 )
 from app.services.sync.query import ResolvedReference
 
@@ -61,41 +56,27 @@ _MIN_REFERENCE_BYTES = 5120
 # often carry distributor intro offsets, dubbed audio pacing, or PAL 25fps shifts.
 _REFERENCE_LANGUAGES = ("en", "ar")
 
-# Weighted-scoring weights for candidate reference selection. The goal is to pick
-# the reference whose release quality matches the playing video file.
-_HASH_MATCH_BONUS = 500  # byte-exact OpenSubtitles MovieHash: undisputed ground truth
-_GROUP_SCORE = 50  # exact release group
-_SOURCE_SCORE = 30  # shared source family (web-dl/web, bluray/remux)
-_PLATFORM_SCORE = 20  # identical streaming service (HMAX/ATVP/NF/AMZN/DSNP)
-_STREAMING_FAMILY_SCORE = 10  # different streaming service, same streaming family
-_REGIONAL_SCORE = 30  # matching regional release markers (MULTI, FRENCH, GERMAN...)
-_RESOLUTION_SCORE = 10  # identical resolution
-_RESOLUTION_NEAR_SCORE = 5  # 1080p neighbour of a 4K target
-_CODEC_SCORE = 5  # shared codec (x265/HEVC/x264)
-_EPISODE_SCORE = 10  # explicit episode single (vs a whole-season pack)
-_EN_SCORE = 10  # English preferred on ties
-_ALT_LANG_SCORE = 5  # ar / es / fr / de / it
-_NON_HI_SCORE = 5  # standard dialogue over hearing-impaired
-_PREFERRED_GROUP_SCORE = 25  # reliable scene retail groups (CHD/SURCODE/FraMeSToR...)
-_DEPRIORITIZED_GROUP_PENALTY = 50  # micro-rip/custom repack groups (YTS/YIFY/JYK/Tigole...)
-_THEATRICAL_COMPAT_SCORE = 20  # retail BluRay/UHD theatrical disc master compatible with WEB-DL for films
-_EDITION_SCORE = 40  # matching cut/edition (Extended, Theatrical, Directors Cut, IMAX, etc.)
-_EDITION_MISMATCH_PENALTY = 40  # conflicting cut/edition
+# Deterministic reference tiers. Selection is a strict hierarchy: a candidate in a
+# better tier always beats every candidate in a worse tier, so no amount of
+# accumulated property points (resolution, codec, audio, platform) can promote a
+# generic release above an exact scene-group match.
+TIER_HASH = 0  # byte-exact OpenSubtitles MovieHash: undisputed ground truth
+TIER_EXACT_GROUP = 1  # exact release-group token match (PiR8, FLUX, CHD, NTb, FraMeSToR...)
+TIER_SOURCE_EDITION = 2  # same source medium and compatible cut (BluRay REMUX == BluRay REMUX)
+TIER_FALLBACK = 3  # everything else that matched the basic title/episode query
 
-_LANG_SCORES = {
-    "eng": _EN_SCORE,
-    "en": _EN_SCORE,
-    "ara": _ALT_LANG_SCORE,
-    "ar": _ALT_LANG_SCORE,
-    "spa": _ALT_LANG_SCORE,
-    "es": _ALT_LANG_SCORE,
-    "fra": _ALT_LANG_SCORE,
-    "fr": _ALT_LANG_SCORE,
-    "deu": _ALT_LANG_SCORE,
-    "de": _ALT_LANG_SCORE,
-    "ita": _ALT_LANG_SCORE,
-    "it": _ALT_LANG_SCORE,
+_TIER_LABELS = {
+    TIER_HASH: "hash",
+    TIER_EXACT_GROUP: "exact-group",
+    TIER_SOURCE_EDITION: "source-edition",
+    TIER_FALLBACK: "fallback",
 }
+
+
+def tier_label(tier: int) -> str:
+    """Human-readable name for a reference tier (used in logs and cache keys)."""
+    return _TIER_LABELS.get(tier, "fallback")
+
 
 _EDITION_PATTERNS = [
     (
@@ -131,33 +112,6 @@ _EDITION_PATTERNS = [
 ]
 
 
-_GUESSIT_PLATFORM_MAP = {
-    "hbo max": "hmax",
-    "max": "hmax",
-    "apple tv": "atvp",
-    "apple tv+": "atvp",
-    "netflix": "nf",
-    "amazon prime": "amzn",
-    "amazon": "amzn",
-    "disney+": "dsnp",
-    "hulu": "hulu",
-    "peacock": "pcok",
-    "itunes": "itunes",
-    "stan": "stan",
-    "paramount+": "paramount",
-    "paramount": "paramount",
-    "bcore": "bcore",
-    "bravia core": "bcore",
-    "crav": "crav",
-    "crave": "crav",
-    "iplayer": "iplayer",
-    "bbc iplayer": "iplayer",
-    "starz": "starz",
-    "sho": "sho",
-    "showtime": "sho",
-}
-
-
 def _edition_kind(name: str | None) -> str | None:
     """Recognize standard movie/series cut editions from release filename."""
     if not name:
@@ -185,166 +139,62 @@ def _edition_kind(name: str | None) -> str | None:
             return edition
     return None
 
-_PLATFORM_PATTERNS = {
-    "hmax": re.compile(r"(?i)\b(?:hmax|hbo[\s._-]?max|max)\b"),
-    "atvp": re.compile(r"(?i)\b(?:atvp|apple[\s._-]?tv)\b"),
-    "nf": re.compile(r"(?i)\bnf\b"),
-    "amzn": re.compile(r"(?i)\bamzn\b"),
-    "dsnp": re.compile(r"(?i)\bdsnp\b"),
-    "hulu": re.compile(r"(?i)\bhulu\b"),
-    "pcok": re.compile(r"(?i)\b(?:pcok|peacock)\b"),
-    "itunes": re.compile(r"(?i)\bitunes\b"),
-    "stan": re.compile(r"(?i)\bstan\b"),
-    "paramount": re.compile(r"(?i)\b(?:pmtp|paramount(?:[\s._-]?plus)?)\b"),
-    "bcore": re.compile(r"(?i)\b(?:bcore|bravia[\s._-]?core)\b"),
-    "crav": re.compile(r"(?i)\bcrav(?:e)?\b"),
-    "iplayer": re.compile(r"(?i)\b(?:iplayer|bbc[\s._-]?iplayer)\b"),
-    "starz": re.compile(r"(?i)\bstarz\b"),
-    "sho": re.compile(r"(?i)\b(?:sho|showtime)\b"),
-}
-
-
 def _release_name(release) -> str:
     return str(getattr(release, "release_name", "") or "")
 
 
-def _platform_tags(name: str | None) -> frozenset[str]:
-    """Streaming-service tags present in a release name (HMAX/NF/AMZN/...)."""
-    lowered = name or ""
-    tags = set(tag for tag, pattern in _PLATFORM_PATTERNS.items() if pattern.search(lowered))
-    meta = guess_metadata(name)
-    svc = meta.get("streaming_service")
-    if svc:
-        matched = _GUESSIT_PLATFORM_MAP.get(str(svc).lower())
-        if matched:
-            tags.add(matched)
-    return frozenset(tags)
+def _groups_match(target_name: str | None, cand_name: str) -> bool:
+    """True when candidate and target share the exact release group.
 
-
-def score_candidate(target_name: str | None, release) -> int:
-    """Weighted score for one candidate reference against the target video.
-
-    A byte-exact MovieHash match earns an overwhelming ``+500`` bonus and always
-    wins. Otherwise weights: exact release group ``+50``, matching source family
-    ``+30``,
-    identical streaming service ``+20`` (else same streaming family ``+10``),
-    resolution ``+10`` (or ``+5`` for a 1080p neighbour of a 4K target), codec
-    ``+5``, episode single ``+10`` (season pack ``-10``), language priority
-    ``+10`` (English) / ``+5`` (es/fr/de/it), non-HI ``+5``.
+    Compared as a case- and separator-insensitive token, so ``PiR8`` matches
+    ``pir8`` and ``Pi_R8``. No other property can substitute for this: an exact
+    group means the same mastering pass, so the cue grid lines up by
+    construction.
     """
-    cand_name = _release_name(release)
-    if not cand_name:
-        return 0
-    score = 0
+    target_group = normalize_release_group(_release_group(target_name) or "")
+    if not target_group:
+        return False
+    cand_group = normalize_release_group(_release_group(cand_name) or "")
+    if not cand_group:
+        return False
+    if cand_group == target_group:
+        return True
+    # A candidate may carry the tag as a bracketed prefix rather than a suffix.
+    return target_group in re.sub(r"[^a-z0-9]", "", cand_name.lower())
 
-    if getattr(release, "is_hash_match", False) or getattr(release, "matched_by_hash", False):
-        score += _HASH_MATCH_BONUS
 
-    target_group = (_release_group(target_name) or "").lower()
-    if target_group:
-        cand_group = (_release_group(cand_name) or "").lower()
-        cand_tokens = set(re.findall(r"[a-z0-9]+", cand_name.lower()))
-        if cand_group == target_group or target_group in cand_tokens:
-            score += _GROUP_SCORE
-
+def _source_edition_match(target_name: str | None, cand_name: str) -> bool:
+    """True when both sides share a source medium and a compatible cut."""
     target_source = _source_kind(target_name)
     cand_source = _source_kind(cand_name)
-    if target_source and cand_source:
-        if _sources_compatible(target_source, cand_source):
-            score += _SOURCE_SCORE
-        elif {target_source, cand_source} in (
-            {"bluray", "webdl"},
-            {"remux", "webdl"},
-            {"bluray", "stream"},
-            {"remux", "stream"},
-        ):
-            # For films (non-episodic), retail BluRay/UHD theatrical disc masters and
-            # official studio WEB-DL/stream releases share the identical theatrical cut.
-            is_film = candidate_episode_number(target_name) is None and not looks_like_season_pack(target_name)
-            if is_film:
-                score += _THEATRICAL_COMPAT_SCORE
-
-    target_platforms = _platform_tags(target_name)
-    cand_platforms = _platform_tags(cand_name)
-    if target_platforms & cand_platforms:
-        score += _PLATFORM_SCORE
-    elif target_platforms and cand_platforms:
-        # Both are streaming releases but different services: still a much better
-        # timing anchor than a disc/encode of another edition.
-        score += _STREAMING_FAMILY_SCORE
-
-    target_res = _resolution(target_name)
-    cand_res = _resolution(cand_name)
-    if target_res and cand_res:
-        if cand_res == target_res:
-            score += _RESOLUTION_SCORE
-        elif target_res in ("2160p", "4k") and cand_res in ("1080p", "2160p", "4k"):
-            score += _RESOLUTION_NEAR_SCORE
-
-    target_codec = _codec_kind(target_name)
-    if target_codec and target_codec == _codec_kind(cand_name):
-        score += _CODEC_SCORE
-
+    if not target_source or not cand_source or target_source != cand_source:
+        return False
+    # Same medium but a different cut (Theatrical vs Extended) shifts every cue
+    # by the missing footage, so it is treated as a mismatch rather than a match.
     target_ed = _edition_kind(target_name)
     cand_ed = _edition_kind(cand_name)
-    if target_ed and cand_ed:
-        if target_ed == cand_ed:
-            score += _EDITION_SCORE
-        else:
-            score -= _EDITION_MISMATCH_PENALTY
-
-    target_regional = _regional_tags(target_name)
-    cand_regional = _regional_tags(cand_name)
-    if target_regional & cand_regional:
-        score += _REGIONAL_SCORE
-
-    # Episode scoring: reward matching episode singles for series; penalize
-    # episodic or season-pack candidates when matching a movie.
-    target_ep = candidate_episode_number(target_name)
-    cand_ep = candidate_episode_number(cand_name)
-    if target_ep is not None:
-        if cand_ep is not None:
-            if cand_ep == target_ep:
-                score += _EPISODE_SCORE
-            else:
-                score -= _EPISODE_SCORE
-        elif looks_like_season_pack(cand_name):
-            score -= _EPISODE_SCORE
-    elif target_name is not None and not looks_like_season_pack(target_name):
-        # Target is non-episodic (e.g. Movie)
-        if cand_ep is not None or looks_like_season_pack(cand_name):
-            score -= _EPISODE_SCORE
-    else:
-        # Fallback when target_name is None
-        if cand_ep is not None:
-            score += _EPISODE_SCORE
-        elif looks_like_season_pack(cand_name):
-            score -= _EPISODE_SCORE
-
-    score += _LANG_SCORES.get(str(getattr(release, "lang", "") or "").strip().lower(), 0)
-
-    if not getattr(release, "hearing_impaired", False):
-        score += _NON_HI_SCORE
-
-    # Release-group timeline reliability: scene retail encodes preserve studio
-    # bumpers/timelines; micro-rips and custom repacks often trim them and desync.
-    rank = reference_group_rank(cand_name)
-    if rank == 0:
-        score += _PREFERRED_GROUP_SCORE
-    elif rank == 2:
-        score -= _DEPRIORITIZED_GROUP_PENALTY
-
-    return score
+    if target_ed and cand_ed and target_ed != cand_ed:
+        return False
+    return True
 
 
-def _has_audio_match(target_name: str | None, cand_name: str) -> int:
-    target_meta = guess_metadata(target_name)
-    cand_meta = guess_metadata(cand_name)
-    target_audio = target_meta.get("audio_codec")
-    cand_audio = cand_meta.get("audio_codec")
-    if target_audio and cand_audio and str(target_audio).lower() == str(cand_audio).lower():
-        return 1
-    return 0
+def reference_tier(target_name: str | None, release) -> int:
+    """Classify a reference candidate into the deterministic tier hierarchy.
+
+    This is a strict ordering, not a score. A generic release that happens to
+    match resolution, codec and audio can never outrank an exact release-group
+    match, because it is compared in a strictly worse tier.
+    """
+    if getattr(release, "is_hash_match", False) or getattr(release, "matched_by_hash", False):
+        return TIER_HASH
+    cand_name = _release_name(release)
+    if not target_name or not cand_name:
+        return TIER_FALLBACK
+    if _groups_match(target_name, cand_name):
+        return TIER_EXACT_GROUP
+    if _source_edition_match(target_name, cand_name):
+        return TIER_SOURCE_EDITION
+    return TIER_FALLBACK
 
 
 def _is_scene_named(cand_name: str) -> int:
@@ -424,43 +274,46 @@ def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
     if not pool:
         return []
 
-    scored = [(score_candidate(query.target_filename, rel), rel) for rel in pool]
-    # Hash-confirmed tracks are byte-exact ground truth; active (non-broken)
-    # providers are prioritized; an exact-episode candidate outranks a season
-    # pack that still has to be unbundled; score is primary; on exact score
-    # ties: matching audio codec, standard scene dot-naming, matching target
-    # language, and generous-quota providers.
+    tiered = [(reference_tier(query.target_filename, rel), rel) for rel in pool]
+    # Strict tier hierarchy first; every remaining key is a deterministic
+    # tie-breaker used only *within* a tier:
+    #   tier > healthy provider > exact-episode over season pack >
+    #   English reference anchor > non-HI > standard scene naming >
+    #   provider quota priority > release name.
     target_langs = tuple(
         str(lang).lower()
         for lang in (query.languages if query and query.languages else ("ara", "ar"))
     )
-    scored.sort(
+    tiered.sort(
         key=lambda item: (
-            1 if getattr(item[1], "is_hash_match", False) else 0,
-            0 if _is_rel_provider_broken(item[1]) else 1,
-            1 if _is_exact_episode(item[1], query) else 0,
             item[0],
-            _is_scene_named(_release_name(item[1])),
-            _has_audio_match(query.target_filename, _release_name(item[1])),
-            1 if str(getattr(item[1], "lang", "")).lower() in target_langs else 0,
-            _PROVIDER_TIE_PRIORITY.get(str(getattr(item[1], "provider", "") or "").lower(), 0),
-        ),
-        reverse=True,
+            1 if _is_rel_provider_broken(item[1]) else 0,
+            0 if _is_exact_episode(item[1], query) else 1,
+            0 if str(getattr(item[1], "lang", "")).lower().startswith("en") else 1,
+            0 if str(getattr(item[1], "lang", "")).lower() in target_langs else 1,
+            1 if getattr(item[1], "hearing_impaired", False) else 0,
+            0 if _is_scene_named(_release_name(item[1])) else 1,
+            -_PROVIDER_TIE_PRIORITY.get(
+                str(getattr(item[1], "provider", "") or "").lower(), 0
+            ),
+            _release_name(item[1]),
+        )
     )
-    for score, rel in scored[:5]:
+    for tier, rel in tiered[:5]:
         logger.info(
-            "[reference] candidate score=%d lang=%s hash=%s provider=%s %r",
-            score,
+            "[reference] candidate tier=%d (%s) lang=%s hash=%s provider=%s %r",
+            tier,
+            tier_label(tier),
             getattr(rel, "lang", "?"),
             bool(getattr(rel, "is_hash_match", False)),
             getattr(rel, "provider", "?"),
             _release_name(rel),
         )
-    return [rel for _, rel in scored]
+    return [rel for _, rel in tiered]
 
 
 def _select_reference(releases, query: ReferenceQuery):
-    """Pick the single best season/episode-matched reference by weighted score."""
+    """Pick the single best reference by deterministic tier then tie-breakers."""
     ranked = _select_candidates_ranked(releases, query)
     return ranked[0] if ranked else None
 
@@ -722,10 +575,12 @@ class ExternalExactStrategy:
             if (getattr(best, "is_hash_match", False) or getattr(best, "matched_by_hash", False))
             else "edition"
         )
+        tier = reference_tier(query.target_filename, best)
         logger.info(
-            "[reference] downloading reference %r (score=%d, lang=%s) via %s (kind=%s)",
+            "[reference] downloading reference %r (tier=%d/%s, lang=%s) via %s (kind=%s)",
             best_name,
-            score_candidate(query.target_filename, best),
+            tier,
+            tier_label(tier),
             getattr(best, "lang", "?"),
             self._provider_label(provider),
             decision_kind,

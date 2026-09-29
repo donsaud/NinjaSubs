@@ -41,19 +41,38 @@ def _pool(names: list[str]) -> list[SubtitleRelease]:
 
 
 def _assert_strictly_descending(ranked: list[SubtitleRelease]) -> None:
+    """Ranking is monotonic in tier, and monotonic in percentage within a tier.
+
+    Tier is the primary sort key, so a higher tier may legitimately carry a
+    lower percentage than a lower tier (a well-matched WEBRip outranks a
+    near-unknown release). Percentage only orders candidates of equal tier.
+    """
     assert ranked, "expected at least one ranked candidate"
-    assert ranked[0].match_percentage == max(s.match_percentage for s in ranked)
+
+    best_tier = min(s.match_tier.value for s in ranked)
+    assert ranked[0].match_tier.value == best_tier, (
+        f"Top candidate {ranked[0].release_name!r} is in tier {ranked[0].match_tier}, "
+        f"expected the best available tier {best_tier}"
+    )
+
     for prev, curr in zip(ranked, ranked[1:], strict=False):
-        assert prev.match_percentage >= curr.match_percentage, (
-            f"Sorting violation: {prev.release_name} ({prev.match_percentage}%) ranked lower than "
-            f"{curr.release_name} ({curr.match_percentage}%)"
+        prev_tier = prev.match_tier.value
+        curr_tier = curr.match_tier.value
+        assert prev_tier <= curr_tier, (
+            f"Tier violation: {prev.release_name} (tier {prev_tier}) ranked below "
+            f"{curr.release_name} (tier {curr_tier})"
         )
-        # Ties are broken consistently by the secondary score (descending).
-        if prev.match_percentage == curr.match_percentage:
-            assert prev.score >= curr.score, (
-                f"Tie-break violation: {prev.release_name} ({prev.score}) ranked below "
-                f"{curr.release_name} ({curr.score}) at equal match_percentage"
+        if prev_tier == curr_tier:
+            assert prev.match_percentage >= curr.match_percentage, (
+                f"Sorting violation within tier {prev.match_tier}: "
+                f"{prev.release_name} ({prev.match_percentage}%) ranked lower than "
+                f"{curr.release_name} ({curr.match_percentage}%)"
             )
+            if prev.match_percentage == curr.match_percentage:
+                assert prev.score >= curr.score, (
+                    f"Tie-break violation: {prev.release_name} ({prev.score}) ranked below "
+                    f"{curr.release_name} ({curr.score}) at equal match_percentage"
+                )
 
 
 # --------------------------------------------------------------------------- #

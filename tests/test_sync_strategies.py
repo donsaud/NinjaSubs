@@ -730,10 +730,10 @@ async def test_orchestrator_logs_sync_cache_hit(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_reference_selection_prefers_hash_matched_english(tmp_path):
-    """A MovieHash-matched English reference beats high-scoring text-only candidates."""
+    """A MovieHash-matched English reference beats strong text-only candidates."""
     from app.models import SubtitleRelease
     from app.services.sync.cache import ReferenceDiskCache
-    from app.services.sync.external_strategy import ExternalExactStrategy, score_candidate
+    from app.services.sync.external_strategy import TIER_HASH, ExternalExactStrategy, reference_tier
 
     class _Provider:
         def __init__(self, releases):
@@ -754,7 +754,8 @@ async def test_reference_selection_prefers_hash_matched_english(tmp_path):
         release_name="Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-WADU.srt",
         download_url="http://text", provider="subdl", lang="eng",
     )
-    assert score_candidate(target, text_only) >= 100  # strong filename match, no hash
+    # Strong text-only match (same group + source), but no byte-exact proof.
+    assert reference_tier(target, text_only) > TIER_HASH
     hashed = SubtitleRelease(
         release_name="Mad.Men.S01E02.720p.HDTV.x264-Scene.srt",
         download_url="http://hash", provider="opensubtitles", lang="eng",

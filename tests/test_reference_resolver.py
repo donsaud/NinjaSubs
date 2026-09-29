@@ -11,6 +11,12 @@ from app.services.reference_resolver import (
     ReferenceQuery,
     _title_from_filename,
 )
+from app.services.sync.external_strategy import (
+    TIER_EXACT_GROUP,
+    TIER_FALLBACK,
+    TIER_SOURCE_EDITION,
+    reference_tier,
+)
 from app.services.sync.query import ResolvedReference
 
 
@@ -321,7 +327,7 @@ async def test_fast_failure_does_not_cancel_slow_provider():
 
 
 @pytest.mark.asyncio
-async def test_resolver_logs_scored_candidates(caplog):
+async def test_resolver_logs_tiered_candidates(caplog):
     class _P:
         async def search_subtitles(self, **kwargs):
             return [
@@ -346,7 +352,7 @@ async def test_resolver_logs_scored_candidates(caplog):
                 target_filename="Dexter.S08E01.1080p.BluRay.x265-GRP.mkv",
             )
         )
-    assert "candidate score=" in caplog.text
+    assert "candidate tier=" in caplog.text
     assert "selected reference" in caplog.text
 
 
@@ -1261,38 +1267,49 @@ def _mad_men_query():
     )
 
 
-def test_score_candidate_webdl_beats_generic_bluray():
-    from app.services.sync.external_strategy import score_candidate
+def test_reference_tier_webdl_beats_generic_bluray():
+    from app.services.sync.external_strategy import reference_tier
 
     webdl = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-BTN.srt")
     bluray = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt")
-    # source 30 + platform 20 + resolution 10 + codec 5 + episode 10 + en 10 + non-HI 5
-    assert score_candidate(_MAD_MEN_TARGET, webdl) == 90
-    # res-near 5 + episode 10 + en 10 + non-HI 5 (BluRay conflicts with WEB-DL)
-    assert score_candidate(_MAD_MEN_TARGET, bluray) == 30
-    assert score_candidate(_MAD_MEN_TARGET, webdl) > score_candidate(_MAD_MEN_TARGET, bluray)
+    # Target is a WEB-DL: the WEB-DL candidate shares the source medium while the
+    # BluRay candidate does not, so it lands in a strictly better tier.
+    assert reference_tier(_MAD_MEN_TARGET, webdl) == TIER_SOURCE_EDITION
+    assert reference_tier(_MAD_MEN_TARGET, bluray) == TIER_FALLBACK
+    assert reference_tier(_MAD_MEN_TARGET, webdl) < reference_tier(_MAD_MEN_TARGET, bluray)
 
 
-def test_score_candidate_group_match_non_english_beats_generic_english():
-    from app.services.sync.external_strategy import score_candidate
+def test_reference_tier_exact_group_beats_generic_english():
+    from app.services.sync.external_strategy import reference_tier
 
     wadu_es = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.DDP5.1.H.265-WADU.srt", lang="spa")
     generic_en = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="eng")
-    # group 50 + source 30 + platform 20 + res 10 + codec 5 + episode 10 + alt-lang 5 + non-HI 5
-    assert score_candidate(_MAD_MEN_TARGET, wadu_es) == 135
-    assert score_candidate(_MAD_MEN_TARGET, generic_en) == 70
-    assert score_candidate(_MAD_MEN_TARGET, wadu_es) > score_candidate(_MAD_MEN_TARGET, generic_en)
+    # BTN appears in the target release name, so WADU's shared medium is
+    # irrelevant: an exact group outranks language and property preference.
+    assert reference_tier(_MAD_MEN_TARGET, wadu_es) == TIER_EXACT_GROUP
+    assert reference_tier(_MAD_MEN_TARGET, generic_en) == TIER_SOURCE_EDITION
+    assert reference_tier(_MAD_MEN_TARGET, wadu_es) < reference_tier(_MAD_MEN_TARGET, generic_en)
 
 
-def test_score_candidate_prefers_english_on_ties():
-    from app.services.sync.external_strategy import score_candidate
+def test_reference_tier_is_language_agnostic():
+    from app.services.sync.external_strategy import reference_tier
 
     en = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="eng")
     fr = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="fra")
-    assert score_candidate(_MAD_MEN_TARGET, en) == score_candidate(_MAD_MEN_TARGET, fr) + 5
+    # Tiers encode release identity only; language never influences them.
+    assert reference_tier(_MAD_MEN_TARGET, en) == reference_tier(_MAD_MEN_TARGET, fr)
 
 
-def test_select_reference_picks_highest_scoring_candidate():
+def test_select_reference_breaks_tier_ties_with_english_anchor():
+    from app.services.sync.external_strategy import _select_reference
+
+    en = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="eng")
+    fr = _cand("Mad.Men.S01E02.2160p.WEB-DL.x265.srt", lang="fra")
+    # Same tier, so the English reference anchor wins deterministically.
+    assert _select_reference([fr, en], _mad_men_query()) is en
+
+
+def test_select_reference_picks_higher_tier_candidate():
     from app.services.sync.external_strategy import _select_reference
 
     bluray = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt")
@@ -1300,26 +1317,29 @@ def test_select_reference_picks_highest_scoring_candidate():
     assert _select_reference([bluray, webdl], _mad_men_query()) is webdl
 
 
-def test_select_reference_falls_back_to_first_when_all_score_zero():
+def test_select_reference_falls_back_deterministically():
     from app.services.sync.external_strategy import _select_reference
 
-    # HI + non-priority language + no shared metadata => score 0 for both.
+    # Both in the fallback tier with no shared metadata: the release name is the
+    # final tie-breaker, so ordering is reproducible instead of input-dependent.
     first = _cand("Mad.Men.S01E02.release.one.srt", lang="por", hi=True)
     second = _cand("Mad.Men.S01E02.release.two.srt", lang="por", hi=True)
     assert _select_reference([first, second], _mad_men_query()) is first
+    assert _select_reference([second, first], _mad_men_query()) is first
 
 
-def test_select_reference_group_language_beats_generic_english():
+def test_select_reference_exact_group_language_beats_generic_english():
     from app.services.sync.external_strategy import _select_reference
 
     generic_en = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt", lang="eng")
     wadu_fr = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.H.265-WADU.srt", lang="fra")
+    # Tier (exact group) outranks the English-language preference.
     assert _select_reference([generic_en, wadu_fr], _mad_men_query()) is wadu_fr
 
 
 @pytest.mark.asyncio
-async def test_cross_provider_scoring_beats_first_provider(tmp_path):
-    """The first provider to answer must not win: score the pool globally.
+async def test_cross_provider_tiering_beats_first_provider(tmp_path):
+    """The first provider to answer must not win: tier the pool globally.
 
     Regression for Mad Men: subdl's 720p WEB-DL season pack must lose to an
     episode-specific streaming WEB-DL reference from another provider.

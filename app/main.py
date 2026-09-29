@@ -581,8 +581,10 @@ async def _fetch_subtitles_handler(
     )
 
     # Surface previously-synced artifacts: any release that already has a synced
-    # payload cached for this stream is marked `status="synced"`, then stably
-    # re-sorted so hash matches stay first and synced items come second.
+    # payload cached for this stream is marked `status="synced"`. The mark is
+    # purely informational (it drives the "⚡ Synced" badge); ordering is left to
+    # ``rank_subtitles`` so a stale cached artifact is never promoted above a
+    # candidate whose release metadata actually matches.
     for rel in ranked_releases:
         rel_key = f"{rel.provider}:{rel.release_name}:{rel.download_url}"
         if season is not None:
@@ -596,14 +598,6 @@ async def _fetch_subtitles_handler(
             synced_blob = None
         if synced_blob is not None:
             rel.status = "synced"
-    ranked_releases.sort(
-        key=lambda r: (
-            0
-            if (getattr(r, "matched_by_hash", False) or getattr(r, "is_hash_match", False))
-            else 1,
-            0 if getattr(r, "status", "") == "synced" else 1,
-        )
-    )
 
     base_url = get_base_url(request)
     subtitle_items: list[SubtitleItem] = []

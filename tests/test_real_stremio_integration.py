@@ -5,6 +5,8 @@ Validates that the exact ordering produced by rank_subtitles() is preserved
 all the way through the Stremio /subtitles endpoint response:
 1. Movie: Dune Part Two 2024 (Remux target with same-year BluRay, same-year WEB-DL, wrong-year BluRay, WEBRip)
 2. TV: House of the Dragon S02E01 (HMAX FLUX, AMZN FLUX, HMAX WEBRip, wrong episode S02E02, wrong season S01E01)
+   Ordering: the two FLUX releases share the target's exact release group (exact
+   tier) and outrank the HMAX WEBRip, which only reaches the source/edition tier.
 3. Anime: One Piece 1050 (1050, E1050, 1049-1050, 1051)
 4. Languages: Multi-language grouping (Arabic, English, French) with mixed compatibility scores
 5. SDH: Exclude HI True vs False verification
@@ -234,10 +236,13 @@ async def test_real_stremio_tv_house_of_the_dragon(client):
             assert len(subtitles) == 3
             assert len(subtitles) == len(expected_ranked)
 
-            # 3. Exact ordering: HMAX WEB-DL FLUX > HMAX WEBRip > AMZN WEB-DL FLUX
+            # 3. Exact ordering: HMAX WEB-DL FLUX > AMZN WEB-DL FLUX > HMAX WEBRip
+            # Both FLUX releases share the target's exact release group, so they
+            # occupy the exact tier ahead of the WEBRip, which only reaches the
+            # source/edition tier despite matching the HMAX platform.
             assert "HMAX.WEB-DL-FLUX" in releases[0]
-            assert "HMAX.WEBRip" in releases[1]
-            assert "AMZN.WEB-DL-FLUX" in releases[2]
+            assert "AMZN.WEB-DL-FLUX" in releases[1]
+            assert "HMAX.WEBRip" in releases[2]
 
             for i, expected in enumerate(expected_ranked):
                 assert expected.release_name == get_release_name(subtitles[i])
