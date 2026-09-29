@@ -392,6 +392,12 @@ async def test_shadow_cannot_reach_alass_behaviourally():
     commits to the second (credits-heavy but correctly timed). Shadow sees both
     and, judging on health alone, prefers the first. The returned text must
     still be the legacy one.
+
+    Both candidates are deliberately in the same identity band, so this test
+    exercises shadow isolation and not the target-bound tier floor. That floor
+    is covered by test_reference_target_bound.py: when the first candidate
+    matches the target *better* than the second, the legacy fall-through is
+    now correctly refused, which would otherwise mask what this test measures.
     """
     from app.models import SubtitleRelease
     from app.services.subtitle_matcher import (
@@ -417,13 +423,13 @@ async def test_shadow_cannot_reach_alass_behaviourally():
         async def search_subtitles(self, **kwargs):
             return [
                 SubtitleRelease(
-                    release_name="Dexter.S08E05.1080p.BluRay.x264-PiR8.srt",
+                    release_name="Dexter.S08E05.1080p.BluRay.x264-OtherGRP.srt",
                     download_url="http://first",
                     provider="subdl",
                     lang="eng",
                 ),
                 SubtitleRelease(
-                    release_name="Dexter.S08E05.1080p.BluRay.x264-OtherGRP.srt",
+                    release_name="Dexter.S08E05.1080p.BluRay.x264-ThirdGRP.srt",
                     download_url="http://second",
                     provider="subdl",
                     lang="eng",

@@ -554,6 +554,27 @@ class _Legacy:
         self.lang = "eng"
 
 
+_TIER_BANDS: Mapping[MatchTier, int] = {
+    MatchTier.HASH: 0,
+    MatchTier.EXACT: 1,
+    MatchTier.SOURCE_FAMILY: 2,
+    MatchTier.CLOSE: 3,
+    MatchTier.FALLBACK: 3,
+}
+
+
+def tier_band(match_tier: MatchTier) -> int:
+    """Coarse identity band: 0 HASH, 1 EXACT, 2 SOURCE_FAMILY, 3 weak.
+
+    Two references in the same band are interchangeable as far as *content
+    identity* is concerned. Adjacent tiers inside one band (CLOSE vs FALLBACK,
+    or two arbitrary release groups that both merely sit in SOURCE_FAMILY) are
+    metadata noise, not evidence, and must never be allowed to drive a
+    decision on their own.
+    """
+    return _TIER_BANDS.get(match_tier, 3)
+
+
 def _tiers_agree(match_tier: MatchTier, legacy_tier: int) -> bool:
     """Map both ladders onto a coarse scale and compare.
 
@@ -570,3 +591,213 @@ def _tiers_agree(match_tier: MatchTier, legacy_tier: int) -> bool:
         MatchTier.FALLBACK: 3,
     }[match_tier]
     return band == min(legacy_tier, 3)
+
+# ---------------------------------------------------------------------------
+# TARGET-BOUND SELECTION (promoted policy)
+# ---------------------------------------------------------------------------
+#
+# The shadow selector above already makes a target-bound choice: its ordering
+# is content identity, health and trust, and it never sees a subtitle the user
+# asked for. What it lacked was a rule for what happens when a reference is
+# *rejected* against that candidate, and that rule is the whole production bug.
+#
+# The legacy loop treated "fails against this candidate" as "this reference is
+# wrong", then walked down the list until some reference happened to fit. That
+# inverts the causal order. A reference belongs to the target or it does not;
+# the requested subtitle is evidence about the *candidate*, not about the
+# reference.
+
+NO_TARGET_BOUND_REFERENCE = "NO_TARGET_BOUND_REFERENCE"
+REFERENCE_TARGET_MISMATCH = "REFERENCE_TARGET_MISMATCH"
+REFERENCE_LOW_HEALTH = "REFERENCE_LOW_HEALTH"
+CANDIDATE_DIFFERENT_TIMELINE = "CANDIDATE_DIFFERENT_TIMELINE"
+TARGET_REFERENCE_SELECTED = "TARGET_REFERENCE_SELECTED"
+
+_MAX_REASON_LEN = 120
+
+
+def release_family_key(release_name: str) -> str:
+    """Coarse release identity, used to collapse one timing model to one slot."""
+    name = (release_name or "").lower()
+    try:
+        meta = extract_metadata(name) or {}
+    except Exception:  # pragma: no cover - a malformed name is not fatal
+        meta = {}
+    source = str(meta.get("source") or "").strip()
+    edition = str(meta.get("edition") or "").strip()
+    group = str(meta.get("group") or "").strip()
+    if source or group:
+        return "|".join((source, edition, group))
+    return name.rsplit(".", 1)[0].strip()
+
+
+class ReferenceAttempt(BaseModel):
+    """One reference the resolver fetched, and what happened to it."""
+
+    reference_id: str
+    release_name: str
+    provider: str | None = None
+    match_tier: MatchTier = MatchTier.FALLBACK
+    hard_accepted: bool = True
+    health_class: str = "unknown"
+    family: str = ""
+    downloaded: bool = False
+    cue_sanity_ok: bool | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+    @property
+    def anchorable(self) -> bool:
+        """Eligible to be the target's anchor.
+
+        Health is deliberately *not* a veto here. The health thresholds were
+        calibrated for shadow measurement, and promoting them to a hard
+        production gate was measured to refuse references the previous policy
+        accepted: reference loss is a worse failure than a weak anchor. Health
+        still orders otherwise-equal candidates, and a reference rejected
+        against the target can never be rescued by it.
+        """
+        return self.hard_accepted and self.downloaded and self.cue_sanity_ok is not None
+
+
+class TargetBoundDecision(BaseModel):
+    """Step A: the target's reference, decided without reference to a candidate."""
+
+    selected: ReferenceAttempt | None = None
+    attempts: list[ReferenceAttempt] = Field(default_factory=list)
+    outcome: str = NO_TARGET_BOUND_REFERENCE
+    reasons: list[str] = Field(default_factory=list)
+    downloads_used: int = 0
+    unique_families: int = 0
+    duplicate_families_avoided: int = 0
+    suppressed_as_circular: list[str] = Field(default_factory=list)
+    mode: str = "target_bound"
+
+    @property
+    def usable(self) -> bool:
+        return self.selected is not None
+
+
+def decide_target_bound_reference(
+    attempts: Sequence[ReferenceAttempt],
+) -> TargetBoundDecision:
+    """Choose the target's reference from a set of attempted references.
+
+    The anti-circularity rule, stated once: a reference that fits the candidate
+    better may never displace a reference that matches the target better, even
+    if the better-fitting reference is the only one the candidate agrees with.
+
+    Implemented as a tier floor. If any target-accepted reference failed against
+    the candidate, only references at least as strong against the *target* may
+    still be selected. A weaker reference that merely fits is suppressed, and
+    the decision fails closed.
+    """
+    decision = TargetBoundDecision(attempts=list(attempts))
+    decision.downloads_used = sum(1 for a in attempts if a.downloaded)
+    families = [a.family or a.reference_id for a in attempts if a.downloaded]
+    decision.unique_families = len(set(families))
+    decision.duplicate_families_avoided = max(0, len(families) - len(set(families)))
+
+    hard_rejected = [a for a in attempts if not a.hard_accepted]
+    low_health = [a for a in attempts if a.health_class == "unusable"]
+    if hard_rejected:
+        decision.reasons.append(
+            f"{REFERENCE_TARGET_MISMATCH}: {len(hard_rejected)} reference(s) "
+            "did not match the target video"
+        )
+    if low_health:
+        decision.reasons.append(
+            f"{REFERENCE_LOW_HEALTH}: {len(low_health)} reference(s) unusable as anchors"
+        )
+
+    anchorable = [a for a in attempts if a.anchorable]
+    if not anchorable:
+        decision.outcome = NO_TARGET_BOUND_REFERENCE
+        decision.reasons.append(
+            f"{NO_TARGET_BOUND_REFERENCE}: no target-accepted reference was usable"
+        )
+        return decision
+
+    failed = [a for a in anchorable if a.cue_sanity_ok is False]
+    best_failed_tier = min((int(a.match_tier) for a in failed), default=None)
+    best_failed_band = min((tier_band(a.match_tier) for a in failed), default=None)
+
+    passing = [a for a in anchorable if a.cue_sanity_ok is True]
+    admissible: list[ReferenceAttempt] = []
+    for attempt in passing:
+        if best_failed_band is not None and tier_band(attempt.match_tier) > best_failed_band:
+            decision.suppressed_as_circular.append(attempt.reference_id)
+            attempt.reasons.append(
+                "suppressed: fits the candidate but matches the target worse than a "
+                "reference already proven incompatible; candidate timing may not "
+                "choose the reference"
+            )
+            continue
+        admissible.append(attempt)
+
+    if admissible:
+        selected = min(
+            admissible,
+            key=lambda a: (
+                int(a.match_tier),
+                0 if a.health_class != "unusable" else 1,
+                a.reference_id,
+            ),
+        )
+        decision.selected = selected
+        decision.outcome = TARGET_REFERENCE_SELECTED
+        decision.reasons.append(
+            f"{TARGET_REFERENCE_SELECTED}: match_tier={selected.match_tier.name}"
+        )
+        if selected.family:
+            decision.reasons.append(
+                f"reference family={selected.family[:_MAX_REASON_LEN]}"
+            )
+        if best_failed_tier is not None:
+            decision.reasons.append(
+                "a stronger target match disagreed with the candidate "
+                f"(tier<={MatchTier(best_failed_tier).name}); the candidate is the outlier"
+            )
+        return decision
+
+    if best_failed_tier is not None:
+        decision.outcome = CANDIDATE_DIFFERENT_TIMELINE
+        decision.reasons.append(
+            f"{CANDIDATE_DIFFERENT_TIMELINE}: the target-bound reference "
+            f"(tier<={MatchTier(best_failed_tier).name}) does not share this "
+            "candidate's timeline; refusing to substitute a weaker reference "
+            "that merely fits"
+        )
+        return decision
+
+    decision.outcome = NO_TARGET_BOUND_REFERENCE
+    decision.reasons.append(
+        f"{NO_TARGET_BOUND_REFERENCE}: no reference could be anchored to the target"
+    )
+    return decision
+
+
+def reference_family_counts(attempts: Sequence[ReferenceAttempt]) -> dict[str, int]:
+    """Per-family download counts, for the duplicate-collapse metric."""
+    counts: dict[str, int] = {}
+    for attempt in attempts:
+        if not attempt.downloaded:
+            continue
+        key = attempt.family or attempt.reference_id
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def summarize_target_bound(decision: TargetBoundDecision) -> dict[str, Any]:
+    """Audit shape. Counts and hashed identities only: no text, URLs or keys."""
+    return {
+        "selected": decision.selected.reference_id if decision.selected else None,
+        "selection_mode": decision.mode,
+        "match_tier": decision.selected.match_tier.name if decision.selected else None,
+        "reference_family": decision.selected.family if decision.selected else None,
+        "outcome": decision.outcome,
+        "downloads_used": decision.downloads_used,
+        "unique_families": decision.unique_families,
+        "duplicate_families_avoided": decision.duplicate_families_avoided,
+        "suppressed_as_circular": len(decision.suppressed_as_circular),
+        "reasons": [r[:_MAX_REASON_LEN] for r in decision.reasons[:8]],
+    }

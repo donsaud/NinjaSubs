@@ -1176,30 +1176,103 @@ async def test_cumulative_pack_allowed_for_movie_queries(tmp_path):
 
 @pytest.mark.asyncio
 async def test_rejected_reference_falls_through_to_next_candidate(tmp_path):
-    """A reference failing cue-sanity must be skipped in favour of the next-ranked one."""
+    """A weaker reference must not be promoted because it fits the candidate.
+
+    This is the production incident, reproduced exactly: target
+    ``Dexter.s8e05.This.little.piggy.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv``, a
+    candidate whose first dialogue sits at ~106.95s, an exact-release-group
+    reference at ~10.51s, and a weaker 720p reference that happens to sit at
+    ~106.95s.
+
+    The old policy returned the 720p reference, because it was the only one that
+    satisfied the requested subtitle. That is the circularity: the candidate
+    chose the reference. The correct outcome is to refuse, and to say why.
+    """
     from app.models import SubtitleRelease
     from app.services.sync.cache import ReferenceDiskCache
     from app.services.sync.external_strategy import ExternalExactStrategy
 
-    bad_ref = _dialogue(10_510)  # first dialogue ~96s before the target's
-    good_ref = _dialogue(106_950)  # correct cut
+    bad_ref = _dialogue(10_510)  # first dialogue ~96s before the candidate's
+    good_ref = _dialogue(106_950)  # correct for the candidate, wrong for the target
 
     pack = SubtitleRelease(
         release_name=SEASON_PACK_NAME,
         download_url="http://pack", provider="subdl", lang="ara",
     )
-    best_scoring = SubtitleRelease(
+    exact = SubtitleRelease(
         release_name="Dexter.S08E05.1080p.BluRay.x264-PiR8.srt",
-        download_url="http://best", provider="subdl", lang="eng",
+        download_url="http://exact", provider="subdl", lang="eng",
     )
-    usable = SubtitleRelease(
+    weaker = SubtitleRelease(
         release_name="Dexter.S08E05.720p.BluRay.x264-NORDiC",
-        download_url="http://ep5", provider="subsource", lang="eng",
+        download_url="http://720p", provider="subsource", lang="eng",
     )
     target_text = _dialogue(106_950).decode()
 
-    subdl = _provider_for([pack, best_scoring], bad_ref)
-    subsource = _provider_for([usable], good_ref)
+    subdl = _provider_for([pack, exact], bad_ref)
+    subsource = _provider_for([weaker], good_ref)
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=subsource,
+        opensubtitles_provider=None,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        min_bytes=100,
+        timeout=1.0,
+    )
+
+    def _validator(reference_text: str) -> bool:
+        from app.services.subtitle_matcher import (
+            FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            validate_cue_sanity,
+        )
+
+        return bool(
+            validate_cue_sanity(
+                target_text,
+                reference_text,
+                threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            )["ok"]
+        )
+
+    resolved = await strategy.resolve_with_provenance(_series_query(), update_validator=_validator)
+
+    # The exact-group reference is the target's anchor. It disagrees with the
+    # candidate, so the candidate is a different cut and nothing is
+    # synchronized. The 720p reference that fits the candidate is suppressed.
+    assert resolved.text is None
+    assert resolved.kind == "abort"
+    assert subdl.downloaded == ["http://exact"]
+    assert subsource.downloaded == ["http://720p"]
+
+
+@pytest.mark.asyncio
+async def test_equal_strength_reference_still_falls_through(tmp_path):
+    """A mislabeled reference must not abort the sync when its equal stands.
+
+    The fall-through behaviour is preserved where it is sound: two references
+    of the same target strength (same release group) are interchangeable, so if
+    the first is mislabeled the second may serve. What is forbidden is
+    substituting a *weaker* reference, which is the previous test.
+    """
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    mislabeled = _dialogue(10_510)
+    correct = _dialogue(106_950)
+    target_text = _dialogue(106_950).decode()
+
+    first = SubtitleRelease(
+        release_name="Dexter.S08E05.1080p.BluRay.x264-PiR8.srt",
+        download_url="http://first", provider="subdl", lang="eng",
+    )
+    second = SubtitleRelease(
+        release_name="Dexter.S08E05.1080p.BluRay.TrueHD5.1.AVC-PiR8.srt",
+        download_url="http://second", provider="subsource", lang="eng",
+    )
+
+    subdl = _provider_for([first], mislabeled)
+    subsource = _provider_for([second], correct)
     strategy = ExternalExactStrategy(
         subdl_provider=subdl,
         subsource_provider=subsource,
@@ -1225,11 +1298,7 @@ async def test_rejected_reference_falls_through_to_next_candidate(tmp_path):
 
     resolved = await strategy.resolve_with_provenance(_series_query(), update_validator=_validator)
     assert resolved.text is not None
-    # Episode-specific candidates are tried first; the rejected one falls through
-    # to the next, and the demoted season pack is never reached.
-    assert subdl.downloaded == ["http://best"]
-    assert subsource.downloaded == ["http://ep5"]
-    assert resolved.candidate == usable.release_name
+    assert resolved.candidate == second.release_name
 
 
 @pytest.mark.asyncio

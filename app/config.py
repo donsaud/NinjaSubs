@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # `shadow_pool_limited_by_available_payloads` rather than pretending the
     # pool is representative.
     REFERENCE_SHADOW_POOL_FETCH_LIMIT: int = 0
+    # Hard ceiling on reference downloads per resolution, for the promoted
+    # target-bound selector. This is the same number the legacy loop used as its
+    # `max_attempts`, so promotion does not increase network traffic. The
+    # selector normally stops far earlier: it collapses duplicate release
+    # families and short-circuits a known-incompatible timing family.
+    REFERENCE_POOL_LIMIT: int = 6
     REDIS_URL: str | None = None
 
     # --- adaptive audio activity detection (measurement only) -------------- #

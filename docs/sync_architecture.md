@@ -4,6 +4,58 @@ The algorithm is frozen as of this document. Nothing below is a proposal. It
 is a record of what the system does, what it is good at, and — stated plainly
 — where it is known to be wrong.
 
+## Reference selection is target-bound
+
+The one exception to "frozen", promoted because a production incident proved the
+old shape wrong.
+
+```
+TARGET VIDEO -> reference -> candidate/reference comparison -> alass
+```
+
+The requested subtitle is **not** permitted to choose the reference. It decides
+only whether a synchronization happens.
+
+The previous resolver ranked candidates, downloaded the first, and asked a
+validator that closed over the requested subtitle whether it passed a
+first-dialogue gate; a failure was read as "this reference is wrong", and the
+loop continued until some reference happened to fit. For target
+`Dexter.s8e05.This.little.piggy.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv` with a
+candidate first dialoguing at ~106.95s, that meant downloading six English
+candidates at ~10.16s, rejecting all six with the same ~+97s delta, and
+aborting. The ±20s gate was correct throughout; the *decision* was inverted.
+
+Selection now runs in two steps that are not mixed:
+
+- **Step A, target reference.** Scored by `MatchTier` and
+  `hard_compatibility_filter` against the target only, ordered by
+  `ReferenceHealth`/`ReferenceTrust`, deduplicated by release family, bounded
+  by `REFERENCE_POOL_LIMIT`. Implemented in
+  `app/services/sync/reference_v2.py::decide_target_bound_reference`, which
+  takes no candidate argument at all.
+- **Step B, candidate synchronization.** The preflight comparison, the ±20s
+  cue-sanity gate, alass, `AlignmentAnalyzer`, verification. Unchanged.
+
+The anti-circularity rule: if any target-accepted reference fails against the
+candidate, only references in a **stronger or equal identity band**
+(`tier_band`, reusing the existing HASH/EXACT/SOURCE_FAMILY/weak scale) may
+still be selected. A weaker reference that merely fits the candidate is
+suppressed and the request fails closed with `CANDIDATE_DIFFERENT_TIMELINE`.
+
+Two deliberate limits, both measured rather than assumed:
+
+- **Reference loss was observed and rejected.** Promoting the shadow's
+  `health_class == "unusable"` to a hard production veto refused references the
+  previous policy accepted. Health therefore orders equally-strong candidates
+  and is reported, but does not by itself cancel a reference. A hard target
+  mismatch still cancels one absolutely.
+- **The tier floor compares bands, not tiers.** Two references differing only
+  by an arbitrary release group inside `SOURCE_FAMILY` are metadata noise, not
+  evidence; letting that difference refuse a sync would be a new bug.
+
+`NO_TARGET_BOUND_REFERENCE` is a valid, expected outcome. The system fails
+closed rather than anchoring to a reference the target does not support.
+
 ## Production trust boundary
 
 These distinctions are the architecture. Everything else is machinery around

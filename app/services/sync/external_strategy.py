@@ -16,6 +16,8 @@ candidate scores, the first season/episode match is used instead of aborting.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
 import time
@@ -40,6 +42,7 @@ from app.services.sync.matching import (
     normalize_release_group,
 )
 from app.services.sync.query import ResolvedReference
+from app.services.sync.reference_v2 import release_family_key as _release_family_key
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.sync.query import ReferenceQuery
@@ -441,6 +444,12 @@ class ExternalExactStrategy:
         exhausted_providers: set[str] = set()
 
         max_attempts = 6
+        try:
+            from app.config import settings as _settings
+
+            max_attempts = max(1, int(getattr(_settings, "REFERENCE_POOL_LIMIT", 6) or 6))
+        except Exception:  # pragma: no cover - keep the legacy ceiling
+            pass
         attempts = 0
         stem = query.cache_stem
         # References already downloaded during THIS request, as
@@ -448,6 +457,12 @@ class ExternalExactStrategy:
         # both of which are measurements over data we already have.
         observed_references: list[tuple[str, str | None, str | None]] = []
         candidate_decision_kinds: dict[str, str] = {}
+        # Cue-sanity outcome per release name, and the release families already
+        # proven incompatible with this candidate. Both feed the target-bound
+        # decision after the loop.
+        cue_sanity_by_release: dict[str, bool] = {}
+        family_rejected: set[str] = set()
+        family = ""
 
         for cand in ranked:
             cand_provider = provider_of.get(id(cand))
@@ -492,6 +507,20 @@ class ExternalExactStrategy:
                 exhausted_providers.add(provider_lbl)
                 continue
 
+            # One timing model advertised by several providers is one model.
+            # Once a release family has been proven incompatible with this
+            # candidate, a sibling from another provider will be too, so it is
+            # not downloaded just to rediscover the same delta.
+            family = _release_family_key(_release_name(cand))
+            if family in family_rejected:
+                logger.info(
+                    "[reference] skipping %r: release family %r already proven "
+                    "incompatible with this candidate",
+                    getattr(cand, "release_name", "?"),
+                    family,
+                )
+                continue
+
             attempts += 1
             cand_result = await self._download_candidate(cand, cand_provider, query)
             if cand_result.text:
@@ -504,13 +533,18 @@ class ExternalExactStrategy:
                 )
                 candidate_decision_kinds[_release_name(cand)] = cand_result.kind
                 if validate is not None and not validate(cand_result.text):
+                    cue_sanity_by_release[_release_name(cand)] = False
+                    family_rejected.add(family)
                     self._mark_rejected(stem, cand)
                     logger.warning(
-                        "[reference] candidate %r (provider=%s) failed target cue-sanity; trying next candidate",
+                        "[reference] candidate %r (provider=%s, family=%s) failed target "
+                        "cue-sanity; this reference does not share the candidate's timeline",
                         getattr(cand, "release_name", "?"),
                         provider_lbl,
+                        family,
                     )
                 else:
+                    cue_sanity_by_release[_release_name(cand)] = True
                     result = cand_result
                     winning_provider = cand_provider
                     break
@@ -540,6 +574,94 @@ class ExternalExactStrategy:
         if text is None or winning_provider is None:
             logger.warning("[reference] all candidate attempts failed to produce a usable reference")
             return ResolvedReference(None)
+
+        # --- TARGET-BOUND REFERENCE DECISION --------------------------------- #
+        # The legacy loop above breaks on the first candidate that satisfies the
+        # candidate-derived validator. That answer is now treated as a claim,
+        # not a verdict: Step A re-derives the reference from the TARGET alone,
+        # using the same compatibility machinery (MatchTier, hard filter) and the
+        # same ReferenceHealth/ReferenceTrust the shadow selector already used.
+        #
+        # Step A has no candidate parameter. It can only confirm the legacy pick
+        # or reject it, and rejection means "this reference does not belong to
+        # the target as strongly as one already proven incompatible", so we fail
+        # closed rather than resynchronize against a reference the target
+        # evidence does not support.
+        reference_decision = None
+        # Step A only has something to correct when a candidate gate actually
+        # ran. Without one, no candidate influenced the choice and the legacy
+        # ranking is already target-derived, so it is left alone.
+        if validate is not None:
+            try:
+                from app.services.sync.reference_v2 import (
+                    ReferenceAttempt,
+                    build_candidates,
+                    decide_target_bound_reference,
+                    release_family_key,
+                    summarize_target_bound,
+                )
+
+                scored = build_candidates(query.target_filename, observed_references)
+                logger.debug(
+                    "[reference] decision inputs: observed=%d scored=%d cue_map=%s",
+                    len(observed_references),
+                    len(scored),
+                    sorted(cue_sanity_by_release),
+                )
+                reference_decision = decide_target_bound_reference(
+                    [
+                        ReferenceAttempt(
+                            reference_id=hashlib.sha256(
+                                f"{(c.provider or '').lower()}|{c.release_name.lower()}".encode()
+                            ).hexdigest()[:16],
+                            release_name=c.release_name,
+                            provider=c.provider,
+                            match_tier=c.match_tier,
+                            hard_accepted=c.hard_accepted,
+                            health_class=c.health_class,
+                            family=release_family_key(c.release_name),
+                            downloaded=True,
+                            cue_sanity_ok=cue_sanity_by_release.get(c.release_name),
+                        )
+                        for c in scored
+                    ]
+                )
+                legacy_winner = next(
+                    (a for a in reference_decision.attempts if a.cue_sanity_ok is True), None
+                )
+                confirmed = (
+                    reference_decision.selected is not None
+                    and legacy_winner is not None
+                    and reference_decision.selected.release_name == legacy_winner.release_name
+                )
+                logger.info(
+                    "[reference] target-bound decision: outcome=%s confirmed_legacy=%s "
+                    "downloads=%d unique_families=%d duplicates_avoided=%d suppressed=%d",
+                    reference_decision.outcome,
+                    confirmed,
+                    reference_decision.downloads_used,
+                    reference_decision.unique_families,
+                    reference_decision.duplicate_families_avoided,
+                    len(reference_decision.suppressed_as_circular),
+                )
+                for reason in reference_decision.reasons:
+                    logger.info("[reference] decision reason: %s", reason)
+
+                try:
+                    logger.info(
+                        "[reference] selection_summary=%s",
+                        json.dumps(summarize_target_bound(reference_decision), sort_keys=True),
+                    )
+                except Exception as exc:  # pragma: no cover - telemetry is optional
+                    logger.debug("[reference] summary unavailable: %s", exc)
+
+                if not confirmed:
+                    logger.warning(
+                        "[reference] refusing reference: %s", reference_decision.outcome
+                    )
+                    return ResolvedReference(None)
+            except Exception as exc:  # pragma: no cover - policy must not break sync
+                logger.debug("[reference] target-bound decision unavailable: %s", exc)
 
         # Persist a sanitised copy so later switches for this episode are instant.
         from app.services.sync_service import sanitize_subtitle
