@@ -583,18 +583,84 @@ class ExternalExactStrategy:
         # engine receives; the shadow pick is recorded for analysis and is never
         # substituted into the response. `ReferenceSelection` is local and goes
         # no further than the telemetry below.
+        #
+        # The legacy loop above breaks on the first candidate that passes, so it
+        # usually materializes exactly one reference and the shadow has nothing
+        # to choose between. That is a property of the legacy policy, and it
+        # would show up as a flattering "agreement" rate. To measure the policy
+        # rather than the early break, the shadow is given a small bounded pool
+        # drawn from the SAME ranked candidates. It never runs alass, never
+        # re-ranks user-facing subtitles, and never feeds back into the choice
+        # above.
         shadow_comparison = None
+        shadow_pool = None
+        shadow_switch_labels: list[str] = []
+        additional_fetches = 0
         try:
+            from app.config import settings as app_settings
             from app.services.sync.reference_v2 import (
                 _identity as _reference_identity,
             )
             from app.services.sync.reference_v2 import (
+                build_shadow_pool,
+                classify_shadow_switch,
                 compare_selections,
                 select_reference_v2,
             )
 
+            pool_limit = int(getattr(app_settings, "REFERENCE_SHADOW_POOL_LIMIT", 4) or 0)
+            fetch_limit = int(
+                getattr(app_settings, "REFERENCE_SHADOW_POOL_FETCH_LIMIT", 0) or 0
+            )
+
+            # Payloads already in hand for this request. Nothing is re-fetched
+            # to populate the pool; extra fetches are opt-in and metered below.
+            payloads: dict[tuple[str, str], str] = {}
+            for provider, name, ref_text in observed_references:
+                if ref_text and name:
+                    payloads[(provider, name)] = ref_text
+
+            discovered = [
+                (self._provider_label(provider_of[id(c)]), _release_name(c))
+                for c in ranked
+                if id(c) in provider_of
+            ]
+
+            if fetch_limit > 0:
+                # Opt-in only. Candidates already downloaded are excluded, and
+                # the count is recorded so the extra cost is measurable rather
+                # than an invisible download multiplier.
+                for provider, name in discovered:
+                    if additional_fetches >= fetch_limit:
+                        break
+                    if (provider, name) in payloads:
+                        continue
+                    cand = next(
+                        (c for c in ranked if _release_name(c) == name and id(c) in provider_of),
+                        None,
+                    )
+                    if cand is None or self._is_rejected(stem, cand):
+                        continue
+                    cand_provider = provider_of.get(id(cand))
+                    if cand_provider is None or cand_provider is self._opensubtitles:
+                        continue
+                    try:
+                        fetched = await self._download_candidate(cand, cand_provider, query)
+                    except Exception:
+                        continue
+                    if fetched.text:
+                        payloads[(provider, name)] = fetched.text
+                        additional_fetches += 1
+
+            shadow_pool = build_shadow_pool(
+                query.target_filename if query else None,
+                discovered,
+                payloads,
+                limit=pool_limit,
+            )
+
             selection = select_reference_v2(
-                query.target_filename if query else None, observed_references
+                query.target_filename if query else None, shadow_pool.references
             )
             # Same identity function on both sides, otherwise every request
             # would look like a disagreement.
@@ -610,13 +676,33 @@ class ExternalExactStrategy:
                 ),
             )
             if shadow_comparison.changed:
+                # Looked up in all_candidates, not `ranked`: a legacy pick that
+                # is itself ineligible (credits-only) is the interesting case,
+                # and `ranked` would hide it.
+                legacy_candidate = next(
+                    (c for c in selection.all_candidates if c.subtitle_id == legacy_identity),
+                    None,
+                )
+                shadow_switch_labels = classify_shadow_switch(
+                    legacy_candidate, selection.chosen
+                )
+                shadow_comparison.reasons.extend(shadow_switch_labels)
+                if shadow_pool is not None and shadow_pool.comparison_class != "MEANINGFUL_COMPARISON":
+                    # A difference observed when no real alternative existed is
+                    # not evidence about the policies.
+                    logger.info(
+                        "[reference-shadow] differs but NOT a meaningful comparison: %s",
+                        shadow_pool.comparison_class,
+                    )
                 logger.info(
                     "[reference-shadow] policy differs: %s",
                     "; ".join(shadow_comparison.reasons),
                 )
             else:
                 logger.info(
-                    "[reference-shadow] policies agree on %s", shadow_comparison.legacy_id
+                    "[reference-shadow] policies agree on %s (%s)",
+                    shadow_comparison.legacy_id,
+                    shadow_pool.comparison_class if shadow_pool else "unknown",
                 )
         except Exception as exc:  # pragma: no cover - shadow must never break sync
             logger.debug("[reference-shadow] unavailable: %s", exc)
@@ -639,6 +725,19 @@ class ExternalExactStrategy:
             shadow_independent_groups=(
                 shadow_comparison.independent_groups if shadow_comparison else 0
             ),
+            shadow_pool_size=shadow_pool.pool_size if shadow_pool else 0,
+            shadow_pool_limit=shadow_pool.pool_limit if shadow_pool else 0,
+            shadow_pool_materialized=bool(shadow_pool and shadow_pool.references),
+            shadow_pool_truncated=bool(shadow_pool and shadow_pool.truncated),
+            shadow_pool_limited_by_payloads=bool(
+                shadow_pool and shadow_pool.limited_by_available_payloads
+            ),
+            shadow_pool_independent_groups=(
+                shadow_pool.independent_groups if shadow_pool else 0
+            ),
+            shadow_comparison_class=shadow_pool.comparison_class if shadow_pool else None,
+            shadow_additional_fetches=additional_fetches,
+            shadow_switch_labels=shadow_switch_labels,
         )
 
     def _provider_label(self, provider) -> str:

@@ -180,3 +180,17 @@ class ResolvedReference:
     shadow_trust: str | None = None
     shadow_health: str | None = None
     shadow_independent_groups: int = 0
+    # --- bounded shadow pool coverage ------------------------------------ #
+    # The legacy resolver stops at the first candidate that passes, so these
+    # record whether the shadow selector was actually given a real choice.
+    # A low disagreement rate is only interpretable when the comparison class
+    # is MEANINGFUL_COMPARISON.
+    shadow_pool_size: int = 0
+    shadow_pool_limit: int = 0
+    shadow_pool_materialized: bool = False
+    shadow_pool_truncated: bool = False
+    shadow_pool_limited_by_payloads: bool = False
+    shadow_pool_independent_groups: int = 0
+    shadow_comparison_class: str | None = None
+    shadow_additional_fetches: int = 0
+    shadow_switch_labels: list[str] = field(default_factory=list)

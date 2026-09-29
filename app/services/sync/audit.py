@@ -147,6 +147,20 @@ class SyncDecisionRecord(BaseModel):
     shadow_reference_health: str | None = None
     shadow_independent_groups: int | None = None
     shadow_reasons: list[str] = Field(default_factory=list)
+    # --- bounded shadow pool coverage ------------------------------------- #
+    # Without these, a low disagreement rate is uninterpretable: the legacy
+    # resolver stops at the first candidate that passes, so a single-candidate
+    # pool records "agreement" between policies that were never compared.
+    shadow_pool_size: int = 0
+    shadow_pool_limit: int = 0
+    shadow_pool_materialized: bool = False
+    shadow_pool_truncated: bool = False
+    shadow_pool_limited_by_payloads: bool = False
+    shadow_pool_independent_groups: int = 0
+    # NO_COMPARISON | MEANINGFUL_COMPARISON
+    shadow_comparison_class: str | None = None
+    shadow_additional_fetches: int = 0
+    shadow_switch_labels: list[str] = Field(default_factory=list)
     # Legacy pick was only acceptable/unknown, the shadow pick was stronger,
     # and the decision did not verify. A flag to investigate, never a cause.
     potential_reference_selection_issue: bool = False
@@ -416,6 +430,21 @@ def record_for_evaluation(
         shadow_independent_groups=getattr(reference, "shadow_independent_groups", 0) or None,
         shadow_reasons=[
             sanitize_reason(r) for r in (getattr(reference, "shadow_reasons", None) or [])
+        ],
+        shadow_pool_size=getattr(reference, "shadow_pool_size", 0),
+        shadow_pool_limit=getattr(reference, "shadow_pool_limit", 0),
+        shadow_pool_materialized=bool(getattr(reference, "shadow_pool_materialized", False)),
+        shadow_pool_truncated=bool(getattr(reference, "shadow_pool_truncated", False)),
+        shadow_pool_limited_by_payloads=bool(
+            getattr(reference, "shadow_pool_limited_by_payloads", False)
+        ),
+        shadow_pool_independent_groups=(
+            getattr(reference, "shadow_pool_independent_groups", 0)
+        ),
+        shadow_comparison_class=getattr(reference, "shadow_comparison_class", None),
+        shadow_additional_fetches=getattr(reference, "shadow_additional_fetches", 0),
+        shadow_switch_labels=[
+            sanitize_reason(r) for r in (getattr(reference, "shadow_switch_labels", None) or [])
         ],
         release_source=release_facts.get("release_source"),
         release_resolution=release_facts.get("release_resolution"),

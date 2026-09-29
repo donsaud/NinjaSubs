@@ -50,6 +50,20 @@ class Settings(BaseSettings):
     # rather than hard-coded so it can be tuned against the false-positive
     # benchmark without editing logic.
     ALASS_CANDIDATE_LIMIT: int = 3
+    # --- reference selection shadow pool (measurement only) -------------- #
+    # The legacy resolver stops at the first candidate that passes cue sanity,
+    # so it usually offers the shadow selector a single alternative and a low
+    # "disagreement" rate that reflects that, not policy agreement. This pool
+    # lets the shadow selector inspect a small, diversified set instead.
+    #
+    # Deliberately separate from ALASS_CANDIDATE_LIMIT: populating the pool
+    # never runs alass and never changes the production reference.
+    REFERENCE_SHADOW_POOL_LIMIT: int = 4
+    # Extra downloads permitted purely to materialize pool payloads. Defaults to
+    # 0, so the default install adds no bandwidth and the telemetry reports
+    # `shadow_pool_limited_by_available_payloads` rather than pretending the
+    # pool is representative.
+    REFERENCE_SHADOW_POOL_FETCH_LIMIT: int = 0
     REDIS_URL: str | None = None
     # Hard inline budget for sync during a player request. Downloads from the
     # reference providers + alass routinely take ~10s, so the budget is generous;

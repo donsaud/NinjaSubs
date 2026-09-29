@@ -345,6 +345,19 @@ def test_tool_does_not_import_application_modules():
     assert "from app" not in source
 
 
+def test_shadow_comparison_class_literals_match_the_selector():
+    """The tool mirrors the classification strings; they must not drift.
+
+    The calibration tool is stdlib-only by design, so it cannot import the
+    selector module that defines them.
+    """
+    from app.services.sync import reference_v2
+
+    source = _TOOL.read_text(encoding="utf-8")
+    assert f'COMPARISON_NO = "{reference_v2.COMPARISON_NO}"' in source
+    assert f'COMPARISON_MEANINGFUL = "{reference_v2.COMPARISON_MEANINGFUL}"' in source
+
+
 def test_tool_writes_nothing_to_the_repo_by_default(tmp_path):
     records = [_record(subtitle_id=f"s{i}") for i in range(5)]
     path = _write(tmp_path, records)

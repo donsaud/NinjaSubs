@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -135,10 +135,14 @@ class ReferenceCandidate(BaseModel):
 
 
 class ReferenceSelection(BaseModel):
-    """Outcome of the shadow selector, including why it beat the alternatives."""
+    """Outcome of a shadow selection pass."""
 
     chosen: ReferenceCandidate | None = None
     ranked: list[ReferenceCandidate] = Field(default_factory=list)
+    # Every candidate considered, including ineligible ones. The legacy pick is
+    # frequently NOT in `ranked` (e.g. a credits-only reference), and that is
+    # exactly the case worth explaining, so it is looked up here.
+    all_candidates: list[ReferenceCandidate] = Field(default_factory=list)
     considered: int = 0
     hard_rejected: int = 0
     reasons: list[str] = Field(default_factory=list)
@@ -257,6 +261,7 @@ def select_reference_v2(
     selection = ReferenceSelection(
         considered=len(candidates),
         hard_rejected=sum(1 for c in candidates if not c.hard_accepted),
+        all_candidates=candidates,
     )
     eligible = [c for c in candidates if c.eligible]
     if not eligible:
@@ -332,6 +337,178 @@ def compare_selections(
         if not legacy_match.cache_verified and shadow.cache_verified:
             comparison.reasons.append("shadow candidate has an exact verified cache hit")
     return comparison
+
+
+# --- bounded shadow reference pool --------------------------------------- #
+#
+# The legacy resolver stops at the first candidate that passes cue sanity, so
+# the pool of alternatives it hands the shadow selector is chosen BY the policy
+# under evaluation. A low disagreement rate then measures the early break, not
+# agreement. The pool below gives the shadow selector a small, diversified set
+# drawn from the SAME discovered candidate list, without altering which
+# candidate the legacy resolver commits to.
+
+COMPARISON_NO = "NO_COMPARISON"
+COMPARISON_MEANINGFUL = "MEANINGFUL_COMPARISON"
+
+SHADOW_SWITCH = "SHADOW_SWITCH"
+
+
+class ReferenceShadowPool(BaseModel):
+    """A bounded, diversified set of references the shadow may consider."""
+
+    references: list[tuple[str, str | None, str | None]] = Field(default_factory=list)
+    pool_size: int = 0
+    pool_limit: int = 0
+    available_count: int = 0
+    hard_rejected: int = 0
+    independent_groups: int = 0
+    truncated: bool = False
+    limited_by_available_payloads: bool = False
+    additional_fetches: int = 0
+    comparison_class: str = COMPARISON_NO
+    reasons: list[str] = Field(default_factory=list)
+
+
+def _hard_accepts(target_filename: str | None, release_name: str) -> tuple[bool, str | None]:
+    """Cheap metadata-only admissibility. No download, no alignment."""
+    if not target_filename:
+        return True, None
+    try:
+        target_meta = extract_metadata(target_filename)
+        cand_meta = extract_metadata(release_name)
+    except Exception:  # pragma: no cover - malformed names are not fatal
+        return False, "unparseable release name"
+    if target_meta is None or cand_meta is None:
+        return True, None
+    accepted, reason, _method = hard_compatibility_filter(target_meta, cand_meta)
+    return accepted, reason
+
+
+def build_shadow_pool(
+    target_filename: str | None,
+    discovered: Sequence[tuple[str, str]],
+    payloads: Mapping[tuple[str, str], str],
+    *,
+    limit: int,
+) -> ReferenceShadowPool:
+    """Assemble a bounded reference pool from already-materialized payloads.
+
+    ``discovered`` is the legacy-ranked ``(provider, release_name)`` list;
+    ``payloads`` maps that same pair to subtitle text already fetched in this
+    request. Nothing here downloads, and nothing here is fed back into the
+    legacy decision.
+
+    Grid diversification is two-pass: one representative per distinct timing
+    grid first, then any remaining slots filled in rank order. That prevents
+    four same-grid copies from masquerading as four independent references
+    while still filling the pool when genuinely distinct candidates exist.
+    """
+    pool = ReferenceShadowPool(pool_limit=limit)
+    if limit <= 0:
+        pool.reasons.append("reference shadow pool disabled (limit 0)")
+        return pool
+
+    seen_keys: set[tuple[str, str]] = set()
+    eligible: list[tuple[str, str, str, str | None]] = []
+    for provider, name in discovered:
+        key = (provider, name)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        text = payloads.get(key)
+        if not text:
+            continue
+        pool.available_count += 1
+        accepted, reason = _hard_accepts(target_filename, name)
+        if not accepted:
+            pool.hard_rejected += 1
+            continue
+        eligible.append((provider, name, text, reference_fingerprint(text)))
+
+    if not eligible:
+        pool.reasons.append("no materializable reference payload available")
+        return pool
+
+    chosen: list[tuple[str, str, str, str | None]] = []
+    seen_grids: set[str] = set()
+    for entry in eligible:
+        grid = entry[3] or ""
+        if grid and grid in seen_grids:
+            continue
+        if grid:
+            seen_grids.add(grid)
+        chosen.append(entry)
+        if len(chosen) >= limit:
+            break
+    if len(chosen) < limit:
+        for entry in eligible:
+            if entry in chosen:
+                continue
+            chosen.append(entry)
+            if len(chosen) >= limit:
+                break
+
+    pool.references = [(p, n, t) for p, n, t, _g in chosen]
+    pool.pool_size = len(pool.references)
+    pool.independent_groups = len({g for _p, _n, _t, g in chosen if g})
+    pool.truncated = len(eligible) > limit
+    pool.limited_by_available_payloads = pool.pool_size < limit and not pool.truncated
+    pool.comparison_class = classify_comparison(pool)
+    if pool.truncated:
+        pool.reasons.append(
+            f"pool truncated: {len(eligible)} admissible candidates, limit {limit}"
+        )
+    if pool.limited_by_available_payloads:
+        pool.reasons.append(
+            "shadow_pool_limited_by_available_payloads: "
+            "fewer payloads were materialized than the pool limit allows"
+        )
+    return pool
+
+
+def classify_comparison(pool: ReferenceShadowPool) -> str:
+    """A comparison only means something when a real alternative existed.
+
+    ``legacy == shadow`` when the pool held a single candidate is not evidence
+    of policy agreement; it is an artifact of the legacy early break.
+    """
+    if pool.pool_size < 2 or pool.independent_groups < 2:
+        return COMPARISON_NO
+    return COMPARISON_MEANINGFUL
+
+
+def classify_shadow_switch(
+    legacy: ReferenceCandidate | None, shadow: ReferenceCandidate | None
+) -> list[str]:
+    """Describe why the two policies differ, without claiming v2 is better."""
+    labels: list[str] = []
+    if shadow is None:
+        return ["shadow produced no eligible reference"]
+    if legacy is None:
+        return ["legacy reference absent from the pool"]
+    if legacy.subtitle_id == shadow.subtitle_id:
+        return ["same reference"]
+    labels.append(SHADOW_SWITCH)
+    if legacy.match_tier is shadow.match_tier:
+        labels.append("same_match_tier")
+    else:
+        labels.append(
+            f"different_match_tier: {legacy.match_tier.value} -> {shadow.match_tier.value}"
+        )
+    if not legacy.eligible:
+        labels.append(
+            f"legacy reference not eligible as an anchor ({legacy.health_class})"
+        )
+    if legacy.health_class != shadow.health_class:
+        labels.append(f"health: {legacy.health_class} -> {shadow.health_class}")
+    if legacy.cache_verified != shadow.cache_verified:
+        labels.append("verified_evidence: differs")
+    if legacy.independent_group and legacy.independent_group != shadow.independent_group:
+        labels.append("different_independent_group")
+    if shadow.health.dialogue_cues < legacy.health.dialogue_cues:
+        labels.append("lower_dialogue_quality")
+    return labels
 
 
 def find_tier_contradictions(

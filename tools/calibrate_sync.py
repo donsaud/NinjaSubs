@@ -848,6 +848,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="compare the shadow (v2) reference selector against the current one",
     )
+    parser.add_argument(
+        "--shadow-replay",
+        metavar="CASE_ID",
+        help=(
+            "offline reference replay for one recorded case; reports "
+            "SIMULATION_UNAVAILABLE when the local artifacts are absent"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if not args.path.is_file():
@@ -871,6 +879,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nstructured output written to {args.json_out}", file=sys.stderr)
         return 0
 
+    if args.shadow_replay:
+        return _emit(
+            *shadow_replay_analysis(quality.records, args.shadow_replay, args.path)
+        )
     if args.shadow_report:
         analysis = shadow_comparison_analysis(quality.records)
         return _emit(analysis, render_shadow_report(analysis))
@@ -1047,6 +1059,50 @@ def reference_investigation_candidates(a: dict[str, Any]) -> list[str]:
 _TRUST_STRENGTH = {"verified": 3, "strong": 2, "acceptable": 1, "unknown": 0}
 
 
+def shadow_replay_analysis(
+    records: list[dict[str, Any]], case_id: str, audit_path: Path
+) -> tuple[dict[str, Any], str]:
+    """Offline reference replay for a single recorded case.
+
+    A real replay needs the actual reference payloads. The audit deliberately
+    stores no subtitle text, so this reports SIMULATION_UNAVAILABLE rather than
+    approximating an alignment from metadata. It never re-runs alass over
+    production data.
+    """
+    matches = [r for r in records if str(r.get("request_id") or "") == case_id]
+    unavailable = {
+        "available": False,
+        "case_id": case_id,
+        "case_found": bool(matches),
+        "records_scanned": len(records),
+        "audit_path": str(audit_path),
+        "reason": (
+            "SIMULATION_UNAVAILABLE: the audit stores no subtitle text or reference "
+            "payload, so the reference for this case cannot be re-aligned offline. "
+            "Re-running alass across production audit data is not performed by default."
+        ),
+        "recovered_artifacts": [],
+    }
+    if not matches:
+        unavailable["reason"] = (
+            f"SIMULATION_UNAVAILABLE: no record with request_id={case_id!r} in "
+            f"{audit_path}; checked {len(records)} records"
+        )
+
+    out: list[str] = []
+    add = out.append
+    add("OFFLINE SHADOW REPLAY")
+    add("---------------------")
+    add(f"  Case: {case_id}")
+    add(f"  Case found in audit: {'yes' if matches else 'no'}")
+    add("")
+    add(f"  {unavailable['reason']}")
+    add("")
+    add("  No approximate result is produced. Collecting the reference payloads")
+    add("  needed for a true replay is a separate, opt-in change.")
+    return unavailable, "\n".join(out)
+
+
 def shadow_comparison_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Compare the legacy reference pick against the shadow (v2) pick.
 
@@ -1075,6 +1131,61 @@ def shadow_comparison_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     multi_group = [r for r in changed if (r.get("shadow_independent_groups") or 0) > 1]
 
+    # --- pool coverage ---------------------------------------------------- #
+    # The legacy resolver stops at the first candidate that passes cue sanity,
+    # so a one-candidate pool is the common case and records "agreement"
+    # between policies that were never actually compared. Coverage is reported
+    # first, and disagreement over meaningful comparisons only.
+    with_pool = [r for r in legacy if r.get("shadow_pool_materialized")]
+    two_plus = [r for r in with_pool if (r.get("shadow_pool_size") or 0) >= 2]
+    two_plus_groups = [
+        r for r in with_pool if (r.get("shadow_pool_independent_groups") or 0) >= 2
+    ]
+    one_candidate = [r for r in with_pool if (r.get("shadow_pool_size") or 0) < 2]
+    truncated = [r for r in with_pool if r.get("shadow_pool_truncated")]
+    limited = [r for r in with_pool if r.get("shadow_pool_limited_by_payloads")]
+    extra_fetches = sum(int(r.get("shadow_additional_fetches") or 0) for r in with_pool)
+
+    # Mirrored from the v2 reference selector (app.services.sync.reference_v2).
+    # This tool stays stdlib-only by design so analysis can run without the app
+    # installed; test_tool_does_not_import_application_modules enforces that,
+    # and test_shadow_comparison_class_literals_match_the_selector guards drift.
+    COMPARISON_NO = "NO_COMPARISON"
+    COMPARISON_MEANINGFUL = "MEANINGFUL_COMPARISON"
+
+    def _classify(record: dict[str, Any]) -> str:
+        explicit = record.get("shadow_comparison_class")
+        if explicit in (COMPARISON_NO, COMPARISON_MEANINGFUL):
+            return str(explicit)
+        # Records predating pool telemetry: infer, never assume agreement.
+        size = int(record.get("shadow_pool_size") or 0)
+        groups = int(record.get("shadow_pool_independent_groups") or 0)
+        if size < 2 or groups < 2:
+            return COMPARISON_NO
+        return COMPARISON_MEANINGFUL
+    meaningful = [r for r in compared if _classify(r) == COMPARISON_MEANINGFUL]
+    non_comparable = [r for r in compared if _classify(r) != COMPARISON_MEANINGFUL]
+    meaningful_changed = [r for r in meaningful if r.get("shadow_reference_changed")]
+
+    coverage = {
+        "serve_records": len(serve),
+        "with_pool": len(with_pool),
+        "two_or_more_candidates": len(two_plus),
+        "two_or_more_independent_groups": len(two_plus_groups),
+        "one_candidate_only": len(one_candidate),
+        "truncated_by_limit": len(truncated),
+        "limited_by_available_payloads": len(limited),
+        "additional_reference_fetches": extra_fetches,
+        "pool_limit_values": dict(
+            Counter(str(r.get("shadow_pool_limit") or "?") for r in with_pool)
+        ),
+        "mean_pool_size": round(
+            sum(int(r.get("shadow_pool_size") or 0) for r in with_pool) / len(with_pool), 3
+        )
+        if with_pool
+        else None,
+    }
+
     # Switch simulation is only possible when the artifacts needed to re-score
     # exist locally. The audit deliberately does not store subtitle text, so a
     # real re-alignment is impossible from the record alone.
@@ -1095,7 +1206,32 @@ def shadow_comparison_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
         "agreement_rate": round((len(compared) - len(changed)) / len(compared), 4)
         if compared
         else None,
+        "meaningful_comparisons": len(meaningful),
+        "meaningful_agreed": len(meaningful) - len(meaningful_changed),
+        "meaningful_changed": len(meaningful_changed),
+        "meaningful_agreement_rate": round(
+            (len(meaningful) - len(meaningful_changed)) / len(meaningful), 4
+        )
+        if meaningful
+        else None,
+        "non_comparable": len(non_comparable),
+        "pool_coverage": coverage,
+        "comparison_class_counts": dict(Counter(_classify(r) for r in compared).most_common()),
         "change_reasons": dict(by_reason.most_common()),
+        "meaningful_change_reasons": dict(
+            Counter(
+                reason.split(":")[0].strip()[:60]
+                for r in meaningful_changed
+                for reason in (r.get("shadow_reasons") or [])
+            ).most_common()
+        ),
+        "switch_labels": dict(
+            Counter(
+                label
+                for r in meaningful_changed
+                for label in (r.get("shadow_switch_labels") or [])
+            ).most_common()
+        ),
         "changed_by_match_tier": _axis(changed, "match_tier"),
         "changed_by_provider": _axis(changed, "provider"),
         "changed_by_source": _axis(changed, "release_source"),
@@ -1120,16 +1256,81 @@ def render_shadow_report(a: dict[str, Any]) -> str:
     rule = "=" * 74
     add(rule)
     add("SHADOW REFERENCE SELECTION COMPARISON (v2 vs current)")
+    cov = a.get("pool_coverage") or {}
+    add("")
+    add("Shadow Coverage")
+    add("---------------")
+    add(f"  Requests with shadow pool: {cov.get('with_pool', 0)}")
+    add(f"  Requests with >=2 candidates: {cov.get('two_or_more_candidates', 0)}")
+    add(
+        "  Requests with >=2 independent timing groups: "
+        f"{cov.get('two_or_more_independent_groups', 0)}"
+    )
+    add(f"  Requests with only one candidate: {cov.get('one_candidate_only', 0)}")
+    add(f"  Requests truncated by pool limit: {cov.get('truncated_by_limit', 0)}")
+    add(
+        "  Requests limited by available payloads: "
+        f"{cov.get('limited_by_available_payloads', 0)}"
+    )
+    add(f"  Extra reference fetches caused by the pool: {cov.get('additional_reference_fetches', 0)}")
+    if cov.get("mean_pool_size") is not None:
+        add(f"  Mean pool size: {cov['mean_pool_size']}")
+
+    add("")
+    add("Comparison classification")
+    add("--------------------------")
+    for cls, count in (a.get("comparison_class_counts") or {}).items():
+        add(f"  {cls}: {count}")
+    add(f"  Meaningful comparisons: {a.get('meaningful_comparisons', 0)}")
+    add(f"  Non-comparable cases: {a.get('non_comparable', 0)}")
+    if not a.get("meaningful_comparisons"):
+        add("")
+        add("  NO MEANINGFUL COMPARISONS YET. The legacy resolver stops at the first")
+        add("  candidate that passes cue sanity, so a low disagreement rate here would")
+        add("  reflect the early break, not policy agreement. Read meaningful_agreement")
+        add("  only, and only once this count is non-zero.")
+
+    add("")
+    add("Agreement (raw vs meaningful)")
+    add("-----------------------------")
+    add(f"  Raw agreement: {_pct(a.get('agreement_rate'))} over {a.get('compared', 0)} requests")
+    add(
+        f"  Meaningful agreement: {_pct(a.get('meaningful_agreement_rate'))} over "
+        f"{a.get('meaningful_comparisons', 0)} requests"
+    )
+    add(
+        f"  Meaningful disagreements: {a.get('meaningful_changed', 0)} "
+        f"(agreed: {a.get('meaningful_agreed', 0)})"
+    )
+    if (a.get("compared") or 0) > (a.get("meaningful_comparisons") or 0):
+        add("  The raw figure is inflated by requests where the shadow had no real")
+        add("  alternative. Do not quote it as policy agreement.")
+
+    if a.get("meaningful_change_reasons"):
+        add("")
+        add("Meaningful disagreement axes (legacy -> shadow)")
+        for reason, count in a["meaningful_change_reasons"].items():
+            add(f"  {count:>4}  {reason}")
+    if a.get("switch_labels"):
+        add("")
+        add("Counterfactual quality labels (not a quality claim)")
+        for label, count in a["switch_labels"].items():
+            add(f"  {count:>4}  {label}")
     add(rule)
     add(f"  serve records            : {a['serve_records']}")
     add(f"  legacy references graded : {a['legacy_assessed']}")
-    add(f"  comparable pairs         : {a['compared']}")
-    add(f"  agreements               : {a['agreed']}")
-    add(f"  disagreements            : {a['changed']}")
-    add(f"  agreement rate           : {_pct(a['agreement_rate'])}")
+    add(f"  raw comparable pairs    : {a['compared']}  (NOT policy agreement)")
+    add(f"  meaningful comparisons  : {a.get('meaningful_comparisons', 0)}")
+    add(
+        f"  meaningful agreement     : {_pct(a.get('meaningful_agreement_rate'))}"
+    )
     add("")
+    add("  The raw comparable-pair count includes requests where the legacy")
+    add("  resolver's early break left the shadow with a single candidate and")
+    add("  therefore no choice. Read the meaningful figures only.")
 
-    add("Disagreement axes (legacy -> shadow)")
+    add("")
+    add("All disagreement axes below (legacy -> shadow), for context")
     add("-" * 74)
     for title, key in (
         ("match tier", "changed_by_match_tier"),
