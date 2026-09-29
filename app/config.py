@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     ALASS_PATH: str = "alass"
     ALASS_TIMEOUT_SECONDS: float = 10.0
     ALASS_MAX_CONCURRENT_SYNCS: int = 1
+    # How many promising candidates may be taken through alass per sync request.
+    # The ranked candidate list is usually far larger, so this is what stops one
+    # subtitle request from turning into dozens of subprocess runs. Configurable
+    # rather than hard-coded so it can be tuned against the false-positive
+    # benchmark without editing logic.
+    ALASS_CANDIDATE_LIMIT: int = 3
     REDIS_URL: str | None = None
     # Hard inline budget for sync during a player request. Downloads from the
     # reference providers + alass routinely take ~10s, so the budget is generous;

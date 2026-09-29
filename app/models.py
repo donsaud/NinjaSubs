@@ -102,6 +102,16 @@ class SubtitleRelease(BaseModel):
     compatibility: Any | None = None
     uploader: str = ""  # Subtitle uploader/author username, when provided upstream
 
+    # --- synchronization evidence (search-time) ------------------------- #
+    # These are separate from match_percentage, which continues to mean exactly
+    # what it always has: content compatibility. A high match_percentage never
+    # implies synchronization; these fields carry that separate claim, and both
+    # default to "no claim made" rather than to anything positive.
+    sync_state: str | None = None  # e.g. "verified_synced" / "probable_sync"
+    sync_verification: str | None = None  # "verified" / "cached" / "predicted" / "unknown"
+    sync_confidence: float | None = None
+    sync_reasons: list[str] = Field(default_factory=list)
+
     @model_validator(mode="after")
     def _sync_hash_flags(self):
         """Keep the two MovieHash flags consistent (either implies the other)."""

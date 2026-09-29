@@ -11,8 +11,10 @@ shift, reference fingerprint, decision kind, timestamp) under ``{key}:meta``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 from typing import Any
 
 from cachetools import TTLCache
@@ -30,6 +32,12 @@ _DEFAULT_TTL = 86_400  # 24 hours
 # Short TTL for "no reference could be resolved" verdicts, so client retries
 # stop re-running the whole provider fan-out but a transient outage self-heals.
 _NEGATIVE_TTL = 300  # 5 minutes
+# Bump when the verification/ordering logic changes so stale verdicts written by
+# an older engine are never reused. Mirrors ReferenceDiskCache's engine_version.
+SYNC_VERDICT_ENGINE_VERSION = 1
+# Verdict TTL. Shorter than the payload TTL: a positive synchronization claim
+# should be re-derived reasonably often rather than trusted for a full day.
+_VERDICT_TTL = 7 * 86_400  # 7 days
 
 
 class SyncCache:
@@ -40,6 +48,10 @@ class SyncCache:
         self._local: TTLCache[str, bytes] = TTLCache(maxsize=maxsize, ttl=ttl)
         self._local_meta: TTLCache[str, str] = TTLCache(maxsize=maxsize, ttl=ttl)
         self._local_fail: TTLCache[str, str] = TTLCache(maxsize=maxsize, ttl=_NEGATIVE_TTL)
+        # Cached *measured* synchronization verdicts, keyed by video fingerprint
+        # + subtitle hash + language + engine version. Distinct from _local_meta,
+        # which records provenance for an already-cached payload.
+        self._local_verdict: TTLCache[str, str] = TTLCache(maxsize=maxsize, ttl=_VERDICT_TTL)
         self._redis = None
 
     @staticmethod
@@ -208,6 +220,154 @@ class SyncCache:
             except Exception as exc:  # pragma: no cover - environment dependent
                 logger.debug("[sync-cache] find_synced_for scan failed: %s", exc)
         return None
+
+    # ------------------------------------------------------------------ #
+    # Measured synchronization verdicts
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def build_verdict_key(
+        video_fingerprint: str,
+        subtitle_hash: str,
+        language: str,
+        engine_version: int = SYNC_VERDICT_ENGINE_VERSION,
+    ) -> str:
+        """Key a measured sync verdict: ``verdict:{engine}:{video}:{sub}:{lang}``.
+
+        Binding the video fingerprint is what makes reuse safe. Without it, a
+        verdict measured for one video would be handed to a different video that
+        happens to carry the same subtitle, which is precisely the false-positive
+        class this cache must not create.
+        """
+        return (
+            f"verdict:{engine_version}:{video_fingerprint}:{subtitle_hash}:"
+            f"{(language or 'und').lower()}"
+        )
+
+    @staticmethod
+    def video_fingerprint_from_meta(meta: dict[str, Any]) -> str | None:
+        """Derive a stable video identity from request metadata, or ``None``.
+
+        Uses the strongest available signals in order. A metadata object with
+        only title/year/season (a catalogue request with no resolved stream)
+        yields ``None`` so no verdict is ever keyed to a guessed video.
+        """
+        from app.services.sync.matching import has_video_fingerprint
+
+        if not has_video_fingerprint(meta):
+            return None
+        parts = [
+            str(meta.get("imdb_id") or "").strip().lower(),
+            str(meta.get("season") if meta.get("season") is not None else "movie"),
+            str(meta.get("episode") if meta.get("episode") is not None else "x"),
+            # Normalized so a case or spacing difference does not split the key.
+            re.sub(r"\s+", " ", str(meta.get("target_filename") or "")).strip().lower(),
+            str(meta.get("video_hash") or "").strip().lower(),
+            str(meta.get("video_size") or ""),
+        ]
+        joined = "|".join(parts)
+        # An empty identity is indistinguishable from "unknown"; refuse it.
+        if not joined.strip("|x "):
+            return None
+        return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:24]
+
+    async def get_verdict(self, key: str) -> dict[str, Any] | None:
+        """Return a previously measured verdict, or ``None`` on a miss.
+
+        Only verdicts that were actually measured are stored, so a hit is
+        reported with ``verification`` forced to ``cached`` on the way out: a
+        recalled result is never presented as a fresh measurement.
+        """
+        raw: str | None = None
+        if self._redis is not None:
+            try:
+                value = await self._redis.get(key)
+                if value:
+                    raw = value if isinstance(value, str) else bytes(value).decode()
+            except Exception as exc:  # pragma: no cover - environment dependent
+                logger.debug("[sync-cache] redis get_verdict failed: %s", exc)
+        if raw is None:
+            raw = self._local_verdict.get(key)
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        if int(data.get("engine_version") or 0) != SYNC_VERDICT_ENGINE_VERSION:
+            return None
+        data["verification"] = "cached"
+        return data
+
+    @staticmethod
+    def build_verdict_alias_key(
+        video_fingerprint: str,
+        subtitle_ref: str,
+        engine_version: int = SYNC_VERDICT_ENGINE_VERSION,
+    ) -> str:
+        """Secondary index: look a verdict up by a stable candidate id.
+
+        The primary key is content-addressed, but at search time the subtitle
+        bytes have not been fetched, so the content hash is unknown. This index
+        lets the listing path find a previously measured verdict by candidate id
+        while still binding it to the video fingerprint, so a verdict is never
+        surfaced for a different video.
+        """
+        return f"verdict-alias:{engine_version}:{video_fingerprint}:{subtitle_ref}"
+
+    async def get_verdict_by_ref(
+        self, video_fingerprint: str, subtitle_ref: str
+    ) -> dict[str, Any] | None:
+        """Search-time lookup by (video fingerprint, candidate id)."""
+        key = self.build_verdict_alias_key(video_fingerprint, subtitle_ref)
+        return await self.get_verdict(key)
+
+    async def set_verdict(
+        self, key: str, verdict: dict[str, Any], *, alias_key: str | None = None
+    ) -> None:
+        """Persist a measured verdict for later reuse.
+
+        A verdict is only accepted when the analyzer actually measured
+        something. Process success is not a verdict: ``alass_successful`` alone
+        with no measured state is refused, so a successful run that produced an
+        untrustworthy alignment can never be recalled as a positive result.
+        """
+        from app.services.sync.alignment import SyncState, VerificationAvailability
+
+        state = verdict.get("sync_state")
+        measured = verdict.get("verification")
+        if measured == VerificationAvailability.UNKNOWN.value:
+            logger.debug("[sync-cache] refusing to cache a verdict with no measurement")
+            return
+        if state in (SyncState.VERIFIED_SYNCED.value, SyncState.VERIFIED_RESYNCED.value):
+            if measured not in (
+                VerificationAvailability.VERIFIED.value,
+                VerificationAvailability.CACHED.value,
+            ):
+                logger.debug(
+                    "[sync-cache] refusing to cache %s backed by unmeasured %s", state, measured
+                )
+                return
+        try:
+            payload = dict(verdict)
+            payload["engine_version"] = SYNC_VERDICT_ENGINE_VERSION
+            raw = json.dumps(payload)
+        except (TypeError, ValueError) as exc:
+            logger.debug("[sync-cache] verdict not serializable, skipping: %s", exc)
+            return
+        if self._redis is not None:
+            try:
+                await self._redis.set(key, raw, ex=_VERDICT_TTL)
+                if alias_key:
+                    await self._redis.set(alias_key, raw, ex=_VERDICT_TTL)
+                return
+            except Exception as exc:  # pragma: no cover - environment dependent
+                logger.debug("[sync-cache] redis set_verdict failed: %s", exc)
+        self._local_verdict[key] = raw
+        if alias_key:
+            self._local_verdict[alias_key] = raw
 
     async def close(self) -> None:
         if self._redis is not None:

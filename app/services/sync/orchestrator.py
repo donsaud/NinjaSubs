@@ -24,7 +24,12 @@ from app.services.subtitle_matcher import (
     median_cue_offset,
     validate_cue_sanity,
 )
-from app.services.sync.alignment import AlignmentAnalyzer, SubtitleEvaluation, SyncState
+from app.services.sync.alignment import (
+    AlignmentAnalyzer,
+    SubtitleEvaluation,
+    SyncState,
+    VerificationAvailability,
+)
 from app.services.sync.matching import is_informative_release_name
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync_cache import SyncCache
@@ -95,8 +100,25 @@ class SyncOrchestrator:
         self._inflight_lock = asyncio.Lock()
         # Verification layer: measures alass output instead of trusting exit 0.
         self._analyzer = AlignmentAnalyzer()
+        # Most expensive runs allowed per request, so one subtitle request can
+        # never fan out into dozens of alass subprocesses.
+        try:
+            self._alass_candidate_limit = max(
+                1, int(getattr(settings, "ALASS_CANDIDATE_LIMIT", 3) or 3)
+            )
+        except (TypeError, ValueError):
+            self._alass_candidate_limit = 3
         # Most recent alignment verdict, for diagnostics/debug endpoints.
         self._last_evaluation: SubtitleEvaluation | None = None
+        # Observability counters. Reset per request by the caller if a rate is
+        # wanted; exposed via .metrics for debug logging.
+        self._metrics: dict[str, int] = {
+            "verification_cache_hits": 0,
+            "verification_cache_misses": 0,
+            "alass_runs": 0,
+            "candidates_considered": 0,
+            "candidates_verified": 0,
+        }
 
     def _strategies(self) -> list[tuple[str, Any]]:
         strats = []
@@ -215,6 +237,80 @@ class SyncOrchestrator:
         strict = bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True))
         return f"{key}:v4:{strict}:{context_digest}:{auth_digest}"
 
+    @staticmethod
+    def _verdict_key(meta: dict, subtitle_hash: str) -> str | None:
+        """Cache key for a measured verdict, or ``None`` when unknowable.
+
+        Without a video fingerprint there is nothing safe to key on, so no
+        verdict is stored or reused. That is the whole point: a catalogue
+        request must not inherit a verdict measured against some other video.
+        """
+        from app.services.sync.matching import has_video_fingerprint
+        from app.services.sync_cache import SyncCache
+
+        if not has_video_fingerprint(meta):
+            return None
+        fingerprint = SyncCache.video_fingerprint_from_meta(meta)
+        if not fingerprint:
+            return None
+        return SyncCache.build_verdict_key(
+            fingerprint, subtitle_hash, str(meta.get("lang") or "und")
+        )
+
+    @staticmethod
+    def _evaluation_from_verdict(verdict: dict) -> SubtitleEvaluation:
+        """Rebuild an evaluation from a stored verdict.
+
+        ``verification`` is forced to ``cached`` by the cache on read, so a
+        recalled result is never presented as a fresh measurement.
+        """
+        evaluation = SubtitleEvaluation(
+            sync_state=verdict.get("sync_state", SyncState.UNVERIFIED.value),
+            verification=verdict.get("verification", VerificationAvailability.CACHED.value),
+            reasons=list(verdict.get("reasons") or []),
+            median_offset_ms=verdict.get("median_offset_ms"),
+            p95_offset_ms=verdict.get("p95_offset_ms"),
+            mad_offset_ms=verdict.get("mad_offset_ms"),
+            drift_ms_per_minute=verdict.get("drift_ms_per_minute"),
+            coverage_score=verdict.get("coverage_score"),
+            structural_similarity=verdict.get("structural_similarity"),
+            cut_verdict=verdict.get("cut_verdict"),
+        )
+        return evaluation
+
+    @property
+    def metrics(self) -> dict[str, int]:
+        """Counters for observability (cache hit rate, alass runs per request)."""
+        return dict(self._metrics)
+
+    async def _store_verdict(
+        self,
+        verdict_key: str | None,
+        evaluation: SubtitleEvaluation,
+        content_hash: str,
+        meta: dict | None = None,
+        target_id: str | None = None,
+    ) -> None:
+        """Persist a measured verdict for reuse, if it is safe to key.
+
+        Two keys are written: the content-addressed primary key used at serve
+        time, and a fingerprint-bound alias keyed by candidate id so the listing
+        path can find it before the subtitle bytes exist. Both are bound to the
+        video fingerprint, so neither can leak across videos.
+        """
+        if not verdict_key or self._sync_cache is None:
+            return
+        alias_key = None
+        if meta and target_id:
+            from app.services.sync_cache import SyncCache
+
+            fingerprint = SyncCache.video_fingerprint_from_meta(meta)
+            if fingerprint:
+                alias_key = SyncCache.build_verdict_alias_key(fingerprint, target_id)
+        await self._sync_cache.set_verdict(
+            verdict_key, evaluation.model_dump(mode="json"), alias_key=alias_key
+        )
+
     async def _execute(
         self, sub_bytes: bytes, meta: dict, target_id: str, auto_sync: bool
     ) -> bytes:
@@ -229,6 +325,7 @@ class SyncOrchestrator:
                     "[sync] cache HIT for sub=%s -> serving pre-synced subtitle immediately",
                     target_id,
                 )
+                self._metrics["verification_cache_hits"] += 1
                 return cached
 
         if self._sync_cache is not None and await self._sync_cache.is_failed(resolution_key):
@@ -242,6 +339,28 @@ class SyncOrchestrator:
 
         target_text = decode_subtitle_bytes(sub_bytes, lang=meta.get("lang"))
         query = self._build_query(meta, target_id=target_id, target_text=target_text)
+
+        # Measured-verdict cache: reuse a previous *verified* result for this
+        # exact video + subtitle + language + engine. Keyed on the video
+        # fingerprint, so a verdict measured for one video is never handed to
+        # another. A miss here is normal, not a failure.
+        verdict_key = self._verdict_key(meta, content_hash)
+        if verdict_key:
+            remembered = await self._sync_cache.get_verdict(verdict_key) if self._sync_cache else None
+            if remembered and str(remembered.get("sync_state")) in (
+                SyncState.VERIFIED_SYNCED.value,
+                SyncState.VERIFIED_RESYNCED.value,
+            ):
+                self._metrics["verification_cache_hits"] += 1
+                self._last_evaluation = self._evaluation_from_verdict(remembered)
+                logger.info(
+                    "[sync] reusing measured verdict for sub=%s: %s (no alass run)",
+                    target_id,
+                    self._last_evaluation.explain(),
+                )
+                if self._sync_cache is not None:
+                    await self._sync_cache.set(resolution_key, sub_bytes)
+                return sub_bytes
 
         if self._sync_service is None:  # pragma: no cover - defensive
             logger.warning("[sync] no sync service configured -> serving original subtitle")
@@ -341,6 +460,10 @@ class SyncOrchestrator:
                     alass_applied=False,
                 )
                 self._last_evaluation = evaluation
+                self._metrics["candidates_verified"] += 1
+                await self._store_verdict(
+                    verdict_key, evaluation, content_hash, meta, target_id
+                )
                 logger.info(
                     "[sync] target already aligned (median offset %+.2fs) -> serving original "
                     "[%s]",
@@ -360,6 +483,17 @@ class SyncOrchestrator:
             )
             reference_partial = bool(getattr(resolved, "partial", False))
 
+            # Cost control: at most ALASS_CANDIDATE_LIMIT expensive runs per
+            # request. Past that the remaining candidates are left for a later
+            # request rather than spawning unbounded subprocesses.
+            if self._metrics["alass_runs"] >= self._alass_candidate_limit:
+                logger.info(
+                    "[sync] alass candidate limit reached (%d) -> deferring remaining candidates",
+                    self._alass_candidate_limit,
+                )
+                continue
+
+            self._metrics["alass_runs"] += 1
             synced = await self._sync_service.sync_async(
                 target_text,
                 reference,
@@ -389,6 +523,10 @@ class SyncOrchestrator:
                     alass_successful=True,
                 )
                 self._last_evaluation = evaluation
+                self._metrics["candidates_verified"] += 1
+                await self._store_verdict(
+                    verdict_key, evaluation, content_hash, meta, target_id
+                )
                 log = logger.warning if evaluation.sync_state is SyncState.REJECTED else logger.info
                 log("[sync] alignment %s: %s", evaluation.sync_state.value, evaluation.explain())
 

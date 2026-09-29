@@ -41,6 +41,7 @@ from app.services.aggregator import (
     format_informative_badge,
 )
 from app.services.cache import clear_subtitle_cache
+from app.services.subtitle_matcher import extract_metadata
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.matching import (
     has_video_fingerprint,
@@ -554,7 +555,9 @@ async def _fetch_subtitles_handler(
 
     # Diagnostics: distinguish "Stremio sent no video fingerprint" (catalogue
     # request with no resolved stream) from an internal loss. Anything arriving
-    # in `extra`/query but missing here would be a parsing bug.
+    # in `extra`/query but missing here would be a parsing bug. Structured
+    # key=value output so the absence of metadata is never mistaken for
+    # metadata that was accidentally dropped internally.
     has_fingerprint = has_video_fingerprint(
         {
             "target_filename": target_filename,
@@ -563,32 +566,25 @@ async def _fetch_subtitles_handler(
             "stream_url": stream_url,
         }
     )
-    if has_fingerprint:
-        logger.info(
-            "[fingerprint] video context present for %s S%sE%s: filename=%r video_hash=%r "
-            "video_size=%r stream_url=%s",
-            parsed.imdb_id,
-            season,
-            episode,
-            target_filename,
-            bool(video_hash),
-            video_size,
-            "yes" if stream_url else "no",
-        )
-    else:
-        logger.info(
-            "[fingerprint] NO video context for %s S%sE%s (extra=%s, filename=%s, "
-            "videoSize=%s, stream_url=%s); Stremio requested subtitles without a "
-            "resolved stream, so the target edition is genuinely unknown and "
-            "synchronization cannot be verified",
-            parsed.imdb_id,
-            season,
-            episode,
-            "present" if extra else "absent",
-            "absent" if target_filename is None else "present",
-            "absent" if video_size is None else "present",
-            "absent" if not stream_url else "present",
-        )
+    _video_meta = extract_metadata(target_filename) if target_filename else {}
+    logger.info(
+        "[fingerprint] available=%s reason=%s imdb=%s season=%s episode=%s "
+        "filename=%s video_size=%s hash=%s resolution=%s source=%s fps=%s group=%s "
+        "extra=%s",
+        "true" if has_fingerprint else "false",
+        "stream_context_provided" if has_fingerprint else "stremio_request_without_stream_context",
+        parsed.imdb_id,
+        season,
+        episode,
+        target_filename if target_filename else "None",
+        video_size if video_size is not None else "None",
+        "present" if video_hash else "None",
+        _video_meta.get("resolution") or "None",
+        _video_meta.get("source") or "None",
+        _video_meta.get("fps") if _video_meta.get("fps") is not None else "None",
+        _video_meta.get("release_group") or "None",
+        "present" if extra else "absent",
+    )
 
     # Check if cache bypass requested via query params or headers
     bypass_cache = bool(
@@ -624,6 +620,28 @@ async def _fetch_subtitles_handler(
     # purely informational (it drives the "⚡ Synced" badge); ordering is left to
     # ``rank_subtitles`` so a stale cached artifact is never promoted above a
     # candidate whose release metadata actually matches.
+    #
+    # While here, also attach any *measured* synchronization verdict previously
+    # recorded for this exact video + candidate. This is search-time reuse of
+    # serve-time evidence, never a fresh claim: a candidate with no stored
+    # verdict keeps sync_state=None, which sorts as UNVERIFIED rather than as
+    # anything positive. The displayed match_percentage is untouched.
+    verdict_enriched = 0
+    verdict_fingerprint = (
+        _sync_cache.video_fingerprint_from_meta(
+            {
+                "imdb_id": parsed.imdb_id,
+                "season": season,
+                "episode": episode,
+                "target_filename": target_filename,
+                "video_hash": video_hash,
+                "video_size": video_size,
+                "stream_url": stream_url,
+            }
+        )
+        if has_fingerprint
+        else None
+    )
     for rel in ranked_releases:
         rel_key = f"{rel.provider}:{rel.release_name}:{rel.download_url}"
         if season is not None:
@@ -637,6 +655,32 @@ async def _fetch_subtitles_handler(
             synced_blob = None
         if synced_blob is not None:
             rel.status = "synced"
+
+        # Reuse a previously MEASURED verdict for this exact video + candidate.
+        # No stored verdict leaves sync_state as None, which the comparator
+        # treats as UNVERIFIED - never as a positive claim. The displayed
+        # match_percentage is deliberately untouched.
+        if verdict_fingerprint:
+            try:
+                verdict = await _sync_cache.get_verdict_by_ref(
+                    verdict_fingerprint, rel_sub_id
+                )
+            except Exception:
+                verdict = None
+            if verdict:
+                rel.sync_state = verdict.get("sync_state")
+                rel.sync_verification = "cached"
+                rel.sync_confidence = verdict.get("sync_confidence")
+                rel.sync_reasons = list(verdict.get("reasons") or [])
+                verdict_enriched += 1
+
+    if verdict_enriched:
+        logger.info(
+            "[sync-evidence] reused %d cached measured verdict(s) for %s; "
+            "displayed match_percentage unchanged",
+            verdict_enriched,
+            parsed.imdb_id,
+        )
 
     base_url = get_base_url(request)
     subtitle_items: list[SubtitleItem] = []
