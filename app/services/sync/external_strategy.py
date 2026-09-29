@@ -441,6 +441,11 @@ class ExternalExactStrategy:
         max_attempts = 6
         attempts = 0
         stem = query.cache_stem
+        # References already downloaded during THIS request, as
+        # (provider, name, text). Used for duplicate collapse and consensus,
+        # both of which are measurements over data we already have.
+        observed_references: list[tuple[str, str | None, str | None]] = []
+        candidate_decision_kinds: dict[str, str] = {}
 
         for cand in ranked:
             cand_provider = provider_of.get(id(cand))
@@ -488,6 +493,14 @@ class ExternalExactStrategy:
             attempts += 1
             cand_result = await self._download_candidate(cand, cand_provider, query)
             if cand_result.text:
+                observed_references.append(
+                    (
+                        self._provider_label(cand_provider),
+                        _release_name(cand),
+                        cand_result.text,
+                    )
+                )
+                candidate_decision_kinds[_release_name(cand)] = cand_result.kind
                 if validate is not None and not validate(cand_result.text):
                     self._mark_rejected(stem, cand)
                     logger.warning(
@@ -541,11 +554,39 @@ class ExternalExactStrategy:
             )
             text = sanitized
         logger.info("[reference] selected reference: %d bytes", len(text.encode("utf-8")))
+
+        # Reference trust is measured here and attached to the result. It does
+        # NOT change which reference was chosen: the winner is decided above,
+        # unchanged. It exists so a later layer can see how trustworthy the
+        # reference actually was, and so telemetry can be compared against the
+        # existing policy.
+        assessment = None
+        try:
+            from app.services.sync.reference import assess_reference, detect_duplicate_groups
+
+            groups = detect_duplicate_groups(observed_references)
+            assessment = assess_reference(
+                text,
+                provider=self._provider_label(winning_provider),
+                decision_kind=result.kind,
+                from_cache=False,
+                cache_verified=False,
+                groups=groups,
+            )
+            logger.info("[reference] trust assessment: %s", assessment.explain())
+        except Exception as exc:  # pragma: no cover - measurement must not break sync
+            logger.debug("[reference] trust assessment unavailable: %s", exc)
+
         return ResolvedReference(
             text,
             kind=result.kind,
             bluray_match=result.bluray_match,
             candidate=result.candidate,
+            reference_trust=assessment.trust.value if assessment else None,
+            reference_consensus=assessment.consensus_score if assessment else None,
+            reference_independent_sources=assessment.independent_sources if assessment else 0,
+            reference_failure=assessment.failure.value if assessment and assessment.failure else None,
+            reference_reasons=list(assessment.reasons) if assessment else [],
         )
 
     def _provider_label(self, provider) -> str:

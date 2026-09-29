@@ -503,6 +503,13 @@ class SyncOrchestrator:
                     None,
                     reference,
                     alass_applied=False,
+                    reference_trust=getattr(resolved, "reference_trust", None),
+                    reference_reasons=list(getattr(resolved, "reference_reasons", None) or []),
+                    reference_consensus=getattr(resolved, "reference_consensus", None),
+                    reference_independent_sources=getattr(
+                        resolved, "reference_independent_sources", None
+                    ) or None,
+                    reference_failure=getattr(resolved, "reference_failure", None),
                 )
                 self._last_evaluation = evaluation
                 self._metrics["candidates_verified"] += 1
@@ -567,6 +574,13 @@ class SyncOrchestrator:
                     reference,
                     alass_applied=True,
                     alass_successful=True,
+                    reference_trust=getattr(resolved, "reference_trust", None),
+                    reference_reasons=list(getattr(resolved, "reference_reasons", None) or []),
+                    reference_consensus=getattr(resolved, "reference_consensus", None),
+                    reference_independent_sources=getattr(
+                        resolved, "reference_independent_sources", None
+                    ) or None,
+                    reference_failure=getattr(resolved, "reference_failure", None),
                 )
                 self._last_evaluation = evaluation
                 self._metrics["candidates_verified"] += 1

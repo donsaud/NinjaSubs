@@ -170,6 +170,9 @@ _AVAILABILITY_RANK: dict[VerificationAvailability, int] = {
 _VERIFIED_AVAILABILITIES = frozenset(
     {VerificationAvailability.VERIFIED, VerificationAvailability.CACHED}
 )
+# Reference trust levels that can support a verified claim. Plain strings so
+# this module does not import the reference layer and create a cycle.
+_REFERENCE_TRUST_SUPPORTING_VERIFIED = frozenset({"verified", "strong"})
 
 
 class SubtitleEvaluation(BaseModel):
@@ -208,6 +211,11 @@ class SubtitleEvaluation(BaseModel):
     # Structural comparison against the reference (see structural.py).
     structural_similarity: float | None = None
     cut_verdict: str | None = None
+    # What the reference we aligned against was worth. Measurement context only.
+    reference_trust: str | None = None
+    reference_consensus: float | None = None
+    reference_independent_sources: int | None = None
+    reference_failure: str | None = None
 
     def __init__(self, **data: Any) -> None:
         super().__init__(**data)
@@ -264,6 +272,8 @@ class SubtitleEvaluation(BaseModel):
             parts.append(f"drift={self.drift_ms_per_minute:+.1f}ms/min")
         if self.structural_similarity is not None:
             parts.append(f"struct={self.structural_similarity:.2f}")
+        if self.reference_trust is not None:
+            parts.append(f"ref={self.reference_trust}")
         if self.cut_verdict:
             parts.append(f"cut={self.cut_verdict}")
         if self.rejection_reason is not None:
@@ -397,6 +407,11 @@ class AlignmentAnalyzer:
         content_match_score: float | None = None,
         target_fps: float | None = None,
         reference_fps: float | None = None,
+        reference_trust: str | None = None,
+        reference_reasons: list[str] | None = None,
+        reference_consensus: float | None = None,
+        reference_independent_sources: int | None = None,
+        reference_failure: str | None = None,
     ) -> SubtitleEvaluation:
         """Compare pre/post cues and classify the result conservatively."""
         target_cues = self._as_cues(target)
@@ -406,6 +421,13 @@ class AlignmentAnalyzer:
             alass_successful=alass_successful,
             content_match_score=content_match_score,
         )
+        # What the reference was worth, so a withheld claim can explain itself.
+        evaluation.reference_trust = reference_trust
+        evaluation.reference_consensus = reference_consensus
+        evaluation.reference_independent_sources = reference_independent_sources
+        evaluation.reference_failure = reference_failure
+        if reference_reasons:
+            evaluation.reasons.extend(reference_reasons[:4])
 
         if len(target_cues) < self.min_cues:
             evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
@@ -433,6 +455,7 @@ class AlignmentAnalyzer:
                     evaluation, target_cues, reference, target_fps, reference_fps, structural
                 ),
                 len(target_cues),
+                reference_trust,
             )
         if not alass_successful or not synced_cues:
             evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
@@ -457,10 +480,14 @@ class AlignmentAnalyzer:
                 evaluation, target_cues, synced_cues, reference, structural
             ),
             len(target_cues),
+            reference_trust,
         )
 
     def _cap_by_evidence(
-        self, evaluation: SubtitleEvaluation, cue_count: int
+        self,
+        evaluation: SubtitleEvaluation,
+        cue_count: int,
+        reference_trust: str | None = None,
     ) -> SubtitleEvaluation:
         """Ceiling a verified claim by how much evidence actually existed.
 
@@ -478,6 +505,23 @@ class AlignmentAnalyzer:
             evaluation.reasons.append(
                 f"only {cue_count} cues, below the {MIN_CUES_FOR_VERIFIED} required for a "
                 "verified claim; capped at probable"
+            )
+
+        # Withhold-only reference gate. Verification is only as trustworthy as
+        # the reference it verifies against, so an unproven reference cannot
+        # support a verified claim. This only ever REMOVES a claim: it never
+        # creates one, and it does not change which reference was selected.
+        if (
+            reference_trust is not None
+            and reference_trust not in _REFERENCE_TRUST_SUPPORTING_VERIFIED
+            and evaluation.sync_state
+            in (SyncState.VERIFIED_SYNCED, SyncState.VERIFIED_RESYNCED)
+        ):
+            evaluation.set_verdict(SyncState.PROBABLE_SYNC, evaluation.verification)
+            evaluation.rejection_reason = RejectionReason.SYNC_VERIFICATION_FAILED
+            evaluation.reasons.append(
+                f"reference trust '{reference_trust}' is not strong enough to support a "
+                "verified synchronization claim"
             )
         return evaluation
 

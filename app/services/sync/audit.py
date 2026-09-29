@@ -127,6 +127,16 @@ class SyncDecisionRecord(BaseModel):
     prediction_state: str | None = None
     prediction_rule_at_search: str | None = None
 
+    # --- reference evidence behind this decision ------------------------ #
+    # "Which reference was used, and was it trustworthy?" A verified decision
+    # is only as good as this, so it is recorded alongside the outcome.
+    reference_trust: str | None = None
+    reference_provider: str | None = None
+    reference_from_cache: bool = False
+    reference_independent_sources: int | None = None
+    reference_consensus: float | None = None
+    reference_failure: str | None = None
+
     # Normalized release class, reused from existing metadata extraction.
     release_source: str | None = None
     release_resolution: str | None = None
@@ -379,6 +389,11 @@ def record_for_evaluation(
         alass_applied=bool(getattr(evaluation, "alass_applied", False)),
         alass_successful=bool(getattr(evaluation, "alass_successful", False)),
         from_cache=from_cache,
+        reference_trust=getattr(evaluation, "reference_trust", None),
+        reference_provider=release_facts.get("provider"),
+        reference_from_cache=bool(getattr(evaluation, "reference_trust", None) == "verified"),
+        reference_independent_sources=getattr(evaluation, "reference_independent_sources", None),
+        reference_consensus=getattr(evaluation, "reference_consensus", None),
         release_source=release_facts.get("release_source"),
         release_resolution=release_facts.get("release_resolution"),
         release_edition=release_facts.get("release_edition"),

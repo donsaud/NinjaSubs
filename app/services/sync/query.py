@@ -164,3 +164,10 @@ class ResolvedReference:
     # remote stream). Its end runtime is deliberately shorter than the target,
     # so duration-mismatch gates must not reject it.
     partial: bool = False
+    # Reference trust, populated by the strategy. Stays None for strategies that
+    # do not assess the reference, so absence is distinguishable from "trusted".
+    reference_trust: str | None = None
+    reference_consensus: float | None = None
+    reference_independent_sources: int = 0
+    reference_failure: str | None = None
+    reference_reasons: list[str] = field(default_factory=list)

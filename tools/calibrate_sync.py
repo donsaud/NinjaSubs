@@ -838,6 +838,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-observations", type=int, default=DEFAULT_MIN_RULE_OBSERVATIONS)
     parser.add_argument("--min-group", type=int, default=DEFAULT_MIN_GROUP_OBSERVATIONS)
     parser.add_argument("--json-out", type=Path, default=None, help="structured aggregate output")
+    parser.add_argument(
+        "--reference-report",
+        action="store_true",
+        help="report reference-trust integrity instead of predictor calibration",
+    )
     args = parser.parse_args(argv)
 
     if not args.path.is_file():
@@ -850,6 +855,19 @@ def main(argv: list[str] | None = None) -> int:
         for line in quality.summary():
             print(f"  {line}", file=sys.stderr)
         return 1
+
+    if args.reference_report:
+        analysis = reference_analysis(
+            quality.records, min_observations=args.min_observations
+        )
+        print(render_reference_report(analysis))
+        if args.json_out:
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            args.json_out.write_text(
+                json.dumps(analysis, indent=2, sort_keys=True, default=str), encoding="utf-8"
+            )
+            print(f"\nstructured output written to {args.json_out}", file=sys.stderr)
+        return 0
 
     analysis = analyze(
         quality, min_rule=args.min_observations, min_group=args.min_group
@@ -865,6 +883,153 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nstructured output written to {args.json_out}", file=sys.stderr)
     return 0
 
+
+
+
+# --------------------------------------------------------------------------- #
+# Reference-integrity report
+# --------------------------------------------------------------------------- #
+
+
+def reference_analysis(records: list[dict[str, Any]], min_observations: int) -> dict[str, Any]:
+    """Aggregate the reference evidence behind each serve-time decision.
+
+    Reference trust is a *separate* axis from the decision outcome: a verified
+    decision resting on an unproven reference is exactly the correlated-error
+    case worth surfacing.
+    """
+    serve = [r for r in records if r.get("phase") == "serve"]
+
+    by_trust: dict[str, Counter] = defaultdict(Counter)
+    trust_totals: Counter = Counter()
+    conflicts = 0
+    for record in serve:
+        trust = record.get("reference_trust") or "unassessed"
+        outcome = record.get("sync_state") or OUTCOME_UNKNOWN
+        by_trust[trust][outcome] += 1
+        trust_totals[trust] += 1
+        if record.get("reference_failure"):
+            conflicts += 1
+
+    verified_by_trust = {
+        trust: sum(
+            by_trust[trust].get(state, 0) for state in VERIFIED_OUTCOMES
+        )
+        for trust in by_trust
+    }
+
+    clusters = Counter(
+        record.get("reference_independent_sources")
+        for record in serve
+        if record.get("reference_independent_sources")
+    )
+    cached_references = sum(1 for r in serve if r.get("reference_from_cache"))
+    consensus_values = [
+        r["reference_consensus"]
+        for r in serve
+        if isinstance(r.get("reference_consensus"), int | float)
+    ]
+
+    # The correlated-error headline: verified outcomes built on a reference that
+    # was never itself trusted.
+    verified_on_unproven = sum(
+        verified_by_trust.get(trust, 0)
+        for trust in ("acceptable", "unknown", "unassessed")
+    )
+    return {
+        "serve_records": len(serve),
+        "min_observations": min_observations,
+        "trust_distribution": dict(trust_totals),
+        "outcomes_by_trust": {k: dict(v) for k, v in sorted(by_trust.items())},
+        "verified_by_trust": verified_by_trust,
+        "verified_on_unproven_reference": verified_on_unproven,
+        "reference_failures": conflicts,
+        "consensus_clusters": {str(k): v for k, v in sorted(clusters.items())},
+        "consensus_mean": round(sum(consensus_values) / len(consensus_values), 3)
+        if consensus_values
+        else None,
+        "cached_references": cached_references,
+    }
+
+
+def render_reference_report(a: dict[str, Any]) -> str:
+    out: list[str] = []
+    add = out.append
+    rule = "=" * 74
+    add(rule)
+    add("REFERENCE INTEGRITY REPORT")
+    add(rule)
+    add(f"  serve records analysed : {a['serve_records']}")
+    add(f"  min observations      : {a['min_observations']}")
+    add("")
+
+    add("Reference trust distribution")
+    add("-" * 74)
+    if not a["trust_distribution"]:
+        add("  no reference evidence recorded yet")
+    for trust, total in sorted(a["trust_distribution"].items()):
+        outcomes = a["outcomes_by_trust"].get(trust, {})
+        verified = a["verified_by_trust"].get(trust, 0)
+        flag = "" if total >= a["min_observations"] else "  INSUFFICIENT_SAMPLE"
+        add(f"  {trust:14s} n={total:<5d} verified_outcomes={verified:<5d} "
+            f"unverified={outcomes.get('unverified', 0):<4d} "
+            f"rejected={outcomes.get('rejected', 0):<4d}{flag}")
+    add("")
+
+    add("CORRELATED-ERROR WATCH")
+    add("-" * 74)
+    add(f"  verified outcomes resting on an unproven reference : "
+        f"{a['verified_on_unproven_reference']}")
+    add(f"  explicit reference failures recorded              : {a['reference_failures']}")
+    add(f"  references taken from a verified cache            : {a['cached_references']}")
+    if a["verified_on_unproven_reference"]:
+        add("  -> investigate whether reference policy should weight trust, or whether")
+        add("     the downstream gates are already sufficient to catch these cases.")
+    else:
+        add("  -> no verified outcome currently rests on an unproven reference.")
+    add("")
+
+    add("Consensus clusters")
+    add("-" * 74)
+    if a["consensus_clusters"]:
+        for size, count in a["consensus_clusters"].items():
+            add(f"  {size} independent reference group(s): {count} decision(s)")
+    else:
+        add("  no multi-reference consensus recorded yet")
+    if a["consensus_mean"] is not None:
+        add(f"  mean consensus score: {a['consensus_mean']}")
+    add("")
+
+    add("INVESTIGATION CANDIDATES (reference)")
+    add("-" * 74)
+    for item in reference_investigation_candidates(a):
+        add(f"  {item}")
+    add("")
+    add("  Reference policy is NOT changed by this report. Selection order is")
+    add("  unchanged; only a verified claim can be withheld by an unproven reference.")
+    add(rule)
+    return "\n".join(out)
+
+
+def reference_investigation_candidates(a: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    if a["serve_records"] < a["min_observations"]:
+        out.append(
+            f"I. collect more data: {a['serve_records']} serve records is below the "
+            f"minimum {a['min_observations']}"
+        )
+        return out
+    if a["verified_on_unproven_reference"]:
+        out.append(
+            "J. consider weighting reference trust when promoting a decision to verified"
+        )
+    else:
+        out.append("I. keep reference policy unchanged: no verified decision rests on an unproven reference")
+    if a["reference_failures"]:
+        out.append("K. investigate why references are failing health checks")
+    if not a["consensus_clusters"]:
+        out.append("L. multi-reference consensus is not observable yet; only one reference is fetched per request")
+    return out
 
 if __name__ == "__main__":
     raise SystemExit(main())
