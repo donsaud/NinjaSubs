@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 AUDIT_SCHEMA_VERSION = 1
 # Identifies the verification engine generation that produced a record.
 ENGINE_VERSION = "sync-eval-1"
+# Outcomes that count as a verified synchronization claim.
+VERIFIED_OUTCOMES = ("verified_synced", "verified_resynced")
 
 # Reason strings are truncated: they must stay metrics, not subtitle content.
 _MAX_REASON_CHARS = 160
@@ -136,6 +138,18 @@ class SyncDecisionRecord(BaseModel):
     reference_independent_sources: int | None = None
     reference_consensus: float | None = None
     reference_failure: str | None = None
+    # --- shadow reference selection v2 (measurement only) ---------------- #
+    # Which candidate the alternative policy would have chosen. Never used for
+    # the decision itself; recorded so the two policies can be compared.
+    shadow_reference_id: str | None = None
+    shadow_reference_changed: bool = False
+    shadow_reference_trust: str | None = None
+    shadow_reference_health: str | None = None
+    shadow_independent_groups: int | None = None
+    shadow_reasons: list[str] = Field(default_factory=list)
+    # Legacy pick was only acceptable/unknown, the shadow pick was stronger,
+    # and the decision did not verify. A flag to investigate, never a cause.
+    potential_reference_selection_issue: bool = False
 
     # Normalized release class, reused from existing metadata extraction.
     release_source: str | None = None
@@ -357,10 +371,11 @@ def record_for_evaluation(
     from_cache: bool = False,
     prediction_rule: str | None = None,
     prediction_confidence: float | None = None,
+    reference: Any = None,
 ) -> SyncDecisionRecord:
     """Build a record from an existing evaluation. Reuses its fields verbatim."""
     release_facts = _release_meta(release) if release is not None else {}
-    return SyncDecisionRecord(
+    record = SyncDecisionRecord(
         phase=phase,
         video_id=video_id,
         subtitle_id=subtitle_id,
@@ -394,6 +409,14 @@ def record_for_evaluation(
         reference_from_cache=bool(getattr(evaluation, "reference_trust", None) == "verified"),
         reference_independent_sources=getattr(evaluation, "reference_independent_sources", None),
         reference_consensus=getattr(evaluation, "reference_consensus", None),
+        shadow_reference_id=getattr(reference, "shadow_reference_id", None),
+        shadow_reference_changed=bool(getattr(reference, "shadow_changed", False)),
+        shadow_reference_trust=getattr(reference, "shadow_trust", None),
+        shadow_reference_health=getattr(reference, "shadow_health", None),
+        shadow_independent_groups=getattr(reference, "shadow_independent_groups", 0) or None,
+        shadow_reasons=[
+            sanitize_reason(r) for r in (getattr(reference, "shadow_reasons", None) or [])
+        ],
         release_source=release_facts.get("release_source"),
         release_resolution=release_facts.get("release_resolution"),
         release_edition=release_facts.get("release_edition"),
@@ -403,3 +426,17 @@ def record_for_evaluation(
         provider=release_facts.get("provider"),
         reasons=[sanitize_reason(r) for r in (getattr(evaluation, "reasons", None) or [])],
     )
+    state_value = getattr(getattr(evaluation, "sync_state", None), "value", None) or str(
+        getattr(evaluation, "sync_state", SyncState.UNVERIFIED.value)
+    )
+    # A candidate for investigation, never a proven cause: the legacy pick was
+    # weaker, the shadow pick was stronger, and the decision did not verify.
+    record.potential_reference_selection_issue = bool(
+        record.shadow_reference_changed
+        and record.shadow_reference_id
+        and (getattr(reference, "reference_trust", None) or "")
+        in ("acceptable", "unknown", "rejected")
+        and (record.shadow_reference_trust or "") in ("verified", "strong")
+        and state_value not in VERIFIED_OUTCOMES
+    )
+    return record

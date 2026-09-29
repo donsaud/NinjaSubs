@@ -171,3 +171,12 @@ class ResolvedReference:
     reference_independent_sources: int = 0
     reference_failure: str | None = None
     reference_reasons: list[str] = field(default_factory=list)
+    # --- shadow reference selection v2 (measurement only) ---------------- #
+    # Never substituted into `text`. Present so the two policies can be
+    # compared offline; see reference_v2 and the shadow-comparison report.
+    shadow_reference_id: str | None = None
+    shadow_changed: bool = False
+    shadow_reasons: list[str] = field(default_factory=list)
+    shadow_trust: str | None = None
+    shadow_health: str | None = None
+    shadow_independent_groups: int = 0

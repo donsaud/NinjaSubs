@@ -577,6 +577,50 @@ class ExternalExactStrategy:
         except Exception as exc:  # pragma: no cover - measurement must not break sync
             logger.debug("[reference] trust assessment unavailable: %s", exc)
 
+        # --- SHADOW reference selection v2 -------------------------------- #
+        # Runs beside the existing policy, purely to measure disagreement. The
+        # `text` returned above is the LEGACY reference and is what the sync
+        # engine receives; the shadow pick is recorded for analysis and is never
+        # substituted into the response. `ReferenceSelection` is local and goes
+        # no further than the telemetry below.
+        shadow_comparison = None
+        try:
+            from app.services.sync.reference_v2 import (
+                _identity as _reference_identity,
+            )
+            from app.services.sync.reference_v2 import (
+                compare_selections,
+                select_reference_v2,
+            )
+
+            selection = select_reference_v2(
+                query.target_filename if query else None, observed_references
+            )
+            # Same identity function on both sides, otherwise every request
+            # would look like a disagreement.
+            legacy_identity = _reference_identity(
+                self._provider_label(winning_provider), result.candidate, text
+            )
+            shadow_comparison = compare_selections(
+                legacy_identity,
+                selection,
+                legacy_trust=assessment.trust.value if assessment else None,
+                legacy_health=(
+                    "healthy" if (assessment and assessment.health.healthy) else "degraded"
+                ),
+            )
+            if shadow_comparison.changed:
+                logger.info(
+                    "[reference-shadow] policy differs: %s",
+                    "; ".join(shadow_comparison.reasons),
+                )
+            else:
+                logger.info(
+                    "[reference-shadow] policies agree on %s", shadow_comparison.legacy_id
+                )
+        except Exception as exc:  # pragma: no cover - shadow must never break sync
+            logger.debug("[reference-shadow] unavailable: %s", exc)
+
         return ResolvedReference(
             text,
             kind=result.kind,
@@ -587,6 +631,14 @@ class ExternalExactStrategy:
             reference_independent_sources=assessment.independent_sources if assessment else 0,
             reference_failure=assessment.failure.value if assessment and assessment.failure else None,
             reference_reasons=list(assessment.reasons) if assessment else [],
+            shadow_reference_id=shadow_comparison.shadow_id if shadow_comparison else None,
+            shadow_changed=bool(shadow_comparison.changed) if shadow_comparison else False,
+            shadow_reasons=list(shadow_comparison.reasons) if shadow_comparison else [],
+            shadow_trust=shadow_comparison.shadow_trust if shadow_comparison else None,
+            shadow_health=shadow_comparison.shadow_health if shadow_comparison else None,
+            shadow_independent_groups=(
+                shadow_comparison.independent_groups if shadow_comparison else 0
+            ),
         )
 
     def _provider_label(self, provider) -> str:

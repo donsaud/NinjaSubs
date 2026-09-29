@@ -285,6 +285,7 @@ class SyncOrchestrator:
         target_id: str,
         *,
         from_cache: bool,
+        resolved: Any = None,
     ) -> None:
         """Shadow-record a serve-time verification. Never affects the result.
 
@@ -307,6 +308,7 @@ class SyncOrchestrator:
                 record_for_evaluation(
                     evaluation,
                     phase="serve",
+                    reference=resolved,
                     video_id=fingerprint,
                     subtitle_id=stable_id(target_id),
                     language=str(meta.get("lang") or "und"),
@@ -395,8 +397,10 @@ class SyncOrchestrator:
             ):
                 self._metrics["verification_cache_hits"] += 1
                 self._last_evaluation = self._evaluation_from_verdict(remembered)
+                # A verdict cache hit means no reference was fetched this
+                # request, so there is no reference evidence to record.
                 self._audit_serve(
-                    self._last_evaluation, meta, target_id, from_cache=True
+                    self._last_evaluation, meta, target_id, from_cache=True, resolved=None
                 )
                 logger.info(
                     "[sync] reusing measured verdict for sub=%s: %s (no alass run)",
@@ -516,7 +520,9 @@ class SyncOrchestrator:
                 await self._store_verdict(
                     verdict_key, evaluation, content_hash, meta, target_id
                 )
-                self._audit_serve(evaluation, meta, target_id, from_cache=False)
+                self._audit_serve(
+                    evaluation, meta, target_id, from_cache=False, resolved=resolved
+                )
                 logger.info(
                     "[sync] target already aligned (median offset %+.2fs) -> serving original "
                     "[%s]",
@@ -587,7 +593,9 @@ class SyncOrchestrator:
                 await self._store_verdict(
                     verdict_key, evaluation, content_hash, meta, target_id
                 )
-                self._audit_serve(evaluation, meta, target_id, from_cache=False)
+                self._audit_serve(
+                    evaluation, meta, target_id, from_cache=False, resolved=resolved
+                )
                 log = logger.warning if evaluation.sync_state is SyncState.REJECTED else logger.info
                 log("[sync] alignment %s: %s", evaluation.sync_state.value, evaluation.explain())
 

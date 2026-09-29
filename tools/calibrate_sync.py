@@ -843,6 +843,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="report reference-trust integrity instead of predictor calibration",
     )
+    parser.add_argument(
+        "--shadow-report",
+        action="store_true",
+        help="compare the shadow (v2) reference selector against the current one",
+    )
     args = parser.parse_args(argv)
 
     if not args.path.is_file():
@@ -856,11 +861,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {line}", file=sys.stderr)
         return 1
 
-    if args.reference_report:
-        analysis = reference_analysis(
-            quality.records, min_observations=args.min_observations
-        )
-        print(render_reference_report(analysis))
+    def _emit(analysis: dict[str, Any], rendered: str) -> int:
+        print(rendered)
         if args.json_out:
             args.json_out.parent.mkdir(parents=True, exist_ok=True)
             args.json_out.write_text(
@@ -869,9 +871,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nstructured output written to {args.json_out}", file=sys.stderr)
         return 0
 
-    analysis = analyze(
-        quality, min_rule=args.min_observations, min_group=args.min_group
-    )
+    if args.shadow_report:
+        analysis = shadow_comparison_analysis(quality.records)
+        return _emit(analysis, render_shadow_report(analysis))
+    if args.reference_report:
+        analysis = reference_analysis(quality.records, min_observations=args.min_observations)
+        return _emit(analysis, render_reference_report(analysis))
+
+    analysis = analyze(quality, min_rule=args.min_observations, min_group=args.min_group)
     print(render_report(analysis))
 
     if args.json_out:
@@ -1029,6 +1036,164 @@ def reference_investigation_candidates(a: dict[str, Any]) -> list[str]:
         out.append("K. investigate why references are failing health checks")
     if not a["consensus_clusters"]:
         out.append("L. multi-reference consensus is not observable yet; only one reference is fetched per request")
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Shadow reference-selection comparison
+# --------------------------------------------------------------------------- #
+
+# Reference trust strengths, for comparing legacy vs shadow picks.
+_TRUST_STRENGTH = {"verified": 3, "strong": 2, "acceptable": 1, "unknown": 0}
+
+
+def shadow_comparison_analysis(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compare the legacy reference pick against the shadow (v2) pick.
+
+    Purely observational. Where the two disagree, this records *that* they
+    disagree and on which axis; it never declares one policy better.
+    """
+    serve = [r for r in records if r.get("phase") == "serve"]
+
+    legacy = [r for r in serve if r.get("reference_trust")]
+    compared = [r for r in legacy if r.get("shadow_reference_id")]
+    changed = [r for r in compared if r.get("shadow_reference_changed")]
+
+    by_reason: Counter = Counter()
+    for record in changed:
+        for reason in record.get("shadow_reasons") or []:
+            by_reason[reason.split(":")[0].strip()[:60]] += 1
+
+    def _axis(records_subset: list[dict[str, Any]], key: str) -> dict[str, int]:
+        return dict(Counter(str(r.get(key) or "unknown") for r in records_subset))
+
+    potential = [r for r in serve if r.get("potential_reference_selection_issue")]
+    with_verified_cache = [
+        r
+        for r in changed
+        if r.get("shadow_reference_trust") in ("verified", "strong")
+    ]
+    multi_group = [r for r in changed if (r.get("shadow_independent_groups") or 0) > 1]
+
+    # Switch simulation is only possible when the artifacts needed to re-score
+    # exist locally. The audit deliberately does not store subtitle text, so a
+    # real re-alignment is impossible from the record alone.
+    simulation = {
+        "available": False,
+        "reason": (
+            "SIMULATION_UNAVAILABLE: the audit stores no subtitle text or reference "
+            "payload, so an offline re-alignment cannot be derived from the record"
+        ),
+    }
+
+    return {
+        "serve_records": len(serve),
+        "legacy_assessed": len(legacy),
+        "compared": len(compared),
+        "agreed": len(compared) - len(changed),
+        "changed": len(changed),
+        "agreement_rate": round((len(compared) - len(changed)) / len(compared), 4)
+        if compared
+        else None,
+        "change_reasons": dict(by_reason.most_common()),
+        "changed_by_match_tier": _axis(changed, "match_tier"),
+        "changed_by_provider": _axis(changed, "provider"),
+        "changed_by_source": _axis(changed, "release_source"),
+        "changed_by_legacy_trust": _axis(changed, "reference_trust"),
+        "changed_by_legacy_health": _axis(changed, "reference_health"),
+        "changed_rate": round(len(changed) / len(compared), 4) if compared else None,
+        "changed_when_shadow_verified": len(with_verified_cache),
+        "changed_with_multiple_independent_groups": len(multi_group),
+        "potential_reference_selection_issue": len(potential),
+        "legacy_verified_outcomes": sum(
+            1
+            for r in serve
+            if r.get("sync_state") in VERIFIED_OUTCOMES
+        ),
+        "switch_simulation": simulation,
+    }
+
+
+def render_shadow_report(a: dict[str, Any]) -> str:
+    out: list[str] = []
+    add = out.append
+    rule = "=" * 74
+    add(rule)
+    add("SHADOW REFERENCE SELECTION COMPARISON (v2 vs current)")
+    add(rule)
+    add(f"  serve records            : {a['serve_records']}")
+    add(f"  legacy references graded : {a['legacy_assessed']}")
+    add(f"  comparable pairs         : {a['compared']}")
+    add(f"  agreements               : {a['agreed']}")
+    add(f"  disagreements            : {a['changed']}")
+    add(f"  agreement rate           : {_pct(a['agreement_rate'])}")
+    add("")
+
+    add("Disagreement axes (legacy -> shadow)")
+    add("-" * 74)
+    for title, key in (
+        ("match tier", "changed_by_match_tier"),
+        ("provider", "changed_by_provider"),
+        ("release source", "changed_by_source"),
+        ("legacy trust", "changed_by_legacy_trust"),
+        ("legacy health", "changed_by_legacy_health"),
+    ):
+        values = a[key]
+        add(f"  {title:16s} {values if values else 'n/a'}")
+    if a["change_reasons"]:
+        add("  recorded reasons:")
+        for reason, count in a["change_reasons"].items():
+            add(f"      {count:5d}  {reason}")
+    add("")
+
+    add("POTENTIAL_REFERENCE_SELECTION_ISSUE")
+    add("-" * 74)
+    add(f"  cases: {a['potential_reference_selection_issue']}")
+    add("  A weaker legacy pick, a stronger shadow pick, and a decision that did not")
+    add("  verify. This is a CANDIDATE for investigation, not evidence that the")
+    add("  reference caused the failure.")
+    add("")
+
+    add("Reference switch simulation")
+    add("-" * 74)
+    add(f"  {a['switch_simulation']['reason']}")
+    add("  Re-running alass across the dataset is deliberately not done: it would")
+    add("  add runtime cost to production and duplicate a real sync pass.")
+    add("")
+
+    add("INVESTIGATION CANDIDATES (reference selection)")
+    add("-" * 74)
+    for item in shadow_investigation_candidates(a):
+        add(f"  {item}")
+    add("")
+    add("  Neither policy is declared better. Promotion requires measured")
+    add("  verification success, false-positive rate, and unverified/rejected")
+    add("  rates over a real sample - not this comparison alone.")
+    add(rule)
+    return "\n".join(out)
+
+
+def shadow_investigation_candidates(a: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    if a["compared"] == 0:
+        out.append("M. no comparable shadow pairs yet; keep collecting observations")
+        return out
+    if a["changed"] == 0:
+        out.append("N. legacy and shadow agree on every observation so far")
+    else:
+        out.append(
+            f"O. {a['changed']} of {a['compared']} observations disagree "
+            f"({_pct(a['changed_rate'])}); inspect the recorded reasons"
+        )
+    if a["potential_reference_selection_issue"]:
+        out.append(
+            "P. review POTENTIAL_REFERENCE_SELECTION_ISSUE cases before considering any change"
+        )
+    if a["changed_when_shadow_verified"]:
+        out.append(
+            "Q. shadow prefers a verified-cache reference in some cases; check whether "
+            "exact cache evidence should outrank release identity"
+        )
     return out
 
 if __name__ == "__main__":
