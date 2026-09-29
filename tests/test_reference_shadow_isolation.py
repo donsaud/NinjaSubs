@@ -151,7 +151,14 @@ async def test_single_candidate_pool_is_recorded_as_no_comparison(monkeypatch, t
 
 @pytest.mark.asyncio
 async def test_optional_pool_fetch_is_bounded_and_measured(monkeypatch, tmp_path):
-    """Opt-in extra downloads stay bounded and are counted."""
+    """Opt-in extra downloads stay bounded and are counted.
+
+    Audit must actually be recording, otherwise the budget is refused even
+    though it is configured.
+    """
+    from app.services.sync.audit import AUDIT_LOG
+
+    monkeypatch.setattr(AUDIT_LOG, "enabled", True, raising=False)
     target_text = srt(even(40))
     credits = srt(even(40), body=CREDITS)
     other = srt(even(40, step_ms=2200))
@@ -172,9 +179,18 @@ async def test_optional_pool_fetch_is_bounded_and_measured(monkeypatch, tmp_path
     # Legacy still stops at its own first passing candidate.
     assert resolved.text == credits
     # At most the configured number of extra fetches happened.
-    assert resolved.shadow_additional_fetches <= 1
+    assert resolved.shadow_extra_fetch_attempts <= 1
+    assert resolved.shadow_extra_fetch_successes <= 1
     assert len(provider.downloaded) <= 2
-    assert resolved.shadow_pool_size >= 2
+    assert resolved.shadow_expansion_eligible is True
+    # Marginal value is judged, not assumed.
+    assert resolved.shadow_expansion_outcome in (
+        "ADDED_NEW_TIMING_GROUP",
+        "ADDED_DUPLICATE_GROUP",
+        "ENABLED_MEANINGFUL_COMPARISON",
+    )
+    assert resolved.shadow_independent_groups_after >= resolved.shadow_independent_groups_before
+    assert resolved.shadow_meaningful_after is True
 
 
 def test_raw_agreement_is_reported_separately_from_meaningful(tmp_path):
