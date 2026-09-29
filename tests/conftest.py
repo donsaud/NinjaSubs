@@ -7,12 +7,73 @@ from pathlib import Path
 
 import pytest
 
-from app.cache import LRUCacheManager
+# ---------------------------------------------------------------------------
+# Redirect the on-disk cache BEFORE any application module is imported.
+#
+# ``app.config`` resolves CACHE_DIR at import time and ``LRUCacheManager``
+# captures it in ``__init__``, so a fixture that patches ``settings`` later is
+# too late for any singleton built during import. Setting the environment
+# variable here is the only point early enough to be reliable.
+#
+# The default is ``<repo>/subs_cache`` - the same directory a local run of the
+# app uses, inside the repository. Test output written there is
+# indistinguishable from real operational state.
+# ---------------------------------------------------------------------------
+_TESTS_ROOT = Path(__file__).resolve().parent
+_TEST_CACHE_DIR = _TESTS_ROOT / "cache"
+os.environ["CACHE_DIR"] = str(_TEST_CACHE_DIR)
+os.environ.setdefault("REFERENCE_CACHE_DIR", str(_TEST_CACHE_DIR / "references"))
 
-# Prune any oversized environment variables injected by subshell to prevent Windows 32767-char limit error on patch.dict
-for k, v in list(os.environ.items()):
-    if len(v) > 30000:
-        del os.environ[k]
+from app.cache import LRUCacheManager  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def isolated_sync_cache():
+    """Clean the test-owned cache once, before and after the session.
+
+    Scoped strictly to ``tests/cache``. A real cache is never deleted: this
+    fixture will not touch the production path even if CACHE_DIR is overridden.
+    """
+    if _TEST_CACHE_DIR.exists():
+        shutil.rmtree(_TEST_CACHE_DIR, ignore_errors=True)
+    _TEST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    yield _TEST_CACHE_DIR
+    shutil.rmtree(_TEST_CACHE_DIR, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def settings_cache_points_at_tests():
+    """Keep the live settings object pointed at the test cache.
+
+    The environment variable covers modules imported before this ran; this
+    covers objects constructed during a test, which read ``settings`` live.
+    """
+    from app.config import settings
+
+    previous_cache = settings.CACHE_DIR
+    previous_reference = settings.REFERENCE_CACHE_DIR
+    settings.CACHE_DIR = str(_TEST_CACHE_DIR)
+    settings.REFERENCE_CACHE_DIR = str(_TEST_CACHE_DIR / "references")
+    try:
+        yield
+    finally:
+        settings.CACHE_DIR = previous_cache
+        settings.REFERENCE_CACHE_DIR = previous_reference
+
+
+@pytest.fixture(autouse=True)
+def reset_request_context():
+    """No sync log line may inherit a request id from another test."""
+    from app.logging_context import current_request_id, set_request_id
+
+    token = set_request_id(None)
+    try:
+        yield
+    finally:
+        from app.logging_context import reset_request_id
+
+        reset_request_id(token)
+        assert current_request_id() is None
 
 
 @pytest.fixture(autouse=True)

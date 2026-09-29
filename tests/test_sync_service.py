@@ -682,11 +682,56 @@ def test_sync_trusts_split_shift(monkeypatch):
 
 
 def test_sync_logs_first_cue_before_alass(monkeypatch, caplog):
-    """The raw first-cue timestamps of target and reference are logged."""
+    """Both cue metrics are logged, each named for what it measures.
+
+    The old label was a single ambiguous "first cue", which is how one
+    incident produced an apparently contradictory pair of numbers for a single
+    subtitle: a first *parsed* cue and a first *dialogue* cue are different
+    measurements, and neither is wrong.
+    """
     _mock_alass_output(monkeypatch, _shifted_output(5, text="SYNCED"))
     with caplog.at_level("INFO"):
         SubtitleSyncService().sync(SRT, SRT, decision_kind="edition")
-    assert "first cue before alass" in caplog.text
+    assert "target_first_parsed_cue_start_ms" in caplog.text
+    assert "target_first_dialogue_start_ms" in caplog.text
+    assert "target_cue_count" in caplog.text
+    assert "reference_first_parsed_cue_start_ms" in caplog.text
+    # The ambiguous label is gone, so a reader cannot mistake one metric for
+    # the other.
+    assert "first cue before alass" not in caplog.text
+
+
+def test_parsed_and_dialogue_first_cue_are_distinct_metrics():
+    """A non-speech head cue makes the two differ; that is the point."""
+    from app.services.sync_service import _cue_starts_ms, _first_dialogue_start_ms
+
+    head_credit = (
+        "1\n00:00:02,000 --> 00:00:04,000\nsubtitle by someone\n\n"
+        "2\n00:00:10,550 --> 00:00:12,000\nfirst real line\n\n"
+        "3\n00:00:20,000 --> 00:00:21,000\nsecond real line\n"
+    )
+    assert _cue_starts_ms(head_credit, limit=1) == [2000]
+    assert _first_dialogue_start_ms(head_credit) == 10_550
+    # Both are available and they are not interchangeable.
+    assert _cue_starts_ms(head_credit, limit=1)[0] != _first_dialogue_start_ms(head_credit)
+
+
+def test_post_alass_artifact_does_not_match_the_pre_alass_figure(monkeypatch, tmp_path):
+    """The cached artifact is the OUTPUT, so its timings carry the applied shift.
+
+    This is the second half of the incident explanation: comparing a pre-alass
+    log figure against a post-alass cached file compares two stages, not two
+    answers.
+    """
+    _mock_alass_output(monkeypatch, _shifted_output(5, text="SYNCED"))
+    produced = SubtitleSyncService().sync(SRT, SRT, decision_kind="edition")
+    from app.services.sync_service import _cue_starts_ms
+
+    pre = _cue_starts_ms(SRT, limit=1)
+    post = _cue_starts_ms(produced if isinstance(produced, str) else produced.decode("utf-8"), limit=1)
+    assert pre and post
+    # The shift is visible, which is why the two must not share one label.
+    assert pre != post
 
 
 def test_timeline_rejection_partial_reference_skips_duration():

@@ -18,6 +18,11 @@ import tempfile
 import time
 
 from app.config import settings
+from app.services.subtitle_matcher import (
+    first_dialogue_cluster,
+    parse_srt_cues,
+    strip_intro_nonspeech,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +159,16 @@ def _cue_starts_ms(text: str, limit: int = 3) -> list[int]:
         if len(starts) >= limit:
             break
     return starts
+
+
+def _first_dialogue_start_ms(text: str) -> int | None:
+    """First actual speech cue, with non-speech cues stripped.
+
+    Distinct from the first *parsed* cue: a translator credit or logo card at
+    the head makes the two differ, and conflating them is what made one
+    incident's numbers look contradictory when they were not.
+    """
+    return first_dialogue_cluster(strip_intro_nonspeech(text))
 
 
 def _percentile_cue_end_ms(text: str, percentile: float = 0.98) -> int:
@@ -549,14 +564,35 @@ class SubtitleSyncService:
             len(reference),
             effective_timeout,
         )
-        # Raw first-cue offset before alignment: makes a wrong-cut reference
-        # obvious (a seconds-level gap is an intro offset; minutes is a cut).
+        # Two DIFFERENT metrics, both historically called "first cue", which is
+        # how a real incident produced an apparently contradictory pair of
+        # numbers for one subtitle. Naming them explicitly is the fix; the
+        # values are unchanged and no decision reads either one.
+        #
+        #   first_parsed_cue_start_ms - first timestamped cue, text or not.
+        #   first_dialogue_start_ms   - first cue that is actual speech, after
+        #                                non-speech cues are stripped.
+        #
+        # A translator credit or logo card at the head makes these differ by
+        # design. Note also that the artifact written to the cache is the
+        # POST-alass output, so it will not match the pre-alass figure once
+        # alass has applied a shift.
         target_first = _cue_starts_ms(target_srt, limit=1)
         reference_first = _cue_starts_ms(reference, limit=1)
+        target_dialogue = _first_dialogue_start_ms(target_srt)
+        reference_dialogue = _first_dialogue_start_ms(reference)
         logger.info(
-            "[sync] first cue before alass: target=%s reference=%s",
-            f"{target_first[0] / 1000.0:.2f}s" if target_first else "n/a",
-            f"{reference_first[0] / 1000.0:.2f}s" if reference_first else "n/a",
+            "[sync] pre-alass timing: "
+            "target_first_parsed_cue_start_ms=%s target_first_dialogue_start_ms=%s "
+            "target_cue_count=%d | "
+            "reference_first_parsed_cue_start_ms=%s reference_first_dialogue_start_ms=%s "
+            "reference_cue_count=%d",
+            target_first[0] if target_first else "n/a",
+            target_dialogue if target_dialogue is not None else "n/a",
+            len(parse_srt_cues(target_srt)),
+            reference_first[0] if reference_first else "n/a",
+            reference_dialogue if reference_dialogue is not None else "n/a",
+            len(parse_srt_cues(reference)),
         )
 
         ref_file = tgt_file = out_file = None

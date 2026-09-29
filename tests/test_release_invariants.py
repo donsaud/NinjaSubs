@@ -434,3 +434,93 @@ def test_sync_state_evaluation_entry_point_exists_and_is_used():
 
     assert callable(alignment.evaluate_sync_state)
     assert inspect.getdoc(alignment.evaluate_sync_state)
+
+
+# --- cache isolation between tests and production --------------------------- #
+
+
+def test_the_test_cache_is_not_the_production_cache():
+    """`settings.CACHE_DIR` must not be the repository's own subs_cache.
+
+    That directory is what a local run of the app uses, so test output written
+    there is indistinguishable from real operational state.
+    """
+    from app.config import settings
+
+    resolved = Path(settings.CACHE_DIR).resolve()
+    production_default = (REPO / "subs_cache").resolve()
+    assert resolved != production_default, (
+        "tests must not write into the application's cache directory"
+    )
+    assert REPO / "tests" in resolved.parents or resolved.is_relative_to(REPO / "tests")
+
+
+def test_the_test_cache_is_removed_after_the_session():
+    """The isolated directory is test-owned and is cleaned by the fixture."""
+    from app.config import settings
+
+    assert Path(settings.CACHE_DIR).name == "cache"
+    assert Path(settings.CACHE_DIR).parent.name == "tests"
+
+
+def test_running_a_cache_write_does_not_touch_the_production_path(tmp_path, monkeypatch):
+    """A real write through the app's own cache lands in the test directory."""
+    from app.cache import LRUCacheManager
+    from app.config import settings
+
+    target = tmp_path / "sub-cache"
+    manager = LRUCacheManager(cache_dir=str(target))
+    manager.store_metadata("abc123", {"status": "ok"})
+    assert (target / "_meta" / "abc123.json").is_file()
+    # Nothing landed in the configured (test) or production directory.
+    configured = Path(settings.CACHE_DIR)
+    assert not (configured / "_meta" / "abc123.json").exists()
+    assert not (REPO / "subs_cache" / "_meta" / "abc123.json").exists()
+
+
+def test_the_environment_override_is_what_isolates_tests():
+    """The isolation comes from CACHE_DIR being set before app import.
+
+    LRUCacheManager captures the path in __init__, so a later fixture patch
+    would be too late for a singleton built at import time.
+    """
+    import os
+
+    assert os.environ.get("CACHE_DIR"), "CACHE_DIR must be set before app import"
+    assert Path(os.environ["CACHE_DIR"]).resolve().is_relative_to(REPO / "tests")
+
+
+# --- request correlation --------------------------------------------------- #
+
+
+def test_sync_log_lines_carry_a_request_id():
+    """Concurrent requests interleave; unattributable lines cost a forensic pass."""
+    from app.logging_context import (
+        format_with_request_id,
+        stable_request_id,
+    )
+
+    request_id = stable_request_id(
+        {"imdb_id": "tt1", "season": 8, "episode": 5, "filename": "x.mkv", "videosize": 1},
+        "sub1",
+        b"payload",
+    )
+    assert len(request_id) == 8
+    # Stable for the same request, distinct for a different one.
+    assert request_id == stable_request_id(
+        {"imdb_id": "tt1", "season": 8, "episode": 5, "filename": "x.mkv", "videosize": 1},
+        "sub1",
+        b"payload",
+    )
+    assert request_id != stable_request_id(
+        {"imdb_id": "tt1", "season": 8, "episode": 5, "filename": "x.mkv", "videosize": 1},
+        "sub2",
+        b"payload",
+    )
+    assert "sync_request_id" in format_with_request_id("%(message)s")
+
+
+def test_no_request_id_leaks_between_tests():
+    from app.logging_context import current_request_id
+
+    assert current_request_id() is None

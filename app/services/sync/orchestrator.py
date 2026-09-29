@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.config import settings
+from app.logging_context import reset_request_id, set_request_id, stable_request_id
 from app.services.subtitle_matcher import (
     ALIGNED_OFFSET_THRESHOLD_S,
     FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
@@ -163,6 +164,21 @@ class SyncOrchestrator:
         self, sub_bytes: bytes, meta: dict, target_id: str, auto_sync: bool = False
     ) -> bytes:
         """Evaluate sync need and synchronize an Arabic subtitle, or return the original bytes."""
+        # Tag every sync log line emitted from here with a correlation id.
+        # Concurrent requests for the same episode otherwise interleave, and
+        # attributing their lines to the wrong request is how an incident
+        # appeared to show contradictory diagnostics that were not.
+        request_token = set_request_id(stable_request_id(meta, target_id, sub_bytes))
+        try:
+            return await self._evaluate_and_sync(
+                sub_bytes, meta, target_id, auto_sync
+            )
+        finally:
+            reset_request_id(request_token)
+
+    async def _evaluate_and_sync(
+        self, sub_bytes: bytes, meta: dict, target_id: str, auto_sync: bool = False
+    ) -> bytes:
         server_enabled = bool(getattr(settings, "ENABLE_SUBTITLE_SYNC", False))
         lang = str(meta.get("lang") or "").lower()
         logger.info(
