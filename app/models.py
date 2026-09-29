@@ -187,8 +187,6 @@ class UserPreferences(BaseModel):
     convert_ass_to_srt: bool = True
     # Auto-sync Arabic subtitles against a trusted reference (alass)
     auto_sync: bool = True
-    # User-configured Stremio stream addon URL (e.g., Torrentio, AIOStreams) for embedded subtitle extraction
-    stream_addon_url: str = ""
     # Subtitle badge components to display (order-independent; canonical order applied):
     #   "score"    -> "[100%]"
     #   "provider" -> "[SubDL]"

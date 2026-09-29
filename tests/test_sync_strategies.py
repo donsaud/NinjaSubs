@@ -1,4 +1,4 @@
-"""Tests for the sync strategies (hash-exact, embedded) and the orchestrator."""
+"""Tests for the sync strategies (external exact-match, hash-exact) and the orchestrator."""
 
 from types import SimpleNamespace
 
@@ -73,7 +73,7 @@ def _arabic_bytes(n=6):
 def _orchestrator(**overrides):
     params = {
         "hash_strategy": _FakeStrategy(None),
-        "embedded_strategy": _FakeStrategy(None),
+        "external_strategy": _FakeStrategy(None),
         "sync_service": _FakeSyncService(),
         "sync_cache": SyncCache(),
     }
@@ -97,52 +97,48 @@ async def test_orchestrator_gates_skip_strategies(monkeypatch):
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     assert await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", False) == _arabic_bytes()
     assert await orch.evaluate_and_sync(_arabic_bytes(), {"lang": "eng"}, "t", True) == _arabic_bytes()
-    assert orch._hash_strategy.calls == 0 and orch._embedded_strategy.calls == 0
+    assert orch._hash_strategy.calls == 0 and orch._external_strategy.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_prefers_embedded_then_caches(monkeypatch):
+async def test_orchestrator_prefers_external_then_caches(monkeypatch):
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     reference = BIG_REF.decode()
-    # Tier order is embedded -> external -> hash: the ground-truth embedded
-    # reference (the video's own track) wins.
+    # Tier order is external exact-match -> hash: the external reference wins.
     orch = _orchestrator(
-        embedded_strategy=_FakeStrategy(reference),
-        external_strategy=_FakeStrategy("should-not-be-used"),
+        external_strategy=_FakeStrategy(reference),
         hash_strategy=_FakeStrategy("should-not-be-used"),
     )
     out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert b"synced" in out
-    assert orch._embedded_strategy.calls == 1
-    assert orch._external_strategy.calls == 0 and orch._hash_strategy.calls == 0
+    assert orch._external_strategy.calls == 1
+    assert orch._hash_strategy.calls == 0
     assert orch._sync_service.calls == 1
 
     # A warm result is served before reference resolution or alass.
     orch2 = _orchestrator(
-        embedded_strategy=_FakeStrategy("x"),
         external_strategy=_FakeStrategy("x"),
         hash_strategy=_FakeStrategy("x"),
         sync_cache=orch._sync_cache,
     )
     out2 = await orch2.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert out2 == out
-    assert orch2._embedded_strategy.calls == 0
     assert orch2._external_strategy.calls == 0 and orch2._hash_strategy.calls == 0
     assert orch2._sync_service.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_uses_embedded_tier_first(monkeypatch, caplog):
+async def test_orchestrator_uses_external_tier_first(monkeypatch, caplog):
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
-    orch = _orchestrator(embedded_strategy=_FakeStrategy(BIG_REF.decode()))
+    orch = _orchestrator(external_strategy=_FakeStrategy(BIG_REF.decode()))
     with caplog.at_level("INFO"):
         out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert b"synced" in out
-    assert orch._embedded_strategy.calls == 1 and orch._hash_strategy.calls == 0
+    assert orch._external_strategy.calls == 1 and orch._hash_strategy.calls == 0
 
     # No deterministic tier delivers: original served with the abort message.
     orch = _orchestrator()
@@ -157,8 +153,8 @@ async def test_orchestrator_survives_strategy_errors(monkeypatch):
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     orch = _orchestrator(
-        hash_strategy=_FakeStrategy(exc=RuntimeError("boom")),
-        embedded_strategy=_FakeStrategy(BIG_REF.decode()),
+        external_strategy=_FakeStrategy(exc=RuntimeError("boom")),
+        hash_strategy=_FakeStrategy(BIG_REF.decode()),
     )
     out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert b"synced" in out
@@ -169,43 +165,46 @@ async def test_orchestrator_keys_isolate_distinct_payloads(monkeypatch):
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
-    orch = _orchestrator(embedded_strategy=_FakeStrategy(BIG_REF.decode()))
+    orch = _orchestrator(external_strategy=_FakeStrategy(BIG_REF.decode()))
     await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     other = _arabic_bytes().replace("مرحبا".encode(), "أهلا".encode())
     await orch.evaluate_and_sync(other, _meta(), "t", True)
     # Same subtitle ID, different bytes: resolved twice, no false cache hit.
-    assert orch._embedded_strategy.calls == 2
+    assert orch._external_strategy.calls == 2
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_falls_back_to_external_when_embedded_fails_sync(monkeypatch, caplog):
+async def test_orchestrator_falls_back_to_next_strategy_on_sync_failure(monkeypatch, caplog):
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
 
-    class FailingEmbeddedSyncService(_FakeSyncService):
+    class FailingEditionSyncService(_FakeSyncService):
         async def sync_async(self, target_srt, reference, decision_kind="edition", **kwargs):
             self.calls += 1
-            if decision_kind == "embedded":
-                # Embedded reference fails validation (e.g. collapsed cues)
+            if decision_kind == "edition":
+                # Reference fails validation (e.g. collapsed cues)
                 return None
-            return "1\n00:00:09,000 --> 00:00:10,000\nsynced via external\n"
+            return "1\n00:00:09,000 --> 00:00:10,000\nsynced via hash\n"
 
-    sync_svc = FailingEmbeddedSyncService()
+    sync_svc = FailingEditionSyncService()
     orch = _orchestrator(
-        embedded_strategy=_FakeStrategy(BIG_REF.decode(), kind="embedded"),
         external_strategy=_FakeStrategy(BIG_REF.decode(), kind="edition"),
+        hash_strategy=_FakeStrategy(BIG_REF.decode(), kind="team"),
         sync_service=sync_svc,
     )
 
     with caplog.at_level("WARNING"):
         out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
 
-    assert b"synced via external" in out
-    assert orch._embedded_strategy.calls == 1
+    assert b"synced via hash" in out
     assert orch._external_strategy.calls == 1
+    assert orch._hash_strategy.calls == 1
     assert sync_svc.calls == 2
-    assert "embedded strategy reference failed sync/validation -> falling back to next strategy" in caplog.text
+    assert (
+        "external exact-match strategy reference failed sync/validation -> falling back to next strategy"
+        in caplog.text
+    )
 
 
 def test_synced_cache_key_binds_payload():
@@ -223,8 +222,7 @@ async def test_orchestrator_forwards_decision_kind_to_alass(monkeypatch):
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     orch = _orchestrator(
-        hash_strategy=_FakeStrategy(None),
-        embedded_strategy=_FakeStrategy(BIG_REF.decode(), kind="edition"),
+        external_strategy=_FakeStrategy(BIG_REF.decode(), kind="edition"),
     )
     await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert orch._sync_service.kinds == ["edition"]
@@ -262,7 +260,7 @@ async def test_orchestrator_trusts_alass_output(monkeypatch):
 
     for kind in ("edition", "team"):
         orch = _orchestrator(
-            embedded_strategy=_FakeStrategy(ref, kind=kind),
+            external_strategy=_FakeStrategy(ref, kind=kind),
             sync_service=SubtitleSyncService(),
         )
         out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
@@ -287,7 +285,7 @@ async def test_precheck_skips_sync_on_group_match(monkeypatch, caplog):
         out = await orch.evaluate_and_sync(_arabic_bytes(), meta, "t", True)
     assert out == _arabic_bytes()
     assert "already matches release group (FSiHD)" in caplog.text
-    assert orch._hash_strategy.calls == 0 and orch._embedded_strategy.calls == 0
+    assert orch._hash_strategy.calls == 0 and orch._external_strategy.calls == 0
     assert orch._sync_service.calls == 0
 
 
@@ -580,11 +578,11 @@ async def test_orchestrator_negative_cache_skips_provider_fanout(monkeypatch):
     assert await cache.is_failed(resolution_key) is True
 
     orch2 = _orchestrator(
-        embedded_strategy=_FakeStrategy(BIG_REF.decode()), sync_cache=cache
+        external_strategy=_FakeStrategy(BIG_REF.decode()), sync_cache=cache
     )
     second = await orch2.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert second == _arabic_bytes()
-    assert orch2._embedded_strategy.calls == 0
+    assert orch2._external_strategy.calls == 0
 
 
 @pytest.mark.asyncio

@@ -45,8 +45,8 @@ def build_synced_cache_key(
     """Build the 24h sync cache key, scoped strictly to media + decision.
 
     ``final_sub:{imdb}:{season_ep}:{videohash_or_normalized_file}:{sub_id}:{decision}[:{hash}]``.
-    The decision segment keeps team/hash/embedded syncs (same edition, same
-    timing) isolated from generic edition syncs of the same bytes.
+    The decision segment keeps team/hash verdicts (same edition, same timing)
+    isolated from generic edition syncs of the same bytes.
     """
     imdb_id = str(meta.get("imdb_id") or "").strip() or "unknown"
     season = meta.get("season")
@@ -67,15 +67,6 @@ def build_synced_cache_key(
     return SyncCache.build_key(imdb_id, season_ep, fingerprint, target_id, decision, content_hash)
 
 
-def _consume_task_exception(task: asyncio.Future) -> None:
-    """Retrieve a detached task's result so its exception is not "never retrieved"."""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.debug("[sync] background task finished with error: %s", exc)
-
-
 def _parse_year(value: Any) -> int | None:
     try:
         return int(str(value).strip()) if str(value or "").strip() else None
@@ -90,117 +81,24 @@ class SyncOrchestrator:
         self,
         *,
         hash_strategy: Any | None = None,
-        embedded_strategy: Any | None = None,
         external_strategy: Any | None = None,
-        stream_resolver: Any | None = None,
         sync_service: Any | None = None,
         sync_cache: Any | None = None,
     ) -> None:
         self._hash_strategy = hash_strategy
-        self._embedded_strategy = embedded_strategy
         self._external_strategy = external_strategy
-        self._stream_resolver = stream_resolver
         self._sync_service = sync_service
         self._sync_cache = sync_cache
         self._inflight: dict[str, asyncio.Future] = {}
         self._inflight_lock = asyncio.Lock()
-        # In-flight background embedded-track warm-ups (dedup by request key).
-        self._warmups: set[str] = set()
 
     def _strategies(self) -> list[tuple[str, Any]]:
         strats = []
-        if self._embedded_strategy is not None:
-            strats.append(("embedded", self._embedded_strategy))
         if self._external_strategy is not None:
             strats.append(("external exact-match", self._external_strategy))
         if self._hash_strategy is not None:
             strats.append(("hash-exact", self._hash_strategy))
         return strats
-
-    async def _maybe_resolve_stream_url(self, query: ReferenceQuery) -> None:
-        """Resolve direct stream URL using the stream resolver if not already provided."""
-        if self._stream_resolver is None or self._embedded_strategy is None or (query.stream_url or "").strip():
-            return
-        # If media file is already found locally on disk, skip remote stream addon query
-        if self._embedded_strategy and hasattr(self._embedded_strategy, "_find_media_file"):
-            if query.target_filename:
-                local_found = await asyncio.to_thread(
-                    self._embedded_strategy._find_media_file,
-                    query.target_filename,
-                    query.video_size,
-                )
-                if local_found:
-                    return
-
-        kwargs: dict[str, Any] = {}
-        user_base = (query.stream_addon_url or "").strip()
-        if user_base:
-            kwargs["base_url"] = user_base
-        try:
-            url = await self._stream_resolver.resolve_stream_url(
-                query.imdb_id,
-                query.media_type,
-                query.target_filename,
-                season=query.season,
-                episode=query.episode,
-                **kwargs,
-            )
-        except Exception as exc:
-            logger.info("[sync] stream addon resolution failed: %s", exc)
-            return
-        if url:
-            query.stream_url = url
-            logger.info("[sync] stream addon resolved a direct stream URL for embedded probe")
-
-    def _embedded_reference_from_disk(self, query: ReferenceQuery) -> ResolvedReference | None:
-        """Return the on-disk internal-track reference if the warm-up produced one.
-
-        Only an ``embedded`` entry counts here: ``team``/``edition``/``hash``
-        entries are the normal strategy loop's job, not a signal to override the
-        negative cache.
-        """
-        cache = getattr(self._embedded_strategy, "cache", None)
-        if cache is None:
-            return None
-        try:
-            cached = cache.get(query)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.info("[sync] embedded reference cache lookup failed: %s", exc)
-            return None
-        if cached is not None and cached.kind == "embedded" and cached.text:
-            return cached
-        return None
-
-    def _schedule_embedded_warmup(
-        self,
-        query: ReferenceQuery,
-        meta: dict,
-        target_id: str,
-        sub_bytes: bytes,
-        resolved: ResolvedReference,
-    ) -> None:
-        """Detach a background internal-track extraction + cache, deduped."""
-        warm = getattr(self._embedded_strategy, "warm_reference", None)
-        if warm is None or not (query.stream_url or "").strip():
-            return
-        if resolved.text and resolved.kind == "embedded":
-            return  # already using the internal track inline
-        key = self._flight_key(meta, target_id, sub_bytes)
-        if key in self._warmups:
-            return
-        self._warmups.add(key)
-        task = asyncio.ensure_future(self._run_embedded_warmup(warm, query, key))
-        task.add_done_callback(_consume_task_exception)
-
-    async def _run_embedded_warmup(self, warm, query: ReferenceQuery, key: str) -> None:
-        try:
-            result = await warm(query)
-            if result and result.text:
-                logger.info("[sync] background internal-track reference is ready for %s", key)
-        except Exception as exc:  # pragma: no cover - background best effort
-            logger.info("[sync] background embedded warm-up failed: %s", exc)
-        finally:
-            self._warmups.discard(key)
 
     def _build_query(self, meta: dict, target_id: str | None = None) -> ReferenceQuery:
         return ReferenceQuery(
@@ -215,7 +113,6 @@ class SyncOrchestrator:
             video_hash=meta.get("video_hash"),
             video_size=meta.get("video_size"),
             stream_url=meta.get("stream_url"),
-            stream_addon_url=meta.get("stream_addon_url"),
             season=meta.get("season"),
             episode=meta.get("episode"),
             api_keys={
@@ -341,24 +238,12 @@ class SyncOrchestrator:
                 return cached
 
         query = self._build_query(meta, target_id=target_id)
-        ready_embedded: ResolvedReference | None = None
         if self._sync_cache is not None and await self._sync_cache.is_failed(resolution_key):
-            # The previous attempt aborted before the background embedded warm-up
-            # finished. If the internal-track reference has since landed on disk,
-            # the negative entry is stale: bust it and sync against the ready
-            # reference instead of aborting immediately.
-            ready_embedded = self._embedded_reference_from_disk(query)
-            if ready_embedded is None:
-                logger.info(
-                    "[sync] negative cache hit for %s -> skipping provider fan-out",
-                    resolution_key,
-                )
-                return sub_bytes
             logger.info(
-                "[sync] negative cache overridden by ready embedded reference for %s",
+                "[sync] negative cache hit for %s -> skipping provider fan-out",
                 resolution_key,
             )
-            await self._sync_cache.clear_failed(resolution_key)
+            return sub_bytes
 
         from app.extractor import decode_subtitle_bytes
 
@@ -368,27 +253,17 @@ class SyncOrchestrator:
             logger.warning("[sync] no sync service configured -> serving original subtitle")
             return sub_bytes
 
-        # Candidate reference sources to attempt sequentially:
-        # If ready_embedded exists on disk, try it first. Otherwise resolve stream URL and evaluate strategies.
-        attempts: list[tuple[str, Any]] = []
-        if ready_embedded is not None and ready_embedded.text:
-            attempts.append(("ready-embedded", ready_embedded))
-
-        await self._maybe_resolve_stream_url(query)
-        for sname, strat in self._strategies():
-            if strat is not None:
-                attempts.append((sname, strat))
+        # Reference strategies in priority order (external exact-match reference,
+        # then OpenSubtitles MovieHash). The playing stream is never probed.
+        attempts: list[tuple[str, Any]] = list(self._strategies())
 
         last_resolved = ResolvedReference(None)
         for strategy_name, strategy_obj in attempts:
-            if isinstance(strategy_obj, ResolvedReference):
-                resolved = strategy_obj
-            else:
-                try:
-                    resolved = await strategy_obj.resolve_with_provenance(query)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning("[sync] %s strategy failed: %s -> next", strategy_name, exc)
-                    resolved = ResolvedReference(None)
+            try:
+                resolved = await strategy_obj.resolve_with_provenance(query)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("[sync] %s strategy failed: %s -> next", strategy_name, exc)
+                resolved = ResolvedReference(None)
 
             if not resolved.text:
                 continue
@@ -442,7 +317,6 @@ class SyncOrchestrator:
                     len(synced),
                     strategy_name,
                 )
-                self._schedule_embedded_warmup(query, meta, target_id, sub_bytes, resolved)
                 return synced.encode("utf-8")
 
             logger.warning(
@@ -450,7 +324,6 @@ class SyncOrchestrator:
                 strategy_name,
             )
 
-        self._schedule_embedded_warmup(query, meta, target_id, sub_bytes, last_resolved)
         if not last_resolved.text:
             logger.info("[sync] no deterministic reference available -> aborting sync")
         else:

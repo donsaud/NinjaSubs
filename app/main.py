@@ -623,7 +623,6 @@ async def _fetch_subtitles_handler(
             "subdl_key": prefs.subdl_key,
             "subsource_key": prefs.subsource_key,
             "opensubtitles_key": prefs.opensubtitles_key,
-            "stream_addon_url": prefs.stream_addon_url,
             "lang": rel_lang,
             "uploader": getattr(rel, "uploader", "") or "",
             "hearing_impaired": bool(getattr(rel, "hearing_impaired", False)),
@@ -1149,9 +1148,6 @@ def _sync_meta_for_user(meta: dict | None, context: dict | None, prefs: UserPref
     if prefs is not None:
         for name in ("subdl_key", "subsource_key", "opensubtitles_key"):
             merged[name] = getattr(prefs, name) or ""
-        addon = getattr(prefs, "stream_addon_url", "") or ""
-        if addon:
-            merged["stream_addon_url"] = addon
     return merged
 
 

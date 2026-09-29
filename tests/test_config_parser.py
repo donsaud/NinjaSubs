@@ -212,18 +212,3 @@ def test_auto_sync_config_roundtrip_and_backward_compat():
     # Legacy/absent value defaults to True.
     assert parse_user_config("subdl=k1").auto_sync is True
 
-
-def test_stream_addon_url_config_roundtrip():
-    """stream_addon_url round-trips through Base64 JSON and query strings."""
-    url = "https://torrentio.strem.fun/sort=quality/manifest.json"
-    encoded = encode_user_config(subdl_key="k1", stream_addon_url=url)
-    prefs = parse_user_config(encoded)
-    assert prefs.stream_addon_url == url
-
-    # Default is empty string
-    assert parse_user_config(encode_user_config()).stream_addon_url == ""
-
-    # Query string format
-    qs = f"subdl=k1&stream_addon_url={url}"
-    assert parse_user_config(qs).stream_addon_url == url
-
