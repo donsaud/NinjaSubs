@@ -238,10 +238,34 @@ class SyncOrchestrator:
         # then OpenSubtitles MovieHash). The playing stream is never probed.
         attempts: list[tuple[str, Any]] = list(self._strategies())
 
+        def _passes_cue_sanity(reference_text: str) -> bool:
+            """Execution-window cue check, used to reject a wrong-cut reference.
+
+            A mislabeled or season-pack reference can be downloaded and only
+            then revealed as unusable; validating inside the strategy lets it
+            walk to the next-ranked candidate instead of aborting the sync.
+            """
+            verdict = validate_cue_sanity(
+                target_text,
+                reference_text,
+                threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            )
+            if not verdict["ok"]:
+                logger.warning(
+                    "[sync] candidate reference rejected by cue-sanity (%s); trying next candidate",
+                    verdict["reason"],
+                )
+            return bool(verdict["ok"])
+
         last_resolved = ResolvedReference(None)
         for strategy_name, strategy_obj in attempts:
             try:
-                resolved = await strategy_obj.resolve_with_provenance(query)
+                if getattr(strategy_obj, "validates_target", False):
+                    resolved = await strategy_obj.resolve_with_provenance(
+                        query, update_validator=_passes_cue_sanity
+                    )
+                else:
+                    resolved = await strategy_obj.resolve_with_provenance(query)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("[sync] %s strategy failed: %s -> next", strategy_name, exc)
                 resolved = ResolvedReference(None)

@@ -777,3 +777,435 @@ async def test_reference_selection_prefers_hash_matched_english(tmp_path):
     assert resolved.kind == "hash"
     assert opensubtitles.downloaded == ["http://hash"]
     assert subdl.downloaded == []
+
+# --------------------------------------------------------------------------- #
+# Season-pack handling: archives are unbundled to the target episode, while
+# uncompressed cumulative packs are rejected. Episode-specific candidates stay
+# preferred, and a rejected reference never aborts the whole sync.
+# --------------------------------------------------------------------------- #
+
+SEASON_PACK_TARGET = "Dexter.s8e05.This.little.piggy.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv"
+SEASON_PACK_NAME = "Dexter.S08.BluRay.1080p.TrueHD.5.1.AVC.REMUX-FraMeSToR.srt"
+
+
+def _ts(ms: int) -> str:
+    h, rem = divmod(ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, msec = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{msec:03d}"
+
+
+def _dialogue(first_ms: int, marker: str = "E", cues: int = 120) -> bytes:
+    """A full-length, sentence-shaped subtitle the cue-sanity gate can read.
+
+    The first cue cluster anchors at ``first_ms``; the remaining cues pad the
+    payload past the strategy's minimum size so it is not rejected as too small
+    before validation ever runs.
+    """
+    line = f"I never thought I would find someone like you in my life {marker}"
+    blocks = [
+        f"{i + 1}\n{_ts(first_ms + i * 2000)} --> {_ts(first_ms + i * 2000 + 1500)}\n{line}\n"
+        for i in range(cues)
+    ]
+    return "\n".join(blocks).encode()
+
+
+def _season_zip(episodes: range | list[int]) -> bytes:
+    """Build an in-memory season-pack ZIP holding one .srt per episode."""
+    import io as _io
+    import zipfile as _zipfile
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as archive:
+        for ep in episodes:
+            archive.writestr(
+                f"Dexter.S08E{ep:02d}.ar.srt", _dialogue(10_000 + ep * 1000, marker=f"E{ep:02d}")
+            )
+    return buf.getvalue()
+
+
+def _provider_for(releases, payload):
+    class _Provider:
+        def __init__(self):
+            self.downloaded: list[str] = []
+
+        async def search_subtitles(self, **kwargs):
+            return list(releases)
+
+        async def download_archive(self, url, api_key=None):
+            self.downloaded.append(url)
+            return payload
+
+    return _Provider()
+
+
+def _series_query(season: int = 8, episode: int = 5):
+    return ReferenceQuery(
+        imdb_id="tt0773262",
+        media_type="series",
+        season=season,
+        episode=episode,
+        target_filename=SEASON_PACK_TARGET,
+    )
+
+
+# ------------------------- eligibility / ranking ---------------------------- #
+
+
+def test_season_pack_is_demoted_below_episode_specific_candidate():
+    """A pack stays a valid candidate but is ranked below an exact-episode track."""
+    from app.models import SubtitleRelease
+    from app.services.sync.external_strategy import _select_candidates_ranked
+
+    season_pack = SubtitleRelease(
+        release_name=SEASON_PACK_NAME,
+        download_url="http://pack", provider="subdl", lang="ara",
+    )
+    episode_single = SubtitleRelease(
+        release_name="Dexter.S08E05.720p.BluRay.x264-NORDiC",
+        download_url="http://ep5", provider="opensubtitles", lang="eng",
+    )
+    other_episode = SubtitleRelease(
+        release_name="Dexter.S08E09.720p.BluRay.x264-OTHER",
+        download_url="http://ep9", provider="opensubtitles", lang="eng",
+    )
+    ranked = _select_candidates_ranked([season_pack, episode_single, other_episode], _series_query())
+    names = [rel.release_name for rel in ranked]
+    # Episode-specific first, pack retained as a demoted fallback, wrong episode gone.
+    assert names[0] == episode_single.release_name
+    assert names == [episode_single.release_name, season_pack.release_name]
+
+
+def test_season_pack_still_eligible_when_no_episode_specific_reference_exists():
+    """Graceful degradation: with no exact-episode candidate, the pack is still used."""
+    from app.models import SubtitleRelease
+    from app.services.sync.external_strategy import _select_candidates_ranked
+
+    season_pack = SubtitleRelease(
+        release_name=SEASON_PACK_NAME,
+        download_url="http://pack", provider="subdl", lang="ara",
+    )
+    other_episode = SubtitleRelease(
+        release_name="Dexter.S08E09.720p.BluRay.x264-OTHER",
+        download_url="http://ep9", provider="opensubtitles", lang="eng",
+    )
+    ranked = _select_candidates_ranked([season_pack, other_episode], _series_query())
+    assert [rel.release_name for rel in ranked] == [season_pack.release_name]
+
+
+# ---------------------- archive unbundling (in-memory) ---------------------- #
+
+
+@pytest.mark.asyncio
+async def test_season_pack_archive_unbundles_target_episode(tmp_path):
+    """A season-pack ZIP is sliced to S08E05 and only that episode is served."""
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    pack = SubtitleRelease(
+        release_name=SEASON_PACK_NAME,
+        download_url="http://pack", provider="subdl", lang="ara",
+    )
+    subdl = _provider_for([pack], _season_zip(range(1, 13)))
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=None,
+        opensubtitles_provider=None,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        min_bytes=100,
+        timeout=1.0,
+    )
+    resolved = await strategy.resolve_with_provenance(_series_query())
+    assert resolved.text is not None
+    # Only the requested episode's dialogue came out of the 12-member archive.
+    assert "E05" in resolved.text
+    for other in ("E01", "E02", "E03", "E06", "E12"):
+        assert f" {other}" not in resolved.text
+    assert subdl.downloaded == ["http://pack"]
+
+
+@pytest.mark.asyncio
+async def test_season_pack_archive_missing_target_episode_falls_back(tmp_path):
+    """A pack that lacks the target episode is skipped for the next candidate."""
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    # Higher-scoring pack, but it only contains episodes 1-3.
+    pack_missing = SubtitleRelease(
+        release_name="Dexter.S08.1080p.BluRay.TrueHD.5.1.AVC.REMUX-FraMeSToR.srt",
+        download_url="http://pack-missing", provider="subdl", lang="ara",
+    )
+    # Lower-scoring pack that does contain S08E05.
+    pack_with_ep5 = SubtitleRelease(
+        release_name="Dexter.S08.720p.WEB-DL.x264-Other.srt",
+        download_url="http://pack-ep5", provider="subdl", lang="ara",
+    )
+    subdl = _provider_for([pack_missing, pack_with_ep5], b"")
+    # Each candidate gets its own payload based on which URL was requested.
+    payloads = {
+        "http://pack-missing": _season_zip([1, 2, 3]),
+        "http://pack-ep5": _season_zip([4, 5, 6]),
+    }
+
+    async def _download(url, api_key=None):
+        subdl.downloaded.append(url)
+        return payloads[url]
+
+    subdl.download_archive = _download
+
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=None,
+        opensubtitles_provider=None,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        min_bytes=100,
+        timeout=1.0,
+    )
+    resolved = await strategy.resolve_with_provenance(_series_query())
+    assert resolved.text is not None
+    assert resolved.candidate == pack_with_ep5.release_name
+    # The incomplete pack was tried, then the next one supplied E05.
+    assert subdl.downloaded == ["http://pack-missing", "http://pack-ep5"]
+    assert "E05" in resolved.text
+    assert "E04" not in resolved.text
+
+
+@pytest.mark.asyncio
+async def test_season_pack_archive_extracts_with_alternate_episode_naming(tmp_path):
+    """Members tagged 8x05 / S8E5 are recognised as the target episode too."""
+    import io as _io
+    import zipfile as _zipfile
+
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Dexter.8x04.ar.srt", _dialogue(10_000, marker="X04"))
+        archive.writestr("Dexter.8x05.ar.srt", _dialogue(10_000, marker="X05"))
+        archive.writestr("Dexter.S8E06.ar.srt", _dialogue(10_000, marker="X06"))
+
+    pack = SubtitleRelease(
+        release_name="Dexter.S08.BluRay.REMUX.ar.zip",
+        download_url="http://pack", provider="subdl", lang="ara",
+    )
+    subdl = _provider_for([pack], buf.getvalue())
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=None,
+        opensubtitles_provider=None,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        min_bytes=100,
+        timeout=1.0,
+    )
+    resolved = await strategy.resolve_with_provenance(_series_query())
+    assert resolved.text is not None
+    assert "X05" in resolved.text
+    assert "X04" not in resolved.text
+    assert "X06" not in resolved.text
+
+
+# ------------------- true cumulative (concatenated) packs -------------------- #
+
+
+def test_cumulative_pack_detector_flags_multi_episode_timelines():
+    from app.services.sync.decode import looks_like_cumulative_pack
+
+    assert looks_like_cumulative_pack(_dialogue(10_000).decode()) is False
+    # Two episodes merged: the timeline restarts near 00:00 for the second one.
+    cumulative = _dialogue(10_000, marker="P1").decode() + _dialogue(5_000, marker="P2").decode()
+    assert looks_like_cumulative_pack(cumulative) is True
+    # A single very long feature also trips the span guard.
+    assert looks_like_cumulative_pack(_dialogue(0, cues=6000).decode()) is True
+
+
+@pytest.mark.asyncio
+async def test_cumulative_single_file_pack_is_rejected(tmp_path):
+    """An uncompressed multi-episode timeline is rejected, next candidate used."""
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    # Higher-scoring pack served as one bare .srt spanning two episodes.
+    cumulative = SubtitleRelease(
+        release_name="Dexter.S08.1080p.BluRay.TrueHD.5.1.AVC.REMUX-FraMeSToR.srt",
+        download_url="http://pack-cumulative", provider="subdl", lang="ara",
+    )
+    # Lower-scoring pack that unbundles cleanly.
+    bundled = SubtitleRelease(
+        release_name="Dexter.S08.720p.WEB-DL.x264-Other.srt",
+        download_url="http://pack-bundled", provider="subdl", lang="ara",
+    )
+    subdl = _provider_for([cumulative, bundled], b"")
+    payloads = {
+        # A bare .srt (not an archive) whose timeline runs on into the next episode.
+        "http://pack-cumulative": _dialogue(10_000, marker="P1") + _dialogue(4_000, marker="P2"),
+        "http://pack-bundled": _season_zip([5]),
+    }
+
+    async def _download(url, api_key=None):
+        subdl.downloaded.append(url)
+        return payloads[url]
+
+    subdl.download_archive = _download
+
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=None,
+        opensubtitles_provider=None,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        min_bytes=100,
+        timeout=1.0,
+    )
+    resolved = await strategy.resolve_with_provenance(_series_query())
+    assert resolved.text is not None
+    assert resolved.candidate == bundled.release_name
+    # The cumulative file was decoded, rejected, and the next pack supplied E05.
+    assert subdl.downloaded == ["http://pack-cumulative", "http://pack-bundled"]
+    assert "P1" not in resolved.text
+    assert "E05" in resolved.text
+
+
+@pytest.mark.asyncio
+async def test_cumulative_pack_allowed_for_movie_queries(tmp_path):
+    """Long-form movie references are not subject to the episode-pack guard."""
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    movie = SubtitleRelease(
+        release_name="Interstellar.2014.2160p.WEB-DL.DDP5.1.HDR.H.265-FLUX.srt",
+        download_url="http://movie", provider="subdl", lang="eng",
+    )
+    subdl = _provider_for([movie], _dialogue(30_000, cues=4000))
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=None,
+        opensubtitles_provider=None,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        min_bytes=100,
+        timeout=1.0,
+    )
+    query = ReferenceQuery(
+        imdb_id="tt0816692", media_type="movie", target_filename=movie.release_name
+    )
+    resolved = await strategy.resolve_with_provenance(query)
+    assert resolved.text is not None
+
+
+# --------------------------- fall-through / caching ------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_rejected_reference_falls_through_to_next_candidate(tmp_path):
+    """A reference failing cue-sanity must be skipped in favour of the next-ranked one."""
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    bad_ref = _dialogue(10_510)  # first dialogue ~96s before the target's
+    good_ref = _dialogue(106_950)  # correct cut
+
+    pack = SubtitleRelease(
+        release_name=SEASON_PACK_NAME,
+        download_url="http://pack", provider="subdl", lang="ara",
+    )
+    best_scoring = SubtitleRelease(
+        release_name="Dexter.S08E05.1080p.BluRay.x264-PiR8.srt",
+        download_url="http://best", provider="subdl", lang="eng",
+    )
+    usable = SubtitleRelease(
+        release_name="Dexter.S08E05.720p.BluRay.x264-NORDiC",
+        download_url="http://ep5", provider="opensubtitles", lang="eng",
+    )
+    target_text = _dialogue(106_950).decode()
+
+    subdl = _provider_for([pack, best_scoring], bad_ref)
+    opensubtitles = _provider_for([usable], good_ref)
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=None,
+        opensubtitles_provider=opensubtitles,
+        cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
+        min_bytes=100,
+        timeout=1.0,
+    )
+
+    def _validator(reference_text: str) -> bool:
+        from app.services.subtitle_matcher import (
+            FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            validate_cue_sanity,
+        )
+
+        return bool(
+            validate_cue_sanity(
+                target_text,
+                reference_text,
+                threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            )["ok"]
+        )
+
+    resolved = await strategy.resolve_with_provenance(_series_query(), update_validator=_validator)
+    assert resolved.text is not None
+    # Episode-specific candidates are tried first; the rejected one falls through
+    # to the next, and the demoted season pack is never reached.
+    assert subdl.downloaded == ["http://best"]
+    assert opensubtitles.downloaded == ["http://ep5"]
+    assert resolved.candidate == usable.release_name
+
+
+@pytest.mark.asyncio
+async def test_stale_cached_reference_is_revalidated_and_replaced(tmp_path):
+    """A cached reference that fails cue-sanity is discarded and re-resolved."""
+    from app.models import SubtitleRelease
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.external_strategy import ExternalExactStrategy
+
+    bad_ref = _dialogue(10_510)  # first dialogue ~96s before the target's
+    good_ref = _dialogue(106_950)  # correct cut
+
+    pack = SubtitleRelease(
+        release_name=SEASON_PACK_NAME,
+        download_url="http://pack", provider="subdl", lang="ara",
+    )
+    single = SubtitleRelease(
+        release_name="Dexter.S08E05.720p.BluRay.x264-NORDiC",
+        download_url="http://ep5", provider="opensubtitles", lang="eng",
+    )
+    cache = ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100)
+    # Seed the cache with a stale reference that fails cue-sanity.
+    cache.set(_series_query(), "subdl", bad_ref.decode(), kind="edition", candidate="http://pack")
+
+    subdl = _provider_for([pack], bad_ref)
+    opensubtitles = _provider_for([single], good_ref)
+    strategy = ExternalExactStrategy(
+        subdl_provider=subdl,
+        subsource_provider=None,
+        opensubtitles_provider=opensubtitles,
+        cache=cache,
+        min_bytes=100,
+        timeout=1.0,
+    )
+    target_text = _dialogue(106_950).decode()
+
+    def _validator(reference_text: str) -> bool:
+        from app.services.subtitle_matcher import (
+            FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            validate_cue_sanity,
+        )
+
+        return bool(
+            validate_cue_sanity(
+                target_text,
+                reference_text,
+                threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            )["ok"]
+        )
+
+    resolved = await strategy.resolve_with_provenance(_series_query(), update_validator=_validator)
+    assert resolved.text is not None
+    assert opensubtitles.downloaded == ["http://ep5"]
+    assert resolved.candidate == single.release_name

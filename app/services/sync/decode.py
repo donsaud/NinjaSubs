@@ -24,6 +24,65 @@ def _is_sdh_member(name: str) -> bool:
     return bool(_SDH_MEMBER_PATTERN.search(base))
 
 
+_CUE_TIMING_RE = re.compile(
+    r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})"
+)
+
+# A genuine single-episode subtitle is monotonically increasing. A concatenated
+# season pack restarts near 00:00 for every episode it contains, which surfaces
+# as a large backward jump in the cue timeline.
+_CUMULATIVE_BACKWARD_JUMP_MS = 60_000
+# Single episodes run well under three hours; a multi-hour span on an episode
+# query means several episodes were merged into one continuous timeline.
+_CUMULATIVE_MAX_SPAN_MS = 3 * 60 * 60 * 1000
+
+
+def _ms(hours: str, minutes: str, seconds: str, fraction: str) -> int:
+    return (
+        int(hours) * 3_600_000
+        + int(minutes) * 60_000
+        + int(seconds) * 1000
+        + int(fraction.ljust(3, "0")[:3])
+    )
+
+
+def cue_times_ms(text: str) -> list[tuple[int, int]]:
+    """Return ``(start_ms, end_ms)`` for every cue found in ``text``."""
+    return [
+        (
+            _ms(m.group(1), m.group(2), m.group(3), m.group(4)),
+            _ms(m.group(5), m.group(6), m.group(7), m.group(8)),
+        )
+        for m in _CUE_TIMING_RE.finditer(text or "")
+    ]
+
+
+def looks_like_cumulative_pack(
+    text: str,
+    *,
+    backward_jump_ms: int = _CUMULATIVE_BACKWARD_JUMP_MS,
+    max_span_ms: int = _CUMULATIVE_MAX_SPAN_MS,
+) -> bool:
+    """True when one subtitle file is really several episodes concatenated.
+
+    Season *archives* are legitimate because each episode is extracted on its own;
+    what must never reach ``alass`` is an uncompressed cumulative file whose
+    timeline runs on past the end of one episode into the next. Two signals are
+    used: the timeline jumping backwards (each episode restarts near zero), and
+    an implausibly long total span.
+    """
+    timings = cue_times_ms(text)
+    if len(timings) < 4:
+        return False
+    highest = timings[0][0]
+    for start, _end in timings[1:]:
+        if start < highest - backward_jump_ms:
+            return True
+        highest = max(highest, start)
+    span = max(end for _start, end in timings) - timings[0][0]
+    return span > max_span_ms
+
+
 
 def select_zip_member(
     members: list[tuple[str, int]],

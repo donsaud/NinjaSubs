@@ -18,10 +18,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from app.services.sync.cache import ReferenceDiskCache
-from app.services.sync.decode import decode_payload, select_zip_member
+from app.services.sync.decode import (
+    decode_payload,
+    looks_like_cumulative_pack,
+    select_zip_member,
+)
 from app.services.sync.matching import (
     _codec_kind,
     _regional_tags,
@@ -369,6 +374,18 @@ _PROVIDER_TIE_PRIORITY = {
 }
 
 
+def _is_exact_episode(release, query: ReferenceQuery) -> bool:
+    """True when the candidate names the queried episode rather than a whole season.
+
+    Season packs are still eligible references (they get unbundled at extraction
+    time), but an already-episode-specific track is preferred because it needs no
+    slicing and its own episode number is guaranteed correct.
+    """
+    if query is None or query.episode is None:
+        return True
+    return candidate_episode_number(_release_name(release)) == query.episode
+
+
 def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
     """Return all season/episode-matched reference candidates sorted by rank descending.
 
@@ -394,6 +411,11 @@ def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
             return []
         pool = matched
     if query.episode is not None:
+        # A candidate tagged with a *different* episode can never be sliced down to
+        # the target, so it is dropped. Season packs stay eligible on purpose: they
+        # are unbundled per-episode at extraction time (see select_zip_member), so
+        # a high-tier retail pack is still the best available reference. They are
+        # only ranked below exact-episode candidates (see the sort key below).
         pool = [
             rel
             for rel in pool
@@ -404,8 +426,10 @@ def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
 
     scored = [(score_candidate(query.target_filename, rel), rel) for rel in pool]
     # Hash-confirmed tracks are byte-exact ground truth; active (non-broken)
-    # providers are prioritized; score is primary; on exact score ties:
-    # matching audio codec, standard scene dot-naming, matching target language, and generous-quota providers.
+    # providers are prioritized; an exact-episode candidate outranks a season
+    # pack that still has to be unbundled; score is primary; on exact score
+    # ties: matching audio codec, standard scene dot-naming, matching target
+    # language, and generous-quota providers.
     target_langs = tuple(
         str(lang).lower()
         for lang in (query.languages if query and query.languages else ("ara", "ar"))
@@ -414,6 +438,7 @@ def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
         key=lambda item: (
             1 if getattr(item[1], "is_hash_match", False) else 0,
             0 if _is_rel_provider_broken(item[1]) else 1,
+            1 if _is_exact_episode(item[1], query) else 0,
             item[0],
             _is_scene_named(_release_name(item[1])),
             _has_audio_match(query.target_filename, _release_name(item[1])),
@@ -450,6 +475,10 @@ class ExternalExactStrategy:
     """
 
     name = "external"
+    # Signals to the orchestrator that ``resolve_with_provenance`` can validate
+    # each candidate against the target subtitle and walk down its ranked list
+    # instead of committing to the first download.
+    validates_target = True
 
     def __init__(
         self,
@@ -474,7 +503,10 @@ class ExternalExactStrategy:
         return resolved.text
 
     async def resolve_with_provenance(
-        self, query: ReferenceQuery
+        self,
+        query: ReferenceQuery,
+        *,
+        update_validator: Callable[[str], bool] | None = None,
     ) -> ResolvedReference:
         """Query every provider, pool the candidates, download the best one.
 
@@ -482,10 +514,21 @@ class ExternalExactStrategy:
         reference that best matches the video's release quality wins regardless
         of which provider responded first. Cache hits recover the persisted
         decision kind.
+
+        ``update_validator`` (when supplied) is handed each downloaded
+        reference; a candidate that fails it is skipped in favour of the
+        next-ranked one, so a mislabeled season pack can no longer abort the
+        whole sync while usable candidates are still available.
         """
+        validate = update_validator
         cached = self.cache.get(query)
         if cached is not None:
-            return cached
+            if validate is None or validate(cached.text or ""):
+                return cached
+            logger.warning(
+                "[reference] cached reference %r failed target cue-sanity; re-resolving",
+                cached.candidate,
+            )
 
         providers = [
             p for p in (self._subdl, self._subsource, self._opensubtitles) if p is not None
@@ -543,24 +586,32 @@ class ExternalExactStrategy:
             attempts += 1
             cand_result = await self._download_candidate(cand, cand_provider, query)
             if cand_result.text:
-                result = cand_result
-                winning_provider = cand_provider
-                break
+                if validate is not None and not validate(cand_result.text):
+                    logger.warning(
+                        "[reference] candidate %r (provider=%s) failed target cue-sanity; trying next candidate",
+                        getattr(cand, "release_name", "?"),
+                        provider_lbl,
+                    )
+                else:
+                    result = cand_result
+                    winning_provider = cand_provider
+                    break
+            else:
+                # If download failed and tripped the breaker (e.g. quota 406 or
+                # rate limit 429), mark this provider exhausted so all its
+                # remaining candidates are skipped.
+                if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
+                    logger.info(
+                        "[reference] provider %s tripped circuit breaker; skipping remaining candidates from this provider",
+                        provider_lbl,
+                    )
+                    exhausted_providers.add(provider_lbl)
 
-            # If download failed and tripped the breaker (e.g. quota 406 or rate limit 429),
-            # mark this provider exhausted so all its remaining candidates are skipped.
-            if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
-                logger.info(
-                    "[reference] provider %s tripped circuit breaker; skipping remaining candidates from this provider",
+                logger.warning(
+                    "[reference] candidate %r (provider=%s) failed download/decode; trying next candidate",
+                    getattr(cand, "release_name", "?"),
                     provider_lbl,
                 )
-                exhausted_providers.add(provider_lbl)
-
-            logger.warning(
-                "[reference] candidate %r (provider=%s) failed download/decode; trying next candidate",
-                getattr(cand, "release_name", "?"),
-                provider_lbl,
-            )
             if attempts >= max_attempts:
                 logger.warning(
                     "[reference] reached maximum candidate download attempts (%d)", max_attempts
@@ -701,6 +752,21 @@ class ExternalExactStrategy:
                 len(decoded) if decoded else 0,
             )
             return ResolvedReference(None)
+        text = decoded.decode("utf-8", "replace")
+        # An archive is unbundled to the single target episode, but an
+        # uncompressed season pack is one continuous multi-episode timeline that
+        # can never be cue-aligned to a single episode. Reject it here so the
+        # next-ranked candidate is tried instead of poisoning the sync.
+        if query is not None and query.season is not None and query.episode is not None:
+            if looks_like_cumulative_pack(text):
+                logger.warning(
+                    "[reference] rejecting %r: decoded content is a cumulative "
+                    "multi-episode pack, not episode S%02dE%02d",
+                    best_name,
+                    query.season,
+                    query.episode,
+                )
+                return ResolvedReference(None)
         logger.info("[reference] decoded %d bytes for %r", len(decoded), best_name)
         # BluRay and REMUX share the same retail-disc master, so a REMUX target
         # against a BluRay (or REMUX) reference is a confirmed retail pair.
@@ -708,7 +774,7 @@ class ExternalExactStrategy:
             _source_kind(query.target_filename)
         ) and is_retail_disc_source(_source_kind(best_name))
         return ResolvedReference(
-            decoded.decode("utf-8", "replace"),
+            text,
             kind=decision_kind,
             bluray_match=bluray_match,
             candidate=best_name,
