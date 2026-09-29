@@ -18,15 +18,19 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.config import settings
+from app.services.subtitle_matcher import (
+    ALIGNED_OFFSET_THRESHOLD_S,
+    median_cue_offset,
+    validate_cue_sanity,
+)
 from app.services.sync.matching import (
-    _edition_tags,
-    _release_group,
     _source_kind,
     _sources_compatible,
     is_informative_release_name,
 )
 from app.services.sync.query import ReferenceQuery, ResolvedReference
 from app.services.sync_cache import SyncCache
+from app.utils.cleaners import strip_intro_credits
 
 logger = logging.getLogger(__name__)
 
@@ -150,29 +154,9 @@ class SyncOrchestrator:
             logger.info("[sync] skipped: subtitle language %r is not Arabic", lang)
             return sub_bytes
 
-        # Pre-check: a subtitle already cut for the stream's release group
-        # needs no alignment. The raw filenames must differ (at listing time
-        # target_filename falls back to the subtitle's own release name, which
-        # would otherwise trivially "match" and disable sync entirely).
-        stream_file = meta.get("target_filename")
-        subtitle_file = meta.get("release_name")
-        if stream_file and subtitle_file and stream_file != subtitle_file:
-            stream_group = _release_group(stream_file)
-            subtitle_group = _release_group(subtitle_file)
-            if (
-                stream_group
-                and subtitle_group
-                and stream_group.lower() == subtitle_group.lower()
-                and _edition_tags(stream_file) == _edition_tags(subtitle_file)
-                and _sources_compatible(_source_kind(stream_file), _source_kind(subtitle_file))
-            ):
-                logger.info(
-                    "[sync] target subtitle already matches release group (%s) "
-                    "-> skipping alass, serving direct original",
-                    stream_group,
-                )
-                return sub_bytes
-
+        # No filename-only shortcut: a matching release group does not prove the
+        # timings align (mislabeled uploads, unadjusted translator timings). Every
+        # candidate is verified against the reference's actual cue content below.
         # Single-flight: an identical in-progress request (same media +
         # payload fingerprint) is joined instead of re-run, so concurrent
         # players never duplicate provider downloads or alass processes.
@@ -277,6 +261,47 @@ class SyncOrchestrator:
                 decision_kind,
                 len(reference.encode("utf-8")),
             )
+
+            # Ground-truth content gate: filename metadata can be mislabeled, so
+            # verify the candidate's first substantive dialogue against the
+            # reference before trusting it, regardless of the release name.
+            target_source = _source_kind(meta.get("target_filename") or meta.get("release_name"))
+            ref_source = _source_kind(resolved.candidate or "")
+            same_family = bool(
+                target_source and ref_source and _sources_compatible(target_source, ref_source)
+            )
+            sanity = validate_cue_sanity(target_text, reference, same_family=same_family)
+            if not sanity["ok"]:
+                logger.warning(
+                    "[sync] %s reference failed cue-sanity (%s, penalty %s) -> next strategy",
+                    strategy_name,
+                    sanity["reason"],
+                    sanity["penalty"],
+                )
+                continue
+
+            # Strip pre-speech intro branding/cards so alass never anchors a
+            # translator credit at 00:00:02 to an audio speech cue at 00:00:49.
+            if sanity["reference_first_ms"] is not None:
+                stripped = strip_intro_credits(target_text, sanity["reference_first_ms"])
+                if stripped != target_text:
+                    logger.info("[sync] stripped intro non-speech cue(s) before alass")
+                    target_text = stripped
+
+            # Deterministic serving gate: an already-aligned subtitle (median
+            # offset below threshold) is served as-is and cached; otherwise
+            # alass must run. A raw passthrough with an observable offset is
+            # never served when a valid reference exists.
+            offset = median_cue_offset(target_text, reference)
+            if offset is not None and abs(offset) < ALIGNED_OFFSET_THRESHOLD_S:
+                logger.info(
+                    "[sync] target already aligned (median offset %+.2fs) -> serving original",
+                    offset,
+                )
+                if self._sync_cache is not None:
+                    await self._sync_cache.clear_failed(resolution_key)
+                    await self._sync_cache.set(resolution_key, sub_bytes)
+                return sub_bytes
 
             relaxed = decision_kind == "edition" and not is_informative_release_name(
                 meta.get("target_filename") or meta.get("release_name")

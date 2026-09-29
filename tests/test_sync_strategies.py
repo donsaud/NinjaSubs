@@ -240,8 +240,11 @@ async def test_orchestrator_trusts_alass_output(monkeypatch):
     from app.config import settings as app_settings
     from app.services.sync_service import SubtitleSyncService
 
+    # Reference dialogue starts 1s after the target's: close enough to pass the
+    # first-dialogue sanity gate yet misaligned, so alass runs and its output
+    # (mocked with a large shift) must be served verbatim.
     ref = "".join(
-        f"{i + 1}\n00:00:{i * 2 + 1:02d},000 --> 00:00:{i * 2 + 2:02d},000\nref {i}\n\n"
+        f"{i + 1}\n00:00:{i * 2 + 2:02d},000 --> 00:00:{i * 2 + 3:02d},000\nref {i}\n\n"
         for i in range(6)
     )
 
@@ -268,29 +271,28 @@ async def test_orchestrator_trusts_alass_output(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_precheck_skips_sync_on_group_match(monkeypatch, caplog):
-    """Same release group on stream and subtitle: serve original, no alass."""
+async def test_aligned_pair_skips_alass_but_caches(monkeypatch):
+    """Content already aligned (median offset < 0.2s): serve original, no alass."""
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
-    meta = {
-        "imdb_id": "tt1",
-        "media_type": "movie",
-        "lang": "ara",
-        "target_filename": "Into.The.Wild.2007.1080p.BluRay.x264-FSiHD.mkv",
-        "release_name": "Into.The.Wild.2007.1080p.BluRay.x264-FSiHD.srt",
-    }
-    orch = _orchestrator()
-    with caplog.at_level("INFO"):
-        out = await orch.evaluate_and_sync(_arabic_bytes(), meta, "t", True)
+    ref = "".join(
+        f"{i + 1}\n00:00:{i * 2 + 1:02d},000 --> 00:00:{i * 2 + 2:02d},000\nreference line {i}\n\n"
+        for i in range(6)
+    )
+    orch = _orchestrator(external_strategy=_FakeStrategy(ref, kind="edition"))
+    out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert out == _arabic_bytes()
-    assert "already matches release group (FSiHD)" in caplog.text
-    assert orch._hash_strategy.calls == 0 and orch._external_strategy.calls == 0
     assert orch._sync_service.calls == 0
+    # The aligned result is cached: a repeat is a positive hit, no providers.
+    out2 = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
+    assert out2 == _arabic_bytes()
+    assert orch._external_strategy.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_precheck_is_case_insensitive_and_requires_both_sides(monkeypatch):
+async def test_group_names_do_not_gate_sync(monkeypatch):
+    """Release-group equality never skips resolution; content decides."""
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
@@ -303,7 +305,7 @@ async def test_precheck_is_case_insensitive_and_requires_both_sides(monkeypatch)
     }
     orch = _orchestrator()
     assert await orch.evaluate_and_sync(_arabic_bytes(), meta, "t", True) == _arabic_bytes()
-    assert orch._hash_strategy.calls == 0
+    assert orch._hash_strategy.calls == 1 and orch._external_strategy.calls == 1
 
 
 @pytest.mark.asyncio
@@ -562,6 +564,26 @@ async def test_request_budget_returns_original_and_warms_cache(monkeypatch):
         if any(k.startswith("final_sub:") for k in cache._local):
             break
     assert any(k.startswith("final_sub:") for k in cache._local)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_skips_reference_failing_cue_sanity(monkeypatch):
+    """A mistimed reference (first dialogue 45s off) is skipped, never alass'd."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
+    target = (
+        "1\n00:00:05,000 --> 00:00:06,500\nمرحبا\n\n"
+        "2\n00:00:07,000 --> 00:00:08,500\nمرحبا\n"
+    ).encode()
+    ref = (
+        "1\n00:00:50,000 --> 00:00:51,500\nreference line one\n\n"
+        "2\n00:00:52,000 --> 00:00:53,500\nreference line two\n"
+    )
+    orch = _orchestrator(external_strategy=_FakeStrategy(ref, kind="edition"))
+    out = await orch.evaluate_and_sync(target, _meta(), "t", True)
+    assert out == target
+    assert orch._sync_service.calls == 0
 
 
 @pytest.mark.asyncio

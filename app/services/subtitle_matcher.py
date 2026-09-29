@@ -23,6 +23,7 @@ Supports:
   * Stage 2: Additive soft scoring matrix assigning MatchTier 1 to 4.
 """
 
+import bisect
 import logging
 import os
 import re
@@ -2437,6 +2438,230 @@ def rank_subtitles(
             logger.debug("Final Rank #%d: [%d%%] (Score: %d) %s", idx, pct, sc, r_name)
 
     return ranked
+
+
+# =======================================================
+# 7. CONTENT-AWARE DIALOGUE ALIGNMENT VALIDATION
+# =======================================================
+# Ground-truth content check: filename metadata can be mislabeled or carry
+# unadjusted translator timings, but actual cue timings cannot lie. These
+# helpers locate each file's first substantive dialogue cluster and compare
+# them, so a mistimed reference is penalized no matter how pristine its
+# release name looks.
+
+# First-dialogue sanity thresholds (milliseconds): same retail master must open
+# within 1.5s; across different sources/intros within 3.0s.
+FIRST_DIALOGUE_SAME_FAMILY_THRESHOLD_MS = 1500
+FIRST_DIALOGUE_CROSS_FAMILY_THRESHOLD_MS = 3000
+# Intro cards/credits are only stripped within the first minute of a file.
+INTRO_NONSPEECH_WINDOW_MS = 60_000
+# Median global offset below which a subtitle counts as already aligned.
+ALIGNED_OFFSET_THRESHOLD_S = 0.2
+# Heavy penalty reserved for a proven timing mismatch.
+TIMING_MISMATCH_PENALTY = -150
+
+_DIALOGUE_MIN_LETTERS = 3
+_DIALOGUE_MAX_GAP_MS = 20_000
+
+_NON_SPEECH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?i)(?:https?://|www\.|@[\w.]+|\.(?:com|net|org|info|tv|cc|me|link|club|xyz)\b)"),
+    re.compile(
+        r"(?i)(?:ترجمة|مترجم|translation|translated\s+by|subtitle|encoded|"
+        r"sync(?:ed)?\s+by|credit|corrected\s+by|timed\s+by)"
+    ),
+    re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b"),
+    re.compile(r"♪|\[music\]|\(music\)"),
+)
+
+
+def parse_srt_cues(text: str) -> list[tuple[int, int, str]]:
+    """Parse ``(start_ms, end_ms, text)`` cues from an SRT string (tolerant)."""
+    cues: list[tuple[int, int, str]] = []
+    if not text or "-->" not in text:
+        return cues
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def _to_ms(value: str) -> int | None:
+        value = value.strip().replace(",", ".")
+        time_part, _, fraction = value.partition(".")
+        parts = [p for p in time_part.split(":") if p.strip()]
+        try:
+            if len(parts) == 3:
+                h, m, s = (int(p) for p in parts)
+            elif len(parts) == 2:
+                h, m, s = 0, int(parts[0]), int(parts[1])
+            elif len(parts) == 1:
+                h, m, s = 0, 0, int(parts[0])
+            else:
+                return None
+            ms = int(fraction.ljust(3, "0")[:3]) if fraction else 0
+        except ValueError:
+            return None
+        return ((h * 3600) + (m * 60) + s) * 1000 + ms
+
+    for block in re.split(r"\n[ \t]*\n", normalized.strip("\n")):
+        lines = [line for line in block.strip("\n").split("\n")]
+        ts_idx = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        if ts_idx is None:
+            continue
+        m = re.search(
+            r"(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})",
+            lines[ts_idx],
+        )
+        if not m:
+            continue
+        start_ms = _to_ms(m.group(1))
+        end_ms = _to_ms(m.group(2))
+        if start_ms is None or end_ms is None:
+            continue
+        body = "\n".join(lines[ts_idx + 1 :]).strip()
+        if body:
+            cues.append((start_ms, end_ms, body))
+    cues.sort(key=lambda c: c[0])
+    return cues
+
+
+def _strip_markup_for_speech(text: str) -> str:
+    t = (text or "").replace("ـ", "")
+    t = re.sub(r"\{[^{}]*\}", " ", t)
+    t = re.sub(r"<[^<>]*>", " ", t)
+    return t
+
+
+def _is_non_speech_text(text: str) -> bool:
+    """True for credits, URLs/handles, date cards, music-only or empty cues."""
+    cleaned = _strip_markup_for_speech(text)
+    if not cleaned.strip():
+        return True
+    if any(pattern.search(cleaned) for pattern in _NON_SPEECH_PATTERNS):
+        return True
+    # Remove bracketed asides/music; require substantive letters for dialogue.
+    remainder = re.sub(r"\[[^\]]*\]|\([^()]*\)|♪", " ", cleaned)
+    letters = sum(1 for ch in remainder if ch.isalpha())
+    return letters < _DIALOGUE_MIN_LETTERS
+
+
+def _is_dialogue_text(text: str) -> bool:
+    return not _is_non_speech_text(text)
+
+
+def strip_intro_nonspeech(
+    cues: str | list[tuple[int, int, str]],
+    window_ms: int = INTRO_NONSPEECH_WINDOW_MS,
+) -> list[tuple[int, int, str]]:
+    """Drop non-speech cues (credits, social links, date cards) inside the intro window."""
+    parsed = parse_srt_cues(cues) if isinstance(cues, str) else list(cues)
+    return [c for c in parsed if not (c[0] < window_ms and _is_non_speech_text(c[2]))]
+
+
+def first_dialogue_cluster(
+    cues: str | list[tuple[int, int, str]],
+    *,
+    min_consecutive: int = 2,
+    max_gap_ms: int = _DIALOGUE_MAX_GAP_MS,
+) -> int | None:
+    """Start (ms) of the first run of ``min_consecutive`` dialogue cues, else ``None``."""
+    parsed = parse_srt_cues(cues) if isinstance(cues, str) else sorted(cues, key=lambda c: c[0])
+    run_start: int | None = None
+    run_len = 0
+    prev_end: int | None = None
+    for start, end, text in parsed:
+        if not _is_dialogue_text(text):
+            run_start, run_len, prev_end = None, 0, None
+            continue
+        if run_start is None:
+            run_start, run_len, prev_end = start, 1, end
+        elif prev_end is not None and start - prev_end <= max_gap_ms:
+            run_len += 1
+            prev_end = max(prev_end, end)
+        else:
+            run_start, run_len, prev_end = start, 1, end
+        if run_len >= min_consecutive:
+            return run_start
+    return None
+
+
+def median_cue_offset(
+    target: str | list[tuple[int, int, str]],
+    reference: str | list[tuple[int, int, str]],
+) -> float | None:
+    """Median ``(reference - target)`` cue-start offset in seconds, else ``None``."""
+    t = parse_srt_cues(target) if isinstance(target, str) else sorted(target, key=lambda c: c[0])
+    r = parse_srt_cues(reference) if isinstance(reference, str) else sorted(reference, key=lambda c: c[0])
+    if not t or not r:
+        return None
+    r_starts = [s for s, _, _ in r]
+    diffs: list[float] = []
+    for s, _, _ in t:
+        i = bisect.bisect_left(r_starts, s)
+        cands = [r_starts[j] for j in (i - 1, i, i + 1) if 0 <= j < len(r_starts)]
+        nearest = min(cands, key=lambda x: abs(x - s))
+        diffs.append((nearest - s) / 1000.0)
+    diffs.sort()
+    mid = len(diffs) // 2
+    if len(diffs) % 2:
+        return diffs[mid]
+    return (diffs[mid - 1] + diffs[mid]) / 2.0
+
+
+def first_dialogue_threshold_ms(same_family: bool | None) -> int:
+    """Sanity threshold: 1.5s on one master, 3.0s across different sources."""
+    if same_family:
+        return FIRST_DIALOGUE_SAME_FAMILY_THRESHOLD_MS
+    return FIRST_DIALOGUE_CROSS_FAMILY_THRESHOLD_MS
+
+
+def validate_cue_sanity(
+    candidate: str | list[tuple[int, int, str]],
+    reference: str | list[tuple[int, int, str]],
+    *,
+    same_family: bool | None = None,
+    threshold_ms: int | None = None,
+) -> dict[str, Any]:
+    """Content ground-truth check on first substantive dialogue clusters.
+
+    Intro non-dialogue (credits/links/date cards in the first 60s) is stripped
+    from both sides, then the first run of >=2 dialogue cues in each file is
+    compared. Returns ``ok``/``delta_ms``/``penalty``/``reason``. Missing
+    dialogue fails OPEN (``ok=True``) so alass still gets a chance; a proven
+    mismatch carries ``TIMING_MISMATCH_PENALTY``.
+    """
+    limit = threshold_ms if threshold_ms is not None else first_dialogue_threshold_ms(same_family)
+    cand_first = first_dialogue_cluster(strip_intro_nonspeech(candidate))
+    ref_first = first_dialogue_cluster(strip_intro_nonspeech(reference))
+    if cand_first is None or ref_first is None:
+        return {
+            "ok": True,
+            "delta_ms": None,
+            "candidate_first_ms": cand_first,
+            "reference_first_ms": ref_first,
+            "threshold_ms": limit,
+            "penalty": 0,
+            "reason": "insufficient dialogue to validate",
+        }
+    delta = cand_first - ref_first
+    if abs(delta) > limit:
+        return {
+            "ok": False,
+            "delta_ms": delta,
+            "candidate_first_ms": cand_first,
+            "reference_first_ms": ref_first,
+            "threshold_ms": limit,
+            "penalty": TIMING_MISMATCH_PENALTY,
+            "reason": (
+                f"TIMING_MISMATCH: candidate first dialogue at {cand_first / 1000.0:.2f}s vs "
+                f"reference at {ref_first / 1000.0:.2f}s (delta {delta / 1000.0:+.2f}s > {limit / 1000.0:.1f}s)"
+            ),
+        }
+    return {
+        "ok": True,
+        "delta_ms": delta,
+        "candidate_first_ms": cand_first,
+        "reference_first_ms": ref_first,
+        "threshold_ms": limit,
+        "penalty": 0,
+        "reason": None,
+    }
 
 
 # Backwards-compatible aliases

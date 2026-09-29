@@ -136,3 +136,49 @@ def test_bytes_wrapper_handles_utf8():
     content = _srt(("00:00:01,000", "00:00:03,000", "<i>نص  عربي</i>"))
     out = clean_subtitle_syntax_bytes(content.encode("utf-8")).decode("utf-8")
     assert "نص عربي" in out
+
+
+def test_strip_kashida_removes_tatweel_globally():
+    from app.utils.cleaners import strip_kashida, strip_kashida_bytes
+
+    assert strip_kashida("بـــــلال") == "بلال"
+    assert "ـ" not in strip_kashida("aـb")
+    assert strip_kashida_bytes("xـy".encode()) == b"xy"
+
+
+def test_clean_subtitle_strips_kashida_before_matching():
+    from app.utils.cleaners import clean_subtitle
+
+    content = _srt(("00:00:01,000", "00:00:03,000", "بـــــلال"))
+    out = clean_subtitle(content)
+    assert "ـ" not in out
+    assert "بلال" in out
+
+
+def test_strip_intro_credits_removes_pre_speech_branding():
+    from app.utils.cleaners import strip_intro_credits
+
+    content = _srt(
+        ("00:00:02,000", "00:00:09,000", "ترجمة مستخرجة من نتفليكس @user"),
+        ("00:00:09,000", "00:00:21,000", "25/03/2011"),
+        ("00:00:49,000", "00:00:51,000", "مرحبا بالعالم"),
+    )
+    out = strip_intro_credits(content, 49682)
+    assert "@user" not in out and "25/03/2011" not in out
+    assert "مرحبا بالعالم" in out
+    assert _indices(out) == [1]
+
+
+def test_strip_intro_credits_keeps_later_cues_and_dialogue():
+    from app.utils.cleaners import strip_intro_credits
+
+    content = _srt(
+        ("00:00:02,000", "00:00:09,000", "ترجمة @user"),
+        ("00:00:49,000", "00:00:51,000", "مرحبا"),
+        ("00:01:30,000", "00:01:32,000", "Visit www.example.com"),
+    )
+    out = strip_intro_credits(content, 49682)
+    # Pre-speech branding dropped; later cues (even noisy ones) untouched.
+    assert "مرحبا" in out and "www.example.com" in out
+    assert _indices(out) == [1, 2]
+    assert strip_intro_credits(content, None) == content

@@ -229,8 +229,11 @@ async def test_opensubtitles_fresh_routes_run_autosync(monkeypatch, enabled_sync
 
 @pytest.mark.asyncio
 async def test_failed_alignment_is_not_repeated_on_every_retry(enabled_sync):
+    # Reference offset +1s from the target: close enough to pass cue-sanity
+    # (first-dialogue delta 1s) yet misaligned (median 1s), so alass runs once,
+    # fails, and the negative cache suppresses the retry.
     strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(
-        return_value=ResolvedReference(_srt(), "edition")
+        return_value=ResolvedReference(_srt([1] * 10), "edition")
     ))
     service = SimpleNamespace(sync_async=AsyncMock(return_value=None))
     orch = _orch(strategy, service)

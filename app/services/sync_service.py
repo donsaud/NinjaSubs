@@ -307,8 +307,11 @@ def sanitize_subtitle(text: str) -> str:
     """
     if not text:
         return ""
-    text = text.lstrip("\ufeff").replace("\x00", "")
+    text = text.lstrip("﻿").replace("", "")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    from app.utils.cleaners import strip_kashida
+
+    text = strip_kashida(text)
 
     leading = text.lstrip()[:200].lower()
     if (

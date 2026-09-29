@@ -960,3 +960,82 @@ def test_audit_invariant_monotonic_and_clamped_over_large_mixed_pool():
         _assert_percentages_clamped(ranked)
         asserted += len(ranked)
     assert asserted >= 50, "expected a large candidate pool"
+
+
+# --------------------------------------------------------------------------- #
+# N. CONTENT GROUND-TRUTH: MISLABELED SUBTITLE DETECTION
+# --------------------------------------------------------------------------- #
+# Filename metadata can lie (bad uploads, re-tagged releases, unadjusted
+# translator timings). These tests prove the cue-sanity validator catches a
+# mistimed candidate by content, so only a mathematically synchronized top
+# candidate can be served.
+
+
+def _mislabeled_pair():
+    """Same BluRay-CHD filename story, DVDRip-timed cues (dialogue at 00:05)."""
+    target = (
+        "1\n00:00:05,000 --> 00:00:06,500\nFirst spoken line here\n\n"
+        "2\n00:00:07,000 --> 00:00:08,500\nSecond spoken line here\n\n"
+        "3\n00:00:10,000 --> 00:00:12,000\nThird spoken line here\n"
+    )
+    reference = (
+        "1\n00:00:50,000 --> 00:00:51,500\nFirst spoken line here\n\n"
+        "2\n00:00:52,000 --> 00:00:53,500\nSecond spoken line here\n\n"
+        "3\n00:00:55,000 --> 00:00:57,000\nThird spoken line here\n"
+    )
+    return target, reference
+
+
+def test_mislabeled_subtitle_timing_anomaly_detected():
+    from app.services.subtitle_matcher import (
+        TIMING_MISMATCH_PENALTY,
+        first_dialogue_threshold_ms,
+        validate_cue_sanity,
+    )
+
+    target, reference = _mislabeled_pair()
+    verdict = validate_cue_sanity(target, reference, same_family=True)
+    assert verdict["ok"] is False, "45s first-dialogue delta must fail the gate"
+    assert verdict["penalty"] == TIMING_MISMATCH_PENALTY
+    assert -46000 <= verdict["delta_ms"] <= -44000
+    assert verdict["threshold_ms"] == first_dialogue_threshold_ms(True) == 1500
+    assert "TIMING_MISMATCH" in (verdict["reason"] or "")
+
+
+def test_aligned_pair_passes_cue_sanity():
+    """Into the Wild shape: credit + date cards, then dialogue at ~49.7s both sides."""
+    from app.services.subtitle_matcher import validate_cue_sanity
+
+    target = (
+        "1\n00:00:02,694 --> 00:00:09,661\nترجمة مستخرجة من نتفليكس @user\n\n"
+        "2\n00:00:09,662 --> 00:00:21,662\n25/03/2011\n\n"
+        "3\n00:00:49,694 --> 00:00:50,661\nأمي\n\n"
+        "4\n00:00:52,396 --> 00:00:54,193\nأمي ساعديني\n"
+    )
+    reference = (
+        "1\n00:00:49,682 --> 00:00:50,682\nMom!\n\n"
+        "2\n00:00:52,393 --> 00:00:54,227\nMom! Help me.\n"
+    )
+    verdict = validate_cue_sanity(target, reference, same_family=True)
+    assert verdict["ok"] is True
+    assert abs(verdict["delta_ms"]) <= 1500
+    assert verdict["penalty"] == 0
+
+
+def test_top_ranked_candidate_is_content_synchronized():
+    """Two identically-named BluRay-CHD candidates; only the truly timed one validates."""
+    from app.services.subtitle_matcher import median_cue_offset, validate_cue_sanity
+
+    reference = (
+        "1\n00:00:50,000 --> 00:00:51,500\nFirst spoken line here\n\n"
+        "2\n00:00:52,000 --> 00:00:53,500\nSecond spoken line here\n"
+    )
+    good = (
+        "1\n00:00:50,010 --> 00:00:51,510\nFirst spoken line here\n\n"
+        "2\n00:00:52,020 --> 00:00:53,520\nSecond spoken line here\n"
+    )
+    bad, _ = _mislabeled_pair()
+    assert validate_cue_sanity(good, reference, same_family=True)["ok"] is True
+    assert validate_cue_sanity(bad, reference, same_family=True)["ok"] is False
+    assert abs(median_cue_offset(good, reference) or 0) < 0.2
+    assert abs(median_cue_offset(bad, reference) or 0) >= 0.2

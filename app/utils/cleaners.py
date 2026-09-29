@@ -684,6 +684,99 @@ def _clean_cue_text(text_lines: list[str], options: CleanOptions) -> list[str]:
     return [line for line in cleaned if line]
 
 
+def strip_kashida(text: str) -> str:
+    """Remove Arabic tatweel/kashida (U+0640) globally.
+
+    Kashida elongation breaks ad/credit pattern matching (stretched translator
+    names) and skews cue-text analysis, so it is stripped before any matching.
+    """
+    return (text or "").replace("ـ", "")
+
+
+def strip_kashida_bytes(content: bytes) -> bytes:
+    """UTF-8 byte wrapper around :func:`strip_kashida`."""
+    if not content:
+        return content
+    try:
+        return strip_kashida(content.decode("utf-8")).encode("utf-8")
+    except UnicodeDecodeError:
+        return content
+
+
+_INTRO_NOISE_URL_REGEX = re.compile(r"(?i)(?:https?://|www\.|@[\w.]+|\.(?:com|net|org|info|tv|cc|me|link)\b)")
+
+
+def _is_intro_noise_text(text: str) -> bool:
+    """Translator branding, website mentions, or solitary non-speech text."""
+    stripped = re.sub(r"\{[^{}]*\}", " ", text or "")
+    stripped = re.sub(r"<[^<>]*>", " ", stripped)
+    if not stripped.strip():
+        return True
+    if _has_ad(stripped) or _has_credit(stripped):
+        return True
+    if _INTRO_NOISE_URL_REGEX.search(stripped):
+        return True
+    if re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b", stripped):
+        return True
+    # A cue that is only a bracketed aside/music marker carries no dialogue.
+    without_asides = re.sub(r"\[[^\]]*\]|\([^()]*\)", " ", stripped)
+    return sum(1 for ch in without_asides if ch.isalpha()) < 3
+
+
+def strip_intro_credits(content: str, first_speech_ms: int | None) -> str:
+    """Drop non-speech cues starting before the reference's first speech block.
+
+    Removes translator branding, website mentions, date cards, and solitary
+    non-dialogue cues that occur before ``first_speech_ms`` so alass never
+    anchors a translator credit at 00:00:02 to an audio speech cue at 00:00:49.
+    Later cues are untouched; SRT cue numbers are re-indexed contiguously.
+    Returns ``content`` unchanged when nothing is dropped.
+    """
+    if first_speech_ms is None or not content or "-->" not in content:
+        return content
+    newline = "\r\n" if "\r\n" in content else "\n"
+    normalised = content.replace("\r\n", "\n")
+    had_trailing_newline = normalised.endswith("\n")
+    out_blocks: list[str] = []
+    dropped_any = False
+    index = 1
+    for block in _BLANK_LINE_REGEX.split(normalised.strip("\n")):
+        if not block.strip():
+            continue
+        lines = block.split("\n")
+        ts_idx = next(
+            (i for i, line in enumerate(lines) if _TIMESTAMP_LINE_REGEX.match(line.strip())),
+            None,
+        )
+        if ts_idx is None:
+            out_blocks.append(block.strip("\n"))
+            continue
+        match = _TIMESTAMP_LINE_REGEX.match(lines[ts_idx].strip())
+        body = "\n".join(lines[ts_idx + 1 :])
+        start_ms = _timestamp_to_ms(match.group("start")) if match else None
+        if (
+            start_ms is not None
+            and start_ms < first_speech_ms
+            and _is_intro_noise_text(body)
+        ):
+            dropped_any = True
+            continue
+        if (
+            ts_idx == 1
+            and lines[0].strip().isdigit()
+            and not _TIMESTAMP_LINE_REGEX.match(lines[0].strip())
+        ):
+            lines = [str(index)] + lines[1:]
+            index += 1
+        out_blocks.append("\n".join(lines))
+    if not dropped_any:
+        return content
+    result = "\n\n".join(out_blocks)
+    if had_trailing_newline:
+        result += "\n"
+    return result.replace("\n", newline)
+
+
 def clean_subtitle(content: str, options: CleanOptions | None = None) -> str:
     """
     Apply the selected "Fix common errors" cleanups to SRT/WebVTT subtitles:
@@ -710,6 +803,11 @@ def clean_subtitle(content: str, options: CleanOptions | None = None) -> str:
 
     newline = "\r\n" if "\r\n" in content else "\n"
     normalised = content.replace("\r\n", "\n")
+    # Strip kashida/tatweel globally before any pattern matching or cue
+    # analysis so stretched names cannot dodge ad/credit detection.
+    kashida_stripped = strip_kashida(normalised)
+    kashida_changed = kashida_stripped != normalised
+    normalised = kashida_stripped
     had_trailing_newline = normalised.endswith("\n")
 
     is_vtt = normalised.lstrip()[:6].upper().startswith("WEBVTT")
@@ -749,7 +847,7 @@ def clean_subtitle(content: str, options: CleanOptions | None = None) -> str:
     if not cues:
         return content
 
-    changed = False
+    changed = kashida_changed
 
     # 1. Clean cue text and drop cues that become empty.
     cleaned_cues: list[dict] = []
