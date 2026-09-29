@@ -60,6 +60,35 @@ def collapse_every_third(starts: list[int]) -> list[int]:
     return kept
 
 
+def silence_structure(last_ms: int, *, block: int, gap: int) -> list[int]:
+    """A plausible target-video silence structure.
+
+    Dialogue blocks separated by silences, which is the shape silencedetect
+    reports for ordinary programme material. Declared as ground truth so the
+    validator is handed the video's structure as a fact rather than inferring
+    it from the subtitle it is judging.
+    """
+    landmarks: list[int] = []
+    position = block
+    while position < last_ms + block:
+        landmarks.append(position)
+        landmarks.append(position + gap)
+        position += block + gap
+    return landmarks
+
+
+def activity_cue_starts(segments: list[tuple[str, int]]) -> list[int]:
+    """Cue starts implied by an (kind, duration_ms) activity structure."""
+    out: list[int] = []
+    position = 0
+    for kind, length in segments:
+        if kind == "tone":
+            out.append(position + 1_000)
+            out.append(position + length - 500)
+        position += length
+    return out
+
+
 def resplit(starts: list[int]) -> list[int]:
     """Same instants, different cue boundaries: timing-identical, structurally
     different. A structural comparator must not mistake this for a mismatch."""
@@ -101,6 +130,7 @@ def build() -> dict:
         source: str = "objective",
         valid_reference_keys: list[str] | None = None,
         notes: str | None = None,
+        video_landmarks: list[int] | None = None,
     ) -> None:
         target_text = _srt(target_starts)
         target_rel = f"subtitles/{case_id}__target.srt"
@@ -141,6 +171,20 @@ def build() -> dict:
                     "sha256": _sha(target_text),
                     "duration_ms": target_starts[-1] + 5000,
                     "fingerprint_complete": target_name is not None,
+                    **(
+                        {
+                            "video": {
+                                "source": "declared",
+                                "duration_ms": video_landmarks[-1] + 5000,
+                                "audio_stream_count": 1,
+                                "video_stream_count": 1,
+                                "audio_landmarks": video_landmarks,
+                                "video_landmarks": video_landmarks,
+                            }
+                        }
+                        if video_landmarks
+                        else {}
+                    ),
                 },
                 "candidates": cand_entries,
                 "ground_truth": truths,
@@ -150,6 +194,10 @@ def build() -> dict:
         )
 
     base = onsets(60)
+    # The target video's own silence structure, declared as ground truth. Only
+    # the cases where an independent video witness exists carry it; the rest
+    # leave the validator to abstain, which is the production situation.
+    video_timeline = silence_structure(base[-1], block=24_000, gap=4_000)
     exact_name = "Dexter.S08E05.1080p.BluRay.x264-PiR8.srt"
     other_name = "Dexter.S08E05.1080p.BluRay.x264-OtherGRP.srt"
     webdl_name = "Dexter.S08E05.1080p.WEB-DL.x264-NTb.srt"
@@ -252,6 +300,7 @@ def build() -> dict:
              A_WRONG_CUT),
         ],
         notes="Same title, season, episode, release group and resolution; wrong cut.",
+        video_landmarks=video_timeline,
     )
 
     # --- 6. wrong episode: a negative that looks perfect by metadata -------- #
@@ -387,6 +436,7 @@ def build() -> dict:
         ],
         notes=("Deliberate trap: self-consistent and wrong. Expected to look internally perfect while "
                "ground truth says incorrect."),
+        video_landmarks=video_timeline,
     )
 
     # --- 13. vote-sub, identical timing, different text -------------------- #
@@ -463,6 +513,46 @@ def build() -> dict:
                  A_JITTER),
             ],
         )
+
+    # --- 20. second wrong cut: a recap difference, not a splice ------------- #
+    # §21 requires a second structural failure so the validator is not fitted to
+    # one pattern. Here the opening carries a longer recap, so the timeline
+    # diverges early and re-converges later. A splice test alone would not see
+    # it: the halves disagree in the opposite arrangement.
+    standard_block = [("tone", 24_000), ("silence", 4_000)] * 12
+    recap_block = [("tone", 34_000), ("silence", 6_000)] * 3
+    tv_edit_segments = recap_block + [("tone", 24_000), ("silence", 4_000)] * 9
+    add(
+        "wrong_cut_tv_edit_recap",
+        failure_mode="different_cut_tv_edit",
+        release_class="hdtv",
+        target_name=TV_NAME,
+        target_starts=onsets(60),
+        candidates=[
+            (
+                "subdl",
+                "Dexter.S08E05.720p.HDTV.x264-2HD.srt",
+                _srt(activity_cue_starts(tv_edit_segments)),
+                {
+                    "content": "same_release",
+                    "cut": "different_cut",
+                    "original_sync": "already_synced",
+                    "resyncable": True,
+                    "final_alignment": "incorrect",
+                    "annotation_note": (
+                        "TV edit with a longer recap. The timeline diverges through the "
+                        "opening and re-converges afterwards, so no single offset "
+                        "explains it. Deliberately a different failure shape from the "
+                        "splice case, so the validator cannot be fitted to one pattern."
+                    ),
+                },
+                A_WRONG_CUT,
+            )
+        ],
+        video_landmarks=video_timeline,
+        notes="Second wrong cut, different structural signature: recap, not splice.",
+    )
+    _ = standard_block  # documents the target's own rhythm for a reader
 
     manifest = {
         "dataset_version": "v1",

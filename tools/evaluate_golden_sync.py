@@ -40,6 +40,10 @@ from app.services.sync.golden import (
     load_manifest,
     resolve_fixture,
 )
+from app.services.sync.video_timeline import (
+    is_withholding_evidence,
+    validate_timeline_against_reference,
+)
 
 #: Below this many labelled observations, a rate is not printed as a number.
 MIN_SAMPLE = 10
@@ -147,6 +151,25 @@ def build_alignment(
     return out
 
 
+def _profile_from_truth(truth: VideoTimelineTruth | None):
+    """Turn a declared video timeline into a profile the validator can read.
+
+    The landmarks are ground truth, not a measurement, so this is a hand-off
+    and not an inference.
+    """
+    if truth is None or not truth.is_available:
+        return None
+    from app.services.sync.video_timeline import VideoTimelineProfile
+
+    return VideoTimelineProfile(
+        duration_ms=truth.duration_ms,
+        audio_stream_count=truth.audio_stream_count,
+        video_stream_count=truth.video_stream_count,
+        audio_landmarks=list(truth.audio_landmarks),
+        video_landmarks=list(truth.video_landmarks),
+    )
+
+
 def classify_outcome(
     verified: bool, rejected: bool, final: GroundTruthFinal
 ) -> str:
@@ -197,6 +220,15 @@ class CaseResult:
     median_offset_ms: float | None = None
     p95_offset_ms: float | None = None
     coverage: float | None = None
+    # Independent video-derived evidence. Absent for every case with no
+    # declared target video, which is every production request.
+    video_available: bool = False
+    video_verdict: str = "unavailable"
+    video_reason: str = "VIDEO_PROFILE_UNAVAILABLE"
+    video_audio_similarity: float | None = None
+    video_scene_similarity: float | None = None
+    video_duration_similarity: float | None = None
+    video_would_withhold: bool = False
     notes: list[str] = field(default_factory=list)
 
 
@@ -252,6 +284,16 @@ def evaluate_case(
 
         error_class = classify_outcome(verified, rejected, final)
 
+        # --- independent video-derived evidence (shadow only) ---------------
+        # The video side comes from declared ground truth, never from the
+        # candidate. This never alters `state`; it only records what an
+        # independent witness would have said.
+        profile = _profile_from_truth(case.target.video)
+        aligned_cues = build_alignment(target_cues, candidate_cues, truth.alignment)
+        evidence = validate_timeline_against_reference(
+            profile, [cue[0] for cue in (aligned_cues or candidate_cues)]
+        )
+
         notes = [f"state={state.value}", f"target_name={target_name!r}"]
         if evaluation is not None and evaluation.rejection_reason is not None:
             notes.append(f"rejection={evaluation.rejection_reason.value}")
@@ -275,6 +317,13 @@ def evaluate_case(
                 median_offset_ms=evaluation.median_offset_ms if evaluation else None,
                 p95_offset_ms=evaluation.p95_offset_ms if evaluation else None,
                 coverage=evaluation.coverage_score if evaluation else None,
+                video_available=evidence.available,
+                video_verdict=evidence.verdict.value,
+                video_reason=evidence.reason.value,
+                video_audio_similarity=evidence.audio_activity_similarity,
+                video_scene_similarity=evidence.scene_boundary_similarity,
+                video_duration_similarity=evidence.duration_similarity,
+                video_would_withhold=is_withholding_evidence(evidence),
                 notes=notes,
             )
         )
@@ -332,6 +381,9 @@ def build_report(
 
     # Missing-fingerprint impact: measured, not assumed.
     incomplete = [r for r in labelled if r.case_id == "missing_fingerprint"]
+
+    # --- video-derived validation: coverage and counterfactual benefit ------ #
+    video_metrics = _video_validation_metrics(labelled)
 
     sweep = threshold_sweep(labelled)
 
@@ -440,6 +492,55 @@ def build_report(
             ),
         },
         "threshold_sweep": sweep,
+        "video_validation": video_metrics,
+    }
+
+
+def _video_validation_metrics(results: list[CaseResult]) -> dict[str, Any]:
+    """How often the independent video witness was available, and what it said.
+
+    The counterfactual is the point: what the existing verifier alone said,
+    against what it would have said with video evidence. Nothing here changes
+    any verdict; it counts what would have changed.
+    """
+    with_video = [r for r in results if r.video_available]
+    without_video = [r for r in results if not r.video_available]
+    withholding = [r for r in with_video if r.video_would_withhold]
+
+    correct_blocks = [r for r in withholding if r.annotated == "incorrect"]
+    wrong_blocks = [r for r in withholding if r.annotated == "correct"]
+
+    existing_false_verified = sum(1 for r in results if r.error_class == "FALSE_VERIFIED")
+    remaining_false_verified = sum(
+        1
+        for r in results
+        if r.error_class == "FALSE_VERIFIED" and not r.video_would_withhold
+    )
+    newly_blocked = [
+        r for r in results if r.error_class == "FALSE_VERIFIED" and r.video_would_withhold
+    ]
+    newly_held_true = [
+        r for r in results if r.error_class == "TRUE_VERIFIED" and r.video_would_withhold
+    ]
+    return {
+        "available": len(with_video),
+        "unavailable": len(without_video),
+        "availability_rate": rate(len(with_video), len(results)),
+        "verdicts": dict(Counter(r.video_verdict for r in with_video).most_common()),
+        "reasons": dict(Counter(r.video_reason for r in with_video).most_common()),
+        "would_withhold": len(withholding),
+        "would_withhold_and_correct": len(correct_blocks),
+        "would_withhold_but_ground_truth_correct": len(wrong_blocks),
+        "existing_false_verified": existing_false_verified,
+        "after_video_validation_false_verified": remaining_false_verified,
+        "newly_blocked_false_verified": len(newly_blocked),
+        "newly_blocked_cases": [r.case_id for r in newly_blocked],
+        "newly_withheld_true_verified": len(newly_held_true),
+        "note": (
+            "Observational. The verifier's verdict is unchanged; this counts what an "
+            "independent video witness would have said about it. A case with no "
+            "declared target video is abstained, never assumed to pass."
+        ),
     }
 
 
@@ -585,6 +686,27 @@ def render(report: dict[str, Any]) -> str:
     add("-----------------------")
     add(f"  {circ['case_id']} -> {circ['error_class']}")
     add(f"  {circ['note']}")
+
+    vv = report.get("video_validation") or {}
+    add("")
+    add("Video-derived timeline validation (observational, shadow only)")
+    add("--------------------------------------------------")
+    add(f"  video evidence available: {vv.get('available', 0)} of "
+        f"{vv.get('available', 0) + vv.get('unavailable', 0)} candidates")
+    add(f"  abstained (no video)   : {vv.get('unavailable', 0)}")
+    if vv.get("verdicts"):
+        for verdict, count in vv["verdicts"].items():
+            add(f"    {count:>4}  {verdict}")
+    add("")
+    add("  Counterfactual: what the verifier said vs what it would have said")
+    add(f"    false_verified, existing verifier      : {vv.get('existing_false_verified', 0)}")
+    add(f"    false_verified, with video validation  : {vv.get('after_video_validation_false_verified', 0)}")
+    add(f"    newly blocked false-verified cases     : {vv.get('newly_blocked_false_verified', 0)}")
+    if vv.get("newly_blocked_cases"):
+        add(f"      {', '.join(vv['newly_blocked_cases'])}")
+    add(f"    would-withhold where truth is correct  : {vv.get('would_withhold_but_ground_truth_correct', 0)}")
+    add(f"    true verifications it would have held  : {vv.get('newly_withheld_true_verified', 0)}")
+    add(f"  {vv.get('note', '')}")
 
     sweep = report["threshold_sweep"]
     add("")

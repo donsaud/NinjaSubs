@@ -164,6 +164,36 @@ class CandidateTruth(BaseModel):
         )
 
 
+class VideoTimelineTruth(BaseModel):
+    """The target video's own timeline, as ground truth.
+
+    Declared here for the same reason every other label is declared: the
+    validator must be handed the video's structure as an independent fact, not
+    something it infers from the subtitle it is judging.
+
+    ``source`` records how it was established:
+
+    * ``declared`` - authored for a synthetic case, describing an imagined
+      video's silence structure.
+    * ``real_media`` - measured from a real file by the profile extractor, with
+      the path and hash recorded so the measurement can be repeated.
+    """
+
+    source: str = "declared"
+    path: str | None = None
+    sha256: str | None = None
+    duration_ms: int | None = None
+    audio_stream_count: int | None = 1
+    video_stream_count: int | None = 1
+    audio_landmarks: list[int] = Field(default_factory=list)
+    video_landmarks: list[int] = Field(default_factory=list)
+    extraction_ms: int | None = None
+
+    @property
+    def is_available(self) -> bool:
+        return bool(self.audio_landmarks)
+
+
 class CandidateFixture(BaseModel):
     """Where a candidate subtitle lives and what the system will be shown."""
 
@@ -189,6 +219,9 @@ class TargetFixture(BaseModel):
     #: False when the request would carry incomplete Stremio metadata. The
     #: evaluator must not fabricate the missing fields.
     fingerprint_complete: bool = True
+    #: The video's own timeline, when one is known. Absent means the validator
+    #: must abstain, which is the normal production situation.
+    video: VideoTimelineTruth | None = None
 
 
 class GoldenCase(BaseModel):
@@ -298,3 +331,89 @@ def load_manifest(path: str | Path) -> GoldenManifest:
 def resolve_fixture(manifest_path: str | Path, relative: str) -> Path:
     """Resolve a fixture path relative to the manifest."""
     return (Path(manifest_path).parent / relative).resolve()
+
+
+# --- real-media cases (out of band) --------------------------------------- #
+
+
+class RealMediaTruth(BaseModel):
+    """Independently established ground truth for a real-media case.
+
+    ``review_status`` records how far the human review went, so conclusions
+    drawn from objective identity can be told apart from conclusions drawn
+    from someone's judgement.
+    """
+
+    cut: GroundTruthCut = GroundTruthCut.UNKNOWN
+    sync: GroundTruthSync = GroundTruthSync.UNKNOWN
+    final: GroundTruthFinal = GroundTruthFinal.UNKNOWN
+    content: GroundTruthContent = GroundTruthContent.UNKNOWN
+    review_status: str = "unreviewed"
+    reviewer_count: int = 0
+    review_notes: str | None = None
+    #: How the truth was established, independent of the pipeline.
+    established_by: GroundTruthSource = GroundTruthSource.UNKNOWN
+
+
+class RealMediaFile(BaseModel):
+    """A real file, referenced by path and hash. Never committed."""
+
+    path: str
+    sha256: str | None = None
+    duration_ms: int | None = None
+
+
+class RealMediaCase(BaseModel):
+    """One real-media benchmark case.
+
+    Real media stays out of the repository. Only the schema, the documentation
+    and optionally redacted manifests live in git.
+    """
+
+    case_id: str
+    category: str = "unspecified"
+    release_class: str = "unknown"
+    video: RealMediaFile
+    reference: RealMediaFile
+    candidate: RealMediaFile
+    ground_truth: RealMediaTruth
+    notes: str | None = None
+
+    @property
+    def has_media(self) -> bool:
+        return (
+            Path(self.video.path).is_file()
+            and Path(self.reference.path).is_file()
+            and Path(self.candidate.path).is_file()
+        )
+
+
+class RealMediaManifest(BaseModel):
+    """A versioned set of real-media cases, stored outside the repository."""
+
+    dataset_version: str = "real-v1"
+    schema_version: int = 1
+    engine_version: int = GOLDEN_ENGINE_VERSION
+    description: str | None = None
+    protocol: str | None = None
+    cases: list[RealMediaCase] = Field(default_factory=list)
+
+    def available_cases(self) -> list[RealMediaCase]:
+        """Cases whose media is actually present on this machine."""
+        return [case for case in self.cases if case.has_media]
+
+
+def load_real_media_manifest(path: str | Path) -> RealMediaManifest:
+    """Load a real-media manifest.
+
+    A missing file is reported, not raised: the expected local state is that
+    the media is absent, and the benchmark must say so rather than fail.
+    """
+    manifest_path = Path(path)
+    if not manifest_path.is_file():
+        raise GoldenCaseError(f"real-media manifest not found: {manifest_path}")
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return RealMediaManifest.model_validate(raw)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise GoldenCaseError(f"real-media manifest failed validation: {exc}") from exc

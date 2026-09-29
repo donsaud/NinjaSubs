@@ -178,7 +178,37 @@
         "filename": "Dexter.S08E05.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv",
         "sha256": "21343da49b88b7ba9fa48b7467bc97d268ab617939735cc0c42adff5ab241b93",
         "duration_ms": 123000,
-        "fingerprint_complete": true
+        "fingerprint_complete": true,
+        "video": {
+          "source": "declared",
+          "duration_ms": 145000,
+          "audio_stream_count": 1,
+          "video_stream_count": 1,
+          "audio_landmarks": [
+            24000,
+            28000,
+            52000,
+            56000,
+            80000,
+            84000,
+            108000,
+            112000,
+            136000,
+            140000
+          ],
+          "video_landmarks": [
+            24000,
+            28000,
+            52000,
+            56000,
+            80000,
+            84000,
+            108000,
+            112000,
+            136000,
+            140000
+          ]
+        }
       },
       "candidates": [
         {
@@ -487,7 +517,37 @@
         "filename": "Dexter.S08E05.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv",
         "sha256": "21343da49b88b7ba9fa48b7467bc97d268ab617939735cc0c42adff5ab241b93",
         "duration_ms": 123000,
-        "fingerprint_complete": true
+        "fingerprint_complete": true,
+        "video": {
+          "source": "declared",
+          "duration_ms": 145000,
+          "audio_stream_count": 1,
+          "video_stream_count": 1,
+          "audio_landmarks": [
+            24000,
+            28000,
+            52000,
+            56000,
+            80000,
+            84000,
+            108000,
+            112000,
+            136000,
+            140000
+          ],
+          "video_landmarks": [
+            24000,
+            28000,
+            52000,
+            56000,
+            80000,
+            84000,
+            108000,
+            112000,
+            136000,
+            140000
+          ]
+        }
       },
       "candidates": [
         {
@@ -820,6 +880,78 @@
         }
       ],
       "valid_reference_keys": []
+    },
+    {
+      "case_id": "wrong_cut_tv_edit_recap",
+      "failure_mode": "different_cut_tv_edit",
+      "release_class": "hdtv",
+      "annotation_source": "objective",
+      "target": {
+        "path": "subtitles/wrong_cut_tv_edit_recap__target.srt",
+        "filename": "Dexter.S08E05.720p.HDTV.x264-2HD.mkv",
+        "sha256": "21343da49b88b7ba9fa48b7467bc97d268ab617939735cc0c42adff5ab241b93",
+        "duration_ms": 123000,
+        "fingerprint_complete": true,
+        "video": {
+          "source": "declared",
+          "duration_ms": 145000,
+          "audio_stream_count": 1,
+          "video_stream_count": 1,
+          "audio_landmarks": [
+            24000,
+            28000,
+            52000,
+            56000,
+            80000,
+            84000,
+            108000,
+            112000,
+            136000,
+            140000
+          ],
+          "video_landmarks": [
+            24000,
+            28000,
+            52000,
+            56000,
+            80000,
+            84000,
+            108000,
+            112000,
+            136000,
+            140000
+          ]
+        }
+      },
+      "candidates": [
+        {
+          "provider": "subdl",
+          "release_name": "Dexter.S08E05.720p.HDTV.x264-2HD.srt",
+          "path": "subtitles/wrong_cut_tv_edit_recap__subdl__Dexter.S08E05.720p.HDTV.x264-2HD.srt.srt",
+          "sha256": "7e5ba3c930f3be1d393e0d7684dece68191103caa77611fc9bd4486d020608ba",
+          "language": "eng"
+        }
+      ],
+      "ground_truth": [
+        {
+          "provider": "subdl",
+          "release_name": "Dexter.S08E05.720p.HDTV.x264-2HD.srt",
+          "alignment": {
+            "mode": "partial_misalign",
+            "displaced_from_index": 30,
+            "displaced_by_ms": 12000,
+            "annotation_note": "Exit 0 with small residuals, but the back half belongs to a different cut. The signature of a wrong-cut alignment."
+          },
+          "content": "same_release",
+          "cut": "different_cut",
+          "original_sync": "already_synced",
+          "resyncable": true,
+          "final_alignment": "incorrect",
+          "annotation_note": "TV edit with a longer recap. The timeline diverges through the opening and re-converges afterwards, so no single offset explains it. Deliberately a different failure shape from the splice case, so the validator cannot be fitted to one pattern."
+        }
+      ],
+      "valid_reference_keys": [],
+      "notes": "Second wrong cut, different structural signature: recap, not splice."
     }
   ]
 }

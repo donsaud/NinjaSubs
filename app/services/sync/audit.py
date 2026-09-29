@@ -186,6 +186,11 @@ class SyncDecisionRecord(BaseModel):
     shadow_extra_candidate_provider: str | None = None
     shadow_extra_candidate_match_tier: str | None = None
     shadow_extra_candidate_source_class: str | None = None
+    # --- video-derived timeline evidence (observational) ------------------ #
+    # Present only when a target video profile existed. Absent on every
+    # production request, because the addon never receives the media. Every
+    # field is a measurement or a count: no media content is stored.
+    video_validation: dict[str, Any] | None = None
     # Legacy pick was only acceptable/unknown, the shadow pick was stronger,
     # and the decision did not verify. A flag to investigate, never a cause.
     potential_reference_selection_issue: bool = False

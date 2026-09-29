@@ -1,0 +1,96 @@
+{
+  "dataset_version": "real-v1",
+  "schema_version": 1,
+  "engine_version": 1,
+  "description": "REDACTED SAMPLE. Paths and hashes are placeholders. Real media lives outside the repository. See docs/real_media_benchmark.md.",
+  "protocol": "docs/golden_sync_annotation.md",
+  "cases": [
+    {
+      "case_id": "real_dexter_s08e05_case_001",
+      "category": "different_cut",
+      "release_class": "bluray",
+      "video": {
+        "path": "/REDACTED/episode.mkv",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "duration_ms": 3598000
+      },
+      "reference": {
+        "path": "/REDACTED/reference.srt",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "candidate": {
+        "path": "/REDACTED/candidate.srt",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "ground_truth": {
+        "content": "same_release",
+        "cut": "different_cut",
+        "sync": "resyncable",
+        "final": "incorrect",
+        "review_status": "two_reviewers_agreed",
+        "reviewer_count": 2,
+        "review_notes": "PLACEHOLDER. Reference is the extended TV cut. The back half carries recap material absent from the target, so the two share a perfectly consistent timing model that is wrong for this target.",
+        "established_by": "human_reviewed"
+      },
+      "notes": "The case the synthetic dataset can only imitate."
+    },
+    {
+      "case_id": "real_dexter_s08e05_case_002",
+      "category": "tv_edit_recap",
+      "release_class": "hdtv",
+      "video": {
+        "path": "/REDACTED/episode_hdtv.mkv",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "duration_ms": 2640000
+      },
+      "reference": {
+        "path": "/REDACTED/reference_hdtv.srt",
+        "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "candidate": {
+        "path": "/REDACTED/candidate_hdtv.srt",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "ground_truth": {
+        "content": "same_release",
+        "cut": "different_cut",
+        "sync": "resyncable",
+        "final": "incorrect",
+        "review_status": "reviewed",
+        "reviewer_count": 1,
+        "review_notes": "PLACEHOLDER. A longer recap at the head. Timeline diverges early and re-converges, so no single offset explains it.",
+        "established_by": "human_reviewed"
+      },
+      "notes": "Second structural signature, so the validator is not fitted to a splice."
+    },
+    {
+      "case_id": "real_dexter_s08e05_case_003",
+      "category": "constant_offset_positive",
+      "release_class": "bluray",
+      "video": {
+        "path": "/REDACTED/episode.mkv",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "duration_ms": 3598000
+      },
+      "reference": {
+        "path": "/REDACTED/reference_offset.srt",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "candidate": {
+        "path": "/REDACTED/candidate_offset.srt",
+        "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      "ground_truth": {
+        "content": "same_release",
+        "cut": "same_cut",
+        "sync": "resyncable",
+        "final": "correct",
+        "review_status": "reviewed",
+        "reviewer_count": 1,
+        "review_notes": "PLACEHOLDER. A known 7.5s shift. Must NOT be flagged as a wrong cut; an offset is not an edit.",
+        "established_by": "objective"
+      },
+      "notes": "The false-positive guard: if this is flagged, the validator is too aggressive."
+    }
+  ]
+}
