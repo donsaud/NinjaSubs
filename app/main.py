@@ -572,6 +572,20 @@ async def _fetch_subtitles_handler(
 
     # Extract target stream parameters (filename, videoHash, videoSize)
     stream_params = extract_stream_params(extra, request.query_params)
+    # ---------------------------------------------------------------------
+    # TARGET FINGERPRINT INVARIANT - the one boundary that establishes it.
+    #
+    # `target_filename` is the NAME OF THE TARGET VIDEO and nothing else. It
+    # may be None, and None is meaningful: the system then has no
+    # release-level evidence and must stay conservative.
+    #
+    # It must never be populated from a subtitle filename, a subtitle release
+    # name, an archive filename or a provider release name. Doing so would make
+    # the content matcher compare a subtitle against itself and report a
+    # perfect match, which is how a wrong subtitle becomes a confidently
+    # verified one. The value below comes from the stream descriptor, before
+    # any subtitle is fetched.
+    # ---------------------------------------------------------------------
     target_filename = stream_params.get("filename")
     video_hash = stream_params.get("video_hash")
     video_size = stream_params.get("video_size")

@@ -29,7 +29,7 @@ import math
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.services.subtitle_matcher import (
     ALIGNED_OFFSET_THRESHOLD_S,
@@ -217,21 +217,65 @@ class SubtitleEvaluation(BaseModel):
     reference_independent_sources: int | None = None
     reference_failure: str | None = None
 
+    #: validate_assignment is what closes the attribute-assignment bypass: the
+    #: field validator below then runs on ordinary writes, not just on
+    #: construction and not just through set_verdict.
+    model_config = ConfigDict(validate_assignment=True)
+
     def __init__(self, **data: Any) -> None:
         super().__init__(**data)
-        state, verification = data.get("sync_state"), data.get("verification")
-        if state is not None and verification is not None:
-            self.set_verdict(state, verification)
+        # Route through the guard even when only a state was supplied, so
+        # constructing with a bare string literal cannot produce a verified
+        # verdict. The values are coerced first: pydantic coerces the fields
+        # itself, but ``data`` still holds whatever the caller passed.
+        state = data.get("sync_state")
+        if state is None:
+            state = SyncState.UNVERIFIED
+        elif not isinstance(state, SyncState):
+            state = SyncState(state)
+        verification = data.get("verification")
+        if verification is None:
+            verification = VerificationAvailability.UNKNOWN
+        elif not isinstance(verification, VerificationAvailability):
+            verification = VerificationAvailability(verification)
+        self.set_verdict(state, verification)
+
+    @field_validator("sync_state")
+    @classmethod
+    def _enforce_verified_requires_evidence(cls, value: SyncState, info) -> SyncState:
+        """The structural guard, enforced on every assignment.
+
+        ``validate_assignment`` means this runs whether the state arrives by
+        construction, by :meth:`set_verdict`, or by a plain attribute
+        assignment several modules away. That last case is the one that used to
+        work: ``evaluation.sync_state = SyncState.VERIFIED_SYNCED`` set a
+        verified claim with no evidence behind it, because nothing inspected an
+        ordinary attribute write.
+
+        The check reads ``verification``, so :meth:`set_verdict` sets that
+        first. That ordering is what makes a legitimate verdict possible while
+        still making an unbacked one impossible.
+        """
+        if value not in (SyncState.VERIFIED_SYNCED, SyncState.VERIFIED_RESYNCED):
+            return value
+        verification = info.data.get("verification")
+        if verification in _VERIFIED_AVAILABILITIES:
+            return value
+        return (
+            SyncState.PROBABLE_SYNC
+            if verification is VerificationAvailability.PREDICTED
+            else SyncState.UNVERIFIED
+        )
 
     def set_verdict(
         self, state: SyncState, verification: VerificationAvailability
     ) -> SubtitleEvaluation:
         """Set the sync state paired with how the evidence was obtained.
 
-        This is the only supported way to mutate either field, so the invariant
-        holds for in-place updates as well as construction: a positive
-        synchronization state is backed only by evidence that was actually
-        measured, now or recalled from an identical video + subtitle + engine.
+        This is the only supported way to establish a verdict, and
+        ``_enforce_verified_requires_evidence`` backs it structurally, so a
+        verified state is backed only by evidence that was actually measured,
+        now or recalled from an identical video + subtitle + engine.
         """
         if state in (SyncState.VERIFIED_SYNCED, SyncState.VERIFIED_RESYNCED):
             if verification not in _VERIFIED_AVAILABILITIES:
@@ -247,8 +291,10 @@ class SubtitleEvaluation(BaseModel):
                     f"downgraded from {original}: verification={verification.value} "
                     "cannot support a verified state"
                 )
-        self.sync_state = state
+        # Verification first: the field validator reads it to permit a verified
+        # state, so the order here is load-bearing.
         self.verification = verification
+        self.sync_state = state
         return self
 
     def measured(self) -> bool:

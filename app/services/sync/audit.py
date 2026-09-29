@@ -47,7 +47,21 @@ VERIFIED_OUTCOMES = ("verified_synced", "verified_resynced")
 _MAX_REASON_CHARS = 160
 _MAX_RELEASE_NAME_CHARS = 64
 # Anything that looks like a URL, token, or long opaque blob is never recorded.
-_SENSITIVE_PATTERN = re.compile(r"(?i)(https?://|[?&](token|signature|auth|key)=|\b[A-Za-z0-9_-]{40,}\b)")
+#: Anything URL-shaped is removed WHOLE, not just its scheme. Stripping only
+#: `https://` would still leave the host and path in the log, which is exactly
+#: what `sanitize_name` avoids; a reason string reaches this function from
+#: provider and request data, so a signed CDN URL must not survive partially.
+_URL_PATTERN = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://\S+")
+#: Query-string credentials and long opaque tokens.
+_SENSITIVE_PATTERN = re.compile(r"(?i)([?&](token|signature|auth|key)=|\b[A-Za-z0-9_-]{40,}\b)")
+
+
+def sanitize_reason(reason: str) -> str:
+    """Bound a reason string and strip anything URL- or token-shaped."""
+    text = str(reason or "")
+    text = _URL_PATTERN.sub("<redacted-url>", text)
+    text = _SENSITIVE_PATTERN.sub("<redacted>", text)
+    return text.strip()[:_MAX_REASON_CHARS]
 
 
 def stable_id(value: Any, *, length: int = 16) -> str | None:
@@ -56,12 +70,6 @@ def stable_id(value: Any, *, length: int = 16) -> str | None:
     if not text:
         return None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:length]
-
-
-def sanitize_reason(reason: str) -> str:
-    """Bound a reason string and strip anything URL- or token-shaped."""
-    text = _SENSITIVE_PATTERN.sub("<redacted>", str(reason or "")).strip()
-    return text[:_MAX_REASON_CHARS]
 
 
 def sanitize_name(name: str | None) -> str | None:

@@ -105,7 +105,16 @@ def test_reasons_are_truncated_and_url_safe():
     assert len(sanitize_reason(long_reason)) <= 160
     redacted = sanitize_reason("failed on https://cdn.example/x.srt?token=abcdef123456&signature=zzz")
     assert "http" not in redacted
-    assert "<redacted>" in redacted
+    # The whole URL goes, not just its scheme. Stripping `https://` alone would
+    # leave the host and the path behind, which is what this now prevents.
+    assert "cdn.example" not in redacted
+    assert "x.srt" not in redacted
+    assert "abcdef123456" not in redacted
+    assert "redacted" in redacted
+    # A reason with no URL keeps its readable content.
+    assert sanitize_reason("cut classification: different_cut") == (
+        "cut classification: different_cut"
+    )
 
 
 def test_release_names_are_bounded():
