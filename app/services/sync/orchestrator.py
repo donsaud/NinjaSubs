@@ -20,14 +20,11 @@ from typing import Any
 from app.config import settings
 from app.services.subtitle_matcher import (
     ALIGNED_OFFSET_THRESHOLD_S,
+    FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
     median_cue_offset,
     validate_cue_sanity,
 )
-from app.services.sync.matching import (
-    _source_kind,
-    _sources_compatible,
-    is_informative_release_name,
-)
+from app.services.sync.matching import is_informative_release_name
 from app.services.sync.query import ReferenceQuery, ResolvedReference
 from app.services.sync_cache import SyncCache
 from app.utils.cleaners import strip_intro_credits
@@ -265,12 +262,16 @@ class SyncOrchestrator:
             # Ground-truth content gate: filename metadata can be mislabeled, so
             # verify the candidate's first substantive dialogue against the
             # reference before trusting it, regardless of the release name.
-            target_source = _source_kind(meta.get("target_filename") or meta.get("release_name"))
-            ref_source = _source_kind(resolved.candidate or "")
-            same_family = bool(
-                target_source and ref_source and _sources_compatible(target_source, ref_source)
+            # Execution uses the wide ±20s window so alass can still fix
+            # realistic uniform intro/bumper shifts between Web and BluRay
+            # masters; only a larger delta (different cut/episode) skips.
+            # (Ranking keeps the strict 1.5s/3.0s penalty via the default
+            # thresholds in validate_cue_sanity.)
+            sanity = validate_cue_sanity(
+                target_text,
+                reference,
+                threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
             )
-            sanity = validate_cue_sanity(target_text, reference, same_family=same_family)
             if not sanity["ok"]:
                 logger.warning(
                     "[sync] %s reference failed cue-sanity (%s, penalty %s) -> next strategy",

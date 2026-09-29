@@ -2450,9 +2450,13 @@ def rank_subtitles(
 # release name looks.
 
 # First-dialogue sanity thresholds (milliseconds): same retail master must open
-# within 1.5s; across different sources/intros within 3.0s.
+# within 1.5s; across different sources/intros within 3.0s. These strict bounds
+# are for RANKING (penalizing unknown-offset candidates). Sync EXECUTION uses
+# the wider FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS below so alass can still fix
+# realistic uniform intro/bumper shifts (3-15s) between Web and BluRay masters.
 FIRST_DIALOGUE_SAME_FAMILY_THRESHOLD_MS = 1500
 FIRST_DIALOGUE_CROSS_FAMILY_THRESHOLD_MS = 3000
+FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS = 20000
 # Intro cards/credits are only stripped within the first minute of a file.
 INTRO_NONSPEECH_WINDOW_MS = 60_000
 # Median global offset below which a subtitle counts as already aligned.

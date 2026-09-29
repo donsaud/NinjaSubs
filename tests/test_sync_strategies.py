@@ -587,6 +587,47 @@ async def test_orchestrator_skips_reference_failing_cue_sanity(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_allows_realistic_cross_source_offset(monkeypatch):
+    """First-dialogue deltas within ±20s run alass (uniform intro/bumper shift)."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
+    target = (
+        "1\n00:00:05,000 --> 00:00:06,500\nمرحبا\n\n"
+        "2\n00:00:07,000 --> 00:00:08,500\nمرحبا\n"
+    ).encode()
+    # Reference dialogue ~4.7s later (Mad Men shape): inside the execution window.
+    ref = (
+        "1\n00:00:09,700 --> 00:00:11,200\nreference line one\n\n"
+        "2\n00:00:11,700 --> 00:00:13,200\nreference line two\n"
+    )
+    orch = _orchestrator(external_strategy=_FakeStrategy(ref, kind="edition"))
+    out = await orch.evaluate_and_sync(target, _meta(), "t", True)
+    assert b"synced" in out
+    assert orch._sync_service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_skips_huge_first_dialogue_delta(monkeypatch):
+    """First-dialogue deltas beyond ±20s are a different cut: skip, serve original."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
+    target = (
+        "1\n00:00:05,000 --> 00:00:06,500\nمرحبا\n\n"
+        "2\n00:00:07,000 --> 00:00:08,500\nمرحبا\n"
+    ).encode()
+    ref = (
+        "1\n00:00:35,000 --> 00:00:36,500\nreference line one\n\n"
+        "2\n00:00:37,000 --> 00:00:38,500\nreference line two\n"
+    )
+    orch = _orchestrator(external_strategy=_FakeStrategy(ref, kind="edition"))
+    out = await orch.evaluate_and_sync(target, _meta(), "t", True)
+    assert out == target
+    assert orch._sync_service.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_negative_cache_skips_provider_fanout(monkeypatch):
     from app.config import settings as app_settings
 
