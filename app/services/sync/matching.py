@@ -6,13 +6,17 @@ resolution classification, and scene release-group extraction.
 
 from __future__ import annotations
 
+import importlib
 import re
+from collections.abc import Callable
 from functools import lru_cache
+from typing import Any
 from urllib.parse import unquote_plus
 
+_guessit: Callable[..., dict[str, Any]] | None = None
 try:
-    from guessit import guessit as _guessit
-except ImportError:  # pragma: no cover
+    _guessit = importlib.import_module("guessit").guessit
+except ImportError:  # pragma: no cover - guessit is a declared dependency
     _guessit = None
 
 
