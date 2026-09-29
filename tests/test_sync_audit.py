@@ -14,6 +14,7 @@ import json
 import pytest
 
 from app.models import MatchTier, SubtitleRelease
+from app.services.subtitle_matcher import CompatibilityResult
 from app.services.sync.alignment import SyncState, VerificationAvailability
 from app.services.sync.audit import (
     AUDIT_LOG,
@@ -24,7 +25,6 @@ from app.services.sync.audit import (
     stable_id,
 )
 from app.services.sync.ordering import order_candidates
-from app.services.subtitle_matcher import CompatibilityResult
 from app.services.sync_cache import SYNC_VERDICT_ENGINE_VERSION, SyncCache
 
 
@@ -429,8 +429,8 @@ def test_thresholds_were_not_modified_by_this_work():
         MAX_DRIFT_MS_PER_MINUTE,
         MAX_MAD_MS_FOR_STABLE,
         MAX_P95_MS_FOR_STABLE,
-        MIN_CUES_FOR_VERIFIED,
         MIN_CUE_RETENTION,
+        MIN_CUES_FOR_VERIFIED,
     )
     from app.services.sync.predictor import (
         CONFIDENCE_EXACT_IDENTITY,

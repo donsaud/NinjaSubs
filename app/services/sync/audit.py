@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 # Bumped when the record shape changes, so old exports are not mixed in.
 AUDIT_SCHEMA_VERSION = 1
+# Identifies the verification engine generation that produced a record.
+ENGINE_VERSION = "sync-eval-1"
 
 # Reason strings are truncated: they must stay metrics, not subtitle content.
 _MAX_REASON_CHARS = 160
@@ -84,6 +86,9 @@ class SyncDecisionRecord(BaseModel):
     """One shadow observation of a decision. Never used to make one."""
 
     schema_version: int = AUDIT_SCHEMA_VERSION
+    # Which build of the verification engine produced this observation. Lets an
+    # analysis detect records written by a different engine generation.
+    engine_version: str = ENGINE_VERSION
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # "search" (metadata prediction / cache evidence) or "serve" (measured).
     phase: str = "search"
@@ -129,6 +134,9 @@ class SyncDecisionRecord(BaseModel):
     release_group: str | None = None
     fps_relation: str | None = None
     media_type: str | None = None
+    # Provider identity is a short enum-like label, not sensitive, and is what
+    # makes provider-level confounding detectable during analysis.
+    provider: str | None = None
 
     reasons: list[str] = Field(default_factory=list)
 
@@ -149,6 +157,7 @@ def _release_meta(release: Any) -> dict[str, Any]:
         "match_tier": None,
         "compatibility_score": None,
         "fps_relation": None,
+        "provider": None,
     }
     if compat is not None:
         tier = getattr(compat, "match_tier", None)
@@ -157,12 +166,21 @@ def _release_meta(release: Any) -> dict[str, Any]:
         out["compatibility_score"] = float(percentage) if percentage is not None else None
         out["fps_relation"] = getattr(compat, "fps_relation", None)
 
+    provider = getattr(release, "provider", None)
+    if provider is None and isinstance(release, dict):
+        provider = release.get("provider")
+    # Provider labels are a small fixed set; anything unexpected is dropped
+    # rather than stored, so this cannot become a free-text leak.
+    text = str(provider or "").strip().lower()[:24]
+    out["provider"] = text if text.isalnum() else None
+
     meta = getattr(release, "target_meta", None)
     if isinstance(meta, dict):
-        out.setdefault("release_source", meta.get("source"))
+        out["release_source"] = meta.get("source")
         out["release_resolution"] = meta.get("resolution")
         out["release_edition"] = meta.get("edition")
         out["release_group"] = meta.get("release_group")
+        out["media_type"] = meta.get("media_type")
     return out
 
 
@@ -367,5 +385,6 @@ def record_for_evaluation(
         release_group=release_facts.get("release_group"),
         fps_relation=release_facts.get("fps_relation"),
         media_type=release_facts.get("media_type"),
+        provider=release_facts.get("provider"),
         reasons=[sanitize_reason(r) for r in (getattr(evaluation, "reasons", None) or [])],
     )

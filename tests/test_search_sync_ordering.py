@@ -17,12 +17,12 @@ Every test here asserts an invariant rather than a ranking convenience:
 from __future__ import annotations
 
 import ast
-import inspect
 from pathlib import Path
 
 import pytest
 
 from app.models import MatchTier, SubtitleRelease
+from app.services.subtitle_matcher import CompatibilityResult
 from app.services.sync.alignment import SyncState, VerificationAvailability
 from app.services.sync.ordering import comparison_key, order_candidates
 from app.services.sync.predictor import (
@@ -32,7 +32,6 @@ from app.services.sync.predictor import (
     SyncPredictor,
     prediction_is_below_floor,
 )
-from app.services.subtitle_matcher import CompatibilityResult
 
 PREDICTOR = SyncPredictor()
 
