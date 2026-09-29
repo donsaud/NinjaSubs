@@ -38,6 +38,12 @@ from app.services.subtitle_matcher import (
     parse_srt_cues,
     validate_cue_sanity,
 )
+from app.services.sync.structural import (
+    CutVerdict,
+    StructuralSimilarity,
+    classify_cut,
+    compare_structures,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +122,48 @@ class RejectionReason(str, Enum):
     IMPLAUSIBLE_OFFSET = "implausible_offset"
     ALASS_FAILED = "alass_failed"
     CUE_LOSS = "cue_loss"
+    STRUCTURE_MISMATCH = "structure_mismatch"
     OTHER = "other"
+
+
+class VerificationAvailability(str, Enum):
+    """Whether synchronization knowledge is measured, recalled, or only inferred.
+
+    This is orthogonal to :class:`SyncState`. ``SyncState`` answers "what is the
+    timing verdict?"; this answers "how do we actually know it?" The pair
+    together prevents the two failure modes that matter:
+
+    * inferring a positive claim from metadata alone (``PREDICTED`` must never
+      upgrade to ``VERIFIED_SYNCED``);
+    * presenting a recalled verdict as if it had just been measured.
+    """
+
+    # Measured against the target video in this request and passed.
+    VERIFIED = "verified"
+    # A previously measured verdict for the identical video + subtitle + engine.
+    CACHED = "cached"
+    # Strong metadata/release evidence, but never checked against the video.
+    PREDICTED = "predicted"
+    # Not enough evidence for any synchronization claim.
+    UNKNOWN = "unknown"
+
+    @property
+    def rank(self) -> int:
+        """Strength of evidence; lower is stronger."""
+        return _AVAILABILITY_RANK[self]
+
+
+_AVAILABILITY_RANK: dict[VerificationAvailability, int] = {
+    VerificationAvailability.VERIFIED: 0,
+    VerificationAvailability.CACHED: 1,
+    VerificationAvailability.PREDICTED: 2,
+    VerificationAvailability.UNKNOWN: 3,
+}
+
+# Only these may ever accompany a VERIFIED_* synchronization state.
+_VERIFIED_AVAILABILITIES = frozenset(
+    {VerificationAvailability.VERIFIED, VerificationAvailability.CACHED}
+)
 
 
 class SubtitleEvaluation(BaseModel):
@@ -143,15 +190,60 @@ class SubtitleEvaluation(BaseModel):
     alass_successful: bool = False
 
     sync_state: SyncState = SyncState.UNVERIFIED
+    # How the state was established. Defaults to UNKNOWN, never to a positive
+    # claim, so a bare SubtitleEvaluation() cannot look verified.
+    verification: VerificationAvailability = VerificationAvailability.UNKNOWN
     reasons: list[str] = Field(default_factory=list)
     rejection_reason: RejectionReason | None = None
 
     # Change points as (position_ms, step_ms) pairs describing piecewise shifts.
     change_points: list[tuple[int, float]] = Field(default_factory=list)
 
+    # Structural comparison against the reference (see structural.py).
+    structural_similarity: float | None = None
+    cut_verdict: str | None = None
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        state, verification = data.get("sync_state"), data.get("verification")
+        if state is not None and verification is not None:
+            self.set_verdict(state, verification)
+
+    def set_verdict(
+        self, state: SyncState, verification: VerificationAvailability
+    ) -> SubtitleEvaluation:
+        """Set the sync state paired with how the evidence was obtained.
+
+        This is the only supported way to mutate either field, so the invariant
+        holds for in-place updates as well as construction: a positive
+        synchronization state is backed only by evidence that was actually
+        measured, now or recalled from an identical video + subtitle + engine.
+        """
+        if state in (SyncState.VERIFIED_SYNCED, SyncState.VERIFIED_RESYNCED):
+            if verification not in _VERIFIED_AVAILABILITIES:
+                original = state.value
+                state = (
+                    SyncState.PROBABLE_SYNC
+                    if verification is VerificationAvailability.PREDICTED
+                    else SyncState.UNVERIFIED
+                )
+                if not self.rejection_reason:
+                    self.rejection_reason = RejectionReason.INSUFFICIENT_EVIDENCE
+                self.reasons.append(
+                    f"downgraded from {original}: verification={verification.value} "
+                    "cannot support a verified state"
+                )
+        self.sync_state = state
+        self.verification = verification
+        return self
+
+    def measured(self) -> bool:
+        """True when this verdict rests on a real measurement."""
+        return self.verification is not VerificationAvailability.UNKNOWN
+
     def explain(self) -> str:
         """Single-line, human-readable rationale for logs and debug output."""
-        parts = [f"state={self.sync_state.value}"]
+        parts = [f"state={self.sync_state.value}", f"verification={self.verification.value}"]
         if self.content_match_score is not None:
             parts.append(f"content={self.content_match_score:.0f}")
         if self.sync_confidence is not None:
@@ -164,6 +256,10 @@ class SubtitleEvaluation(BaseModel):
             parts.append(f"p95={self.p95_offset_ms:.0f}ms")
         if self.drift_ms_per_minute is not None:
             parts.append(f"drift={self.drift_ms_per_minute:+.1f}ms/min")
+        if self.structural_similarity is not None:
+            parts.append(f"struct={self.structural_similarity:.2f}")
+        if self.cut_verdict:
+            parts.append(f"cut={self.cut_verdict}")
         if self.rejection_reason is not None:
             parts.append(f"reject={self.rejection_reason.value}")
         return " ".join(parts) + (f" | {'; '.join(self.reasons)}" if self.reasons else "")
@@ -306,22 +402,31 @@ class AlignmentAnalyzer:
         )
 
         if len(target_cues) < self.min_cues:
-            evaluation.sync_state = SyncState.UNVERIFIED
+            evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
             evaluation.rejection_reason = RejectionReason.INSUFFICIENT_EVIDENCE
             evaluation.reasons.append(
                 f"target has {len(target_cues)} cues, below the {self.min_cues} needed to verify"
             )
             return evaluation
 
+        # Structural comparison is measured whenever both sides have cues and
+        # is independent of whether alass ran. It is supporting evidence: it
+        # narrows which cut verdicts stay possible, never a rejection on its
+        # own, because providers legitimately split and merge cues differently.
+        structural = compare_structures(target_cues, reference)
+        if structural.score is not None:
+            evaluation.structural_similarity = structural.score
+            evaluation.reasons.append(structural.explain())
+            evaluation.reasons.extend(structural.reasons)
+
         if not alass_applied:
             # No alignment ran. The only honest claim available is whether the
             # subtitle was *already* close to the reference.
             return self._classify_without_alignment(
-                evaluation, target_cues, reference, target_fps, reference_fps
+                evaluation, target_cues, reference, target_fps, reference_fps, structural
             )
-
         if not alass_successful or not synced_cues:
-            evaluation.sync_state = SyncState.UNVERIFIED
+            evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
             evaluation.rejection_reason = RejectionReason.ALASS_FAILED
             evaluation.reasons.append("alass did not produce a usable aligned subtitle")
             return evaluation
@@ -331,14 +436,16 @@ class AlignmentAnalyzer:
         coverage = min(1.0, len(synced_cues) / len(target_cues))
         evaluation.coverage_score = round(coverage, 4)
         if coverage < MIN_CUE_RETENTION:
-            evaluation.sync_state = SyncState.REJECTED
+            evaluation.set_verdict(SyncState.REJECTED, VerificationAvailability.VERIFIED)
             evaluation.rejection_reason = RejectionReason.CUE_LOSS
             evaluation.reasons.append(
                 f"alass retained only {coverage:.0%} of {len(target_cues)} cues"
             )
             return evaluation
 
-        return self._classify_alignment(evaluation, target_cues, synced_cues, reference)
+        return self._classify_alignment(
+            evaluation, target_cues, synced_cues, reference, structural
+        )
 
     def _measure(
         self, evaluation: SubtitleEvaluation, pairs: list[tuple[int, float]]
@@ -367,6 +474,7 @@ class AlignmentAnalyzer:
         target_cues: list[Cue],
         synced_cues: list[Cue],
         reference: str | list[Cue] | None,
+        structural: StructuralSimilarity | None = None,
     ) -> SubtitleEvaluation:
         """Classify an alignment that alass actually produced.
 
@@ -398,7 +506,7 @@ class AlignmentAnalyzer:
             evaluation.change_points = detect_change_points(movement_pairs)
 
         if len(movement_pairs) < MIN_CUES_FOR_PERCENTILES:
-            evaluation.sync_state = SyncState.UNVERIFIED
+            evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
             evaluation.rejection_reason = RejectionReason.INSUFFICIENT_EVIDENCE
             evaluation.reasons.append(
                 f"only {len(movement_pairs)} cues could be paired; alignment not measurable"
@@ -413,7 +521,7 @@ class AlignmentAnalyzer:
                 synced_cues, reference_cues, tolerance_ms=RESIDUAL_TOLERANCE_MS
             )
             if len(residual_pairs) < MIN_CUES_FOR_PERCENTILES:
-                evaluation.sync_state = SyncState.UNVERIFIED
+                evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
                 evaluation.rejection_reason = RejectionReason.INSUFFICIENT_EVIDENCE
                 evaluation.reasons.append(
                     "too few cues could be compared against the reference to verify"
@@ -439,6 +547,22 @@ class AlignmentAnalyzer:
         mad = evaluation.mad_offset_ms or 0.0
         drift = evaluation.drift_ms_per_minute
 
+        # Separate "re-timable offset" from "different cut" using the measured
+        # structure alongside the timing, so a large offset is not automatically
+        # an error and a small one is not automatically proof.
+        cut = classify_cut(
+            median_offset_ms=evaluation.median_offset_ms,
+            p95_offset_ms=evaluation.p95_offset_ms,
+            mad_offset_ms=evaluation.mad_offset_ms,
+            drift_ms_per_minute=drift,
+            change_points=evaluation.change_points,
+            structural=structural,
+            max_plausible_offset_ms=MAX_PLAUSIBLE_OFFSET_MS,
+            max_p95_ms=MAX_P95_MS_FOR_STABLE,
+        )
+        evaluation.cut_verdict = cut.value
+        evaluation.reasons.append(f"cut classification: {cut.value}")
+
         # Confidence accumulates from measured quality only; an unavailable
         # metric contributes nothing instead of defaulting to "fine".
         components = 0.0
@@ -453,12 +577,18 @@ class AlignmentAnalyzer:
         mad_ok = mad <= MAX_MAD_MS_FOR_STABLE
         drift_ok = drift is None or abs(drift) <= MAX_DRIFT_MS_PER_MINUTE
 
-        if not residual_ok or not mad_ok:
+        if cut is CutVerdict.DIFFERENT_CUT:
+            evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.VERIFIED)
+            evaluation.rejection_reason = RejectionReason.STRUCTURE_MISMATCH
+            evaluation.reasons.append(
+                "cue structure does not correspond to the reference; not the same cut"
+            )
+        elif not residual_ok or not mad_ok:
             # The result is still far from the reference, or the movement was
             # too scattered to be a deliberate re-timing. This is checked first
             # so genuinely untrustworthy output can never be softened into
             # PROBABLE by the drift branch below.
-            evaluation.sync_state = SyncState.UNVERIFIED
+            evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
             evaluation.rejection_reason = RejectionReason.LOW_CONFIDENCE
             detail = (
                 f"residual p95={residual_p95:.0f}ms" if residual_p95 is not None else "residual n/a"
@@ -472,7 +602,7 @@ class AlignmentAnalyzer:
             # not a clean global offset. That can be legitimate (PAL
             # speed-up, different cut), so it lowers confidence rather than
             # triggering rejection.
-            evaluation.sync_state = SyncState.PROBABLE_SYNC
+            evaluation.set_verdict(SyncState.PROBABLE_SYNC, VerificationAvailability.VERIFIED)
             evaluation.sync_confidence = round(min(confidence, 70.0), 1)
             evaluation.verification_confidence = 50.0
             evaluation.reasons.append(
@@ -480,7 +610,7 @@ class AlignmentAnalyzer:
                 f"{MAX_DRIFT_MS_PER_MINUTE:.0f}ms/min; alignment is not a stable global shift"
             )
         else:
-            evaluation.sync_state = SyncState.VERIFIED_RESYNCED
+            evaluation.set_verdict(SyncState.VERIFIED_RESYNCED, VerificationAvailability.VERIFIED)
             evaluation.sync_confidence = round(confidence, 1)
             evaluation.verification_confidence = evaluation.sync_confidence
             if evaluation.change_points:
@@ -512,6 +642,7 @@ class AlignmentAnalyzer:
         reference: str | list[Cue] | None,
         target_fps: float | None,
         reference_fps: float | None,
+        structural: StructuralSimilarity | None = None,
     ) -> SubtitleEvaluation:
         """Classify a subtitle that was never re-timed.
 
@@ -519,8 +650,21 @@ class AlignmentAnalyzer:
         a real reference, and that offset already being negligible.
         """
         reference_cues = self._as_cues(reference)
+        if reference_cues:
+            cut = classify_cut(
+                median_offset_ms=evaluation.median_offset_ms,
+                p95_offset_ms=evaluation.p95_offset_ms,
+                mad_offset_ms=evaluation.mad_offset_ms,
+                drift_ms_per_minute=evaluation.drift_ms_per_minute,
+                change_points=evaluation.change_points,
+                structural=structural,
+                max_plausible_offset_ms=MAX_PLAUSIBLE_OFFSET_MS,
+                max_p95_ms=MAX_P95_MS_FOR_STABLE,
+            )
+            evaluation.cut_verdict = cut.value
+            evaluation.reasons.append(f"cut classification: {cut.value}")
         if not reference_cues:
-            evaluation.sync_state = SyncState.UNVERIFIED
+            evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
             evaluation.rejection_reason = RejectionReason.INSUFFICIENT_EVIDENCE
             evaluation.reasons.append("no reference available; sync state cannot be established")
             return evaluation
@@ -538,11 +682,11 @@ class AlignmentAnalyzer:
                 threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
             )
             if not sanity["ok"]:
-                evaluation.sync_state = SyncState.REJECTED
+                evaluation.set_verdict(SyncState.REJECTED, VerificationAvailability.VERIFIED)
                 evaluation.rejection_reason = RejectionReason.IMPLAUSIBLE_OFFSET
                 evaluation.reasons.append(f"unalignable and {sanity['reason']}")
             else:
-                evaluation.sync_state = SyncState.UNVERIFIED
+                evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
                 evaluation.rejection_reason = RejectionReason.INSUFFICIENT_EVIDENCE
                 evaluation.reasons.append("insufficient paired cues against the reference")
             return evaluation
@@ -550,7 +694,7 @@ class AlignmentAnalyzer:
         median_s = (evaluation.median_offset_ms or 0.0) / 1000.0
         aligned_threshold = ALIGNED_OFFSET_THRESHOLD_S
         if abs(median_s) < aligned_threshold:
-            evaluation.sync_state = SyncState.VERIFIED_SYNCED
+            evaluation.set_verdict(SyncState.VERIFIED_SYNCED, VerificationAvailability.VERIFIED)
             evaluation.sync_confidence = 100.0
             evaluation.verification_confidence = 100.0
             evaluation.reasons.append(
@@ -560,7 +704,11 @@ class AlignmentAnalyzer:
             return evaluation
 
         if abs(evaluation.median_offset_ms or 0.0) > MAX_PLAUSIBLE_OFFSET_MS:
-            evaluation.sync_state = SyncState.REJECTED
+            # Beyond the +/-20s window this is a different cut, not a sync
+            # offset. The gate is deliberately NOT softened by structure: a
+            # matching shape cannot prove a 97s displacement is re-timable, and
+            # loosening it would trade false positives for false negatives.
+            evaluation.set_verdict(SyncState.REJECTED, VerificationAvailability.VERIFIED)
             evaluation.rejection_reason = RejectionReason.IMPLAUSIBLE_OFFSET
             evaluation.reasons.append(
                 f"median offset {median_s:+.2f}s is a different cut, not a sync offset"
@@ -568,7 +716,7 @@ class AlignmentAnalyzer:
             return evaluation
 
         # Measurably offset but never re-timed: a candidate, not a fact.
-        evaluation.sync_state = SyncState.PROBABLE_SYNC
+        evaluation.set_verdict(SyncState.PROBABLE_SYNC, VerificationAvailability.VERIFIED)
         evaluation.sync_confidence = 40.0
         evaluation.verification_confidence = 40.0
         evaluation.reasons.append(
