@@ -60,6 +60,80 @@ class LandmarkQuality(str, Enum):
     INVALID = "invalid"
 
 
+class LandmarkKind(str, Enum):
+    """How much a boundary is worth as a synchronization anchor.
+
+    This is a reliability ranking, not a quality judgement. A micro boundary is
+    not bad: it is real temporal structure, and it may be exactly what
+    distinguishes two cuts. It is simply less stable, so it must not be weighted
+    like a boundary between two long, well-separated scenes.
+    """
+
+    MAJOR = "major"
+    MINOR = "minor"
+    MICRO = "micro"
+
+
+#: Adjacent segments at least this long are treated as scene-scale.
+MAJOR_SEGMENT_MS = 8_000
+#: Segments at least this long, but shorter than MAJOR, are minor.
+MINOR_SEGMENT_MS = 2_500
+
+
+class AudioLandmark(BaseModel):
+    """One boundary, with the evidence for it retained.
+
+    ``strength`` is a ranking measure derived from observable properties:
+    amplitude contrast across the boundary, how long the change persists, and
+    how far it is from its neighbours. It is NOT a probability and must never
+    be read as one.
+    """
+
+    timestamp_ms: int
+    #: Evidence weight in 0..1, derived from amplitude contrast, segment
+    #: duration and neighbour isolation. This is a RANKING measure, not a
+    #: probability: two boundaries with equal strength are not equally likely
+    #: to be correct, and nothing here should be read as a confidence.
+    strength: float = Field(description="Ranking/evidence weight, not a probability.")
+    kind: LandmarkKind
+    contrast_db: float = 0.0
+    preceding_segment_ms: int = 0
+    following_segment_ms: int = 0
+
+
+class ActivityProfile(BaseModel):
+    """A compact, re-analysable record of the activity signal.
+
+    Stored so a later question can be asked of the same file without decoding
+    it again. The envelope is quantised to int8 dB and downsampled, so memory
+    stays bounded on a feature-length file, and no audio is retained.
+    """
+
+    #: Downsampled quantised energy envelope, dB offset by 100.
+    energy_envelope: list[int] = Field(default_factory=list)
+    #: One flag per envelope sample: 1 active, 0 silent.
+    activity_mask: list[int] = Field(default_factory=list)
+    envelope_step_ms: int = 20
+    envelope_max_db: float = 0.0
+    envelope_min_db: float = -100.0
+    boundaries: list[AudioLandmark] = Field(default_factory=list)
+    segments: list[tuple[int, int]] = Field(default_factory=list)
+
+    @property
+    def landmarks(self) -> list[int]:
+        return [b.timestamp_ms for b in self.boundaries]
+
+    def by_kind(self, kind: LandmarkKind) -> list[int]:
+        return [b.timestamp_ms for b in self.boundaries if b.kind is kind]
+
+
+class ExtractionScale(str, Enum):
+    """Which boundary scale a landmark set was extracted at."""
+
+    COARSE = "coarse"
+    FINE = "fine"
+
+
 class AdaptiveAudioConfig(BaseModel):
     """Extraction parameters. Not synchronization thresholds."""
 
@@ -73,6 +147,9 @@ class AdaptiveAudioConfig(BaseModel):
     min_silence_ms: int = 700
     min_activity_ms: int = 400
     min_boundary_separation_ms: int = 1_500
+    #: Experimental fine scale. NOT production evidence, and never a replacement
+    #: for the coarse scale: the coarse set is what protects against noise.
+    fine_min_boundary_ms: int = 500
     baseline_percentile: float = 20.0
     min_landmarks: int = 4
     max_landmarks: int = 400
@@ -98,6 +175,7 @@ class AdaptiveAudioConfig(BaseModel):
             min_boundary_separation_ms=int(
                 _get("ADAPTIVE_AUDIO_MIN_BOUNDARY_SEPARATION_MS", 1_500)
             ),
+            fine_min_boundary_ms=int(_get("ADAPTIVE_AUDIO_FINE_MIN_BOUNDARY_MS", 500)),
             baseline_percentile=float(_get("ADAPTIVE_AUDIO_BASELINE_PERCENTILE", 20.0)),
             min_landmarks=int(_get("ADAPTIVE_AUDIO_MIN_LANDMARKS", 4)),
             max_landmarks=int(_get("ADAPTIVE_AUDIO_MAX_LANDMARKS", 400)),
@@ -128,6 +206,13 @@ class AdaptiveAudioProfile(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     profile_version: int = ADAPTIVE_PROFILE_VERSION
     extraction_ms: float | None = None
+    scale: ExtractionScale = ExtractionScale.COARSE
+    #: Boundaries with salience and strength, when extraction was run with
+    #: evidence retention enabled.
+    boundary_detail: list[AudioLandmark] = Field(default_factory=list)
+    #: Compact record of the activity signal, so the same file need not be
+    #: decoded again to ask a different question of it.
+    activity: ActivityProfile | None = None
 
     @property
     def usable(self) -> bool:
@@ -499,6 +584,139 @@ def _quality(
     return LandmarkQuality.WEAK
 
 
+def _classify_segments(
+    segments: list[tuple[int, int]],
+) -> list[LandmarkKind]:
+    """Assign a salience to each segment from its duration alone.
+
+    Duration is the observable that survives a re-encode and a level change,
+    so it is what salience is built from. Amplitude is not: a quiet scene and
+    a loud one can both be a real cut boundary.
+    """
+    kinds: list[LandmarkKind] = []
+    for start, end in segments:
+        length = end - start
+        if length >= MAJOR_SEGMENT_MS:
+            kinds.append(LandmarkKind.MAJOR)
+        elif length >= MINOR_SEGMENT_MS:
+            kinds.append(LandmarkKind.MINOR)
+        else:
+            kinds.append(LandmarkKind.MICRO)
+    return kinds
+
+
+def _boundary_strength(
+    *,
+    contrast_db: float,
+    preceding_ms: int,
+    following_ms: int,
+    neighbour_gap_ms: int,
+) -> float:
+    """A ranking measure for one boundary, in 0..1.
+
+    Combines amplitude contrast across the boundary, how much structure the two
+    adjacent segments represent, and how far the boundary sits from its
+    neighbours. This is evidence weight, not probability: two boundaries with
+    the same strength are not equally likely to be correct.
+    """
+    contrast = min(1.0, max(0.0, contrast_db / 18.0))
+    # A boundary between two long segments is more likely to be a scene change
+    # than a boundary inside a rapid exchange.
+    scale = min(1.0, ((preceding_ms + following_ms) / 2.0) / max(1, MAJOR_SEGMENT_MS))
+    # Boundaries crowded together are less individually reliable.
+    isolation = min(1.0, neighbour_gap_ms / 2_000.0)
+    return round(0.45 * contrast + 0.40 * scale + 0.15 * isolation, 4)
+
+
+def _build_activity_profile(
+    frames: list[tuple[int, float]],
+    smoothed: list[float],
+    mask: list[bool],
+    segments: list[tuple[int, int]],
+    config: AdaptiveAudioConfig,
+    duration_ms: int,
+) -> ActivityProfile:
+    """Retain a compact, re-analysable record of the activity signal.
+
+    The envelope is downsampled to `envelope_step_ms` and quantised, so a
+    feature-length file costs a few hundred kilobytes rather than gigabytes, and
+    no audio is kept.
+    """
+    step_ms = 20
+    per_step = max(1, int(step_ms * DECODE_RATE / 1000))
+    envelope: list[int] = []
+    activity: list[int] = []
+    peak = -120.0
+    trough = 0.0
+    for index in range(0, len(smoothed), per_step):
+        chunk = smoothed[index : index + per_step]
+        if not chunk:
+            continue
+        value = max(chunk)
+        peak = max(peak, value)
+        trough = min(trough, value)
+        envelope.append(int(round(max(-100.0, min(0.0, value)) + 100.0)))
+        activity.append(1 if any(mask[index : index + per_step]) else 0)
+
+    kinds = _classify_segments(segments)
+    boundaries: list[AudioLandmark] = []
+    frame_index = _frame_times(frames)
+
+    def _level_at(time_ms: int) -> float:
+        position = _frame_index_at(frame_index, time_ms)
+        if position is None:
+            return -120.0
+        return smoothed[position]
+
+    for index, (start, end) in enumerate(segments):
+        before = _level_at(max(0, start - 200))
+        after = _level_at(min(duration_ms, end + 200))
+        contrast = abs(after - before)
+        previous_ms = start - segments[index - 1][0] if index > 0 else start
+        next_ms = (
+            segments[index + 1][0] - end
+            if index + 1 < len(segments)
+            else max(0, duration_ms - end)
+        )
+        strength = _boundary_strength(
+            contrast_db=contrast,
+            preceding_ms=previous_ms,
+            following_ms=end - start,
+            neighbour_gap_ms=min(previous_ms, next_ms),
+        )
+        kind = kinds[index] if index < len(kinds) else LandmarkKind.MINOR
+        boundaries.append(
+            AudioLandmark(
+                timestamp_ms=start,
+                strength=strength,
+                kind=kind,
+                contrast_db=round(contrast, 3),
+                preceding_segment_ms=previous_ms,
+                following_segment_ms=end - start,
+            )
+        )
+        boundaries.append(
+            AudioLandmark(
+                timestamp_ms=end,
+                strength=strength,
+                kind=kind,
+                contrast_db=round(contrast, 3),
+                preceding_segment_ms=end - start,
+                following_segment_ms=next_ms,
+            )
+        )
+    boundaries.sort(key=lambda b: b.timestamp_ms)
+    return ActivityProfile(
+        energy_envelope=envelope,
+        activity_mask=activity,
+        envelope_step_ms=step_ms,
+        envelope_max_db=round(peak, 3),
+        envelope_min_db=round(trough, 3),
+        boundaries=boundaries,
+        segments=list(segments),
+    )
+
+
 def detect_activity_adaptive(
     path: str | Path,
     *,
@@ -572,6 +790,10 @@ def detect_activity_adaptive(
         edges.append(end)
     profile.landmarks = sorted(set(edges))
 
+    profile.activity = _build_activity_profile(
+        frames, smoothed, mask, merged, config, profile.duration_ms
+    )
+    profile.boundary_detail = list(profile.activity.boundaries)
     profile.quality = _quality(profile, config)
     profile.extraction_ms = round((time.monotonic() - started) * 1000, 3)
     return profile
@@ -627,3 +849,99 @@ def _frame_index_at(frame_times: list[int], time_ms: int) -> int | None:
         else:
             high = mid - 1
     return min(max(0, high), len(frame_times) - 1)
+
+
+def detect_activity_multiscale(
+    path: str | Path,
+    *,
+    stream_index: int,
+    config: AdaptiveAudioConfig | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    duration_ms: int | None = None,
+) -> dict[ExtractionScale, AdaptiveAudioProfile]:
+    """Extract the coarse and fine landmark sets from one decode.
+
+    The fine set is EXPERIMENTAL. It exists so the task-level question can be
+    asked offline: does extra short-timescale structure actually improve cut
+    detection and reduce correlation ambiguity, or does it only add landmarks?
+    It is not production evidence and must not be promoted on the strength of
+    landmark counts.
+
+    The audio is decoded once and both scales are derived from the same frames,
+    so multi-scale costs a second classification pass, not a second decode.
+    """
+    import time
+
+    started = time.monotonic()
+    if config is None:
+        from app.config import settings
+
+        config = AdaptiveAudioConfig.from_settings(settings)
+
+    samples, count = _decode_mono(Path(path), stream_index, timeout)
+    if not samples:
+        empty = AdaptiveAudioProfile(quality=LandmarkQuality.INSUFFICIENT)
+        empty.reasons.append("audio could not be decoded; abstaining")
+        return {ExtractionScale.COARSE: empty, ExtractionScale.FINE: empty.model_copy(deep=True)}
+
+    total_ms = int(count * 1000 / DECODE_RATE)
+    frames = _energy_db(
+        samples,
+        int(config.window_ms * DECODE_RATE / 1000),
+        int(config.hop_ms * DECODE_RATE / 1000),
+    )
+    if not frames:
+        empty = AdaptiveAudioProfile(quality=LandmarkQuality.INSUFFICIENT)
+        return {ExtractionScale.COARSE: empty, ExtractionScale.FINE: empty.model_copy(deep=True)}
+
+    energy = [value for _time, value in frames]
+    baseline, enter_db, exit_db, reasons = derive_threshold(energy, config)
+    smoothing_frames = max(1, int(config.smoothing_ms / max(1, config.hop_ms)))
+    smoothed = _smooth(energy, smoothing_frames)
+    mask = _classify_activity(smoothed, enter_db, exit_db)
+    activity_ms = _intervals_from_mask(frames, mask, duration_ms or total_ms)
+    silence_ms = _invert_intervals(activity_ms, duration_ms or total_ms)
+    frame_times = _frame_times(frames)
+
+    out: dict[ExtractionScale, AdaptiveAudioProfile] = {}
+    for scale, separation, min_activity in (
+        (ExtractionScale.COARSE, config.min_boundary_separation_ms, config.min_activity_ms),
+        (ExtractionScale.FINE, config.fine_min_boundary_ms, config.min_silence_ms),
+    ):
+        variant = config.model_copy(
+            update={
+                "min_boundary_separation_ms": separation,
+                "min_activity_ms": min_activity,
+            }
+        )
+        combined, more = _apply_minimums(activity_ms, silence_ms, variant)
+        kept_activity, _kept_silence = _split_by_kind(combined, frame_times, mask)
+        merged = _merge_close(kept_activity, separation)
+        profile = AdaptiveAudioProfile(
+            landmarks=[],
+            duration_ms=duration_ms or total_ms,
+            baseline_db=baseline,
+            enter_threshold_db=enter_db,
+            exit_threshold_db=exit_db,
+            split_gap_db=round(_lower_mode_baseline(energy)[2], 3),
+            activity_intervals=merged,
+            segment_count=len(merged),
+            frame_count=len(frames),
+            activity_ratio=round(
+                sum(end - start for start, end in merged) / max(1, duration_ms or total_ms), 4
+            ),
+            scale=scale,
+        )
+        profile.reasons.extend(reasons)
+        profile.reasons.extend(more)
+        if scale is ExtractionScale.FINE:
+            profile.reasons.append("fine scale is experimental and not production evidence")
+        profile.activity = _build_activity_profile(
+            frames, smoothed, mask, merged, variant, profile.duration_ms
+        )
+        profile.boundary_detail = list(profile.activity.boundaries)
+        profile.landmarks = sorted(set(profile.activity.landmarks))
+        profile.quality = _quality(profile, variant)
+        profile.extraction_ms = round((time.monotonic() - started) * 1000, 3)
+        out[scale] = profile
+    return out

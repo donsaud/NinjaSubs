@@ -1,0 +1,963 @@
+{
+  "cases": [
+    {
+      "case": "same_cut",
+      "coarse_landmarks": 24,
+      "coarse_quality": "strong",
+      "envelope_samples": 87,
+      "expected": "match",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": null,
+          "best_peak": 0.9167,
+          "best_shift": 0,
+          "clarity": "ambiguous",
+          "error": "AMBIGUOUS_SIGNAL",
+          "landmarks": 24,
+          "peak_ratio": 0.8182,
+          "region_offsets": [
+            -1000,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.75,
+          "verdict": "abstain"
+        },
+        "multi_scale": {
+          "audio_similarity": null,
+          "best_peak": 0.9167,
+          "best_shift": 0,
+          "clarity": "ambiguous",
+          "error": "AMBIGUOUS_SIGNAL",
+          "landmarks": 24,
+          "peak_ratio": 0.8182,
+          "region_offsets": [
+            -1000,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.75,
+          "verdict": "abstain"
+        },
+        "single_scale": {
+          "audio_similarity": null,
+          "best_peak": 0.9167,
+          "best_shift": 0,
+          "clarity": "ambiguous",
+          "error": "AMBIGUOUS_SIGNAL",
+          "landmarks": 24,
+          "peak_ratio": 0.8182,
+          "region_offsets": [
+            -1000,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.75,
+          "verdict": "abstain"
+        }
+      },
+      "salience": {
+        "major": 24,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 0
+    },
+    {
+      "case": "global_offset",
+      "coarse_landmarks": 24,
+      "coarse_quality": "strong",
+      "envelope_samples": 87,
+      "expected": "match",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.9091,
+          "best_peak": 0.9167,
+          "best_shift": -38000,
+          "clarity": "clear",
+          "error": "WRONG_GLOBAL_SHIFT",
+          "landmarks": 24,
+          "peak_ratio": 0.7273,
+          "region_offsets": [
+            -38000,
+            -38025,
+            -38025,
+            -38025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.6667,
+          "verdict": "match"
+        },
+        "multi_scale": {
+          "audio_similarity": 0.9091,
+          "best_peak": 0.9167,
+          "best_shift": -38000,
+          "clarity": "clear",
+          "error": "WRONG_GLOBAL_SHIFT",
+          "landmarks": 24,
+          "peak_ratio": 0.7273,
+          "region_offsets": [
+            -38000,
+            -38025,
+            -38025,
+            -38025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.6667,
+          "verdict": "match"
+        },
+        "single_scale": {
+          "audio_similarity": 0.9091,
+          "best_peak": 0.9167,
+          "best_shift": -38000,
+          "clarity": "clear",
+          "error": "WRONG_GLOBAL_SHIFT",
+          "landmarks": 24,
+          "peak_ratio": 0.7273,
+          "region_offsets": [
+            -38000,
+            -38025,
+            -38025,
+            -38025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.6667,
+          "verdict": "match"
+        }
+      },
+      "salience": {
+        "major": 24,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 37000
+    },
+    {
+      "case": "fps_drift",
+      "coarse_landmarks": 24,
+      "coarse_quality": "strong",
+      "envelope_samples": 87,
+      "expected": "match",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": null,
+          "best_peak": 0.75,
+          "best_shift": 0,
+          "clarity": "ambiguous",
+          "error": "AMBIGUOUS_SIGNAL",
+          "landmarks": 24,
+          "peak_ratio": 0.8889,
+          "region_offsets": [
+            82350,
+            59040,
+            91725,
+            59230
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.6667,
+          "verdict": "abstain"
+        },
+        "multi_scale": {
+          "audio_similarity": null,
+          "best_peak": 0.75,
+          "best_shift": 0,
+          "clarity": "ambiguous",
+          "error": "AMBIGUOUS_SIGNAL",
+          "landmarks": 24,
+          "peak_ratio": 0.8889,
+          "region_offsets": [
+            82350,
+            59040,
+            91725,
+            59230
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.6667,
+          "verdict": "abstain"
+        },
+        "single_scale": {
+          "audio_similarity": null,
+          "best_peak": 0.75,
+          "best_shift": 0,
+          "clarity": "ambiguous",
+          "error": "AMBIGUOUS_SIGNAL",
+          "landmarks": 24,
+          "peak_ratio": 0.8889,
+          "region_offsets": [
+            82350,
+            59040,
+            91725,
+            59230
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.6667,
+          "verdict": "abstain"
+        }
+      },
+      "salience": {
+        "major": 24,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": -30
+    },
+    {
+      "case": "inserted_segment",
+      "coarse_landmarks": 22,
+      "coarse_quality": "strong",
+      "envelope_samples": 75,
+      "expected": "mismatch",
+      "fine_landmarks": 22,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.6,
+          "best_peak": 0.6364,
+          "best_shift": -800,
+          "clarity": "clear",
+          "error": null,
+          "landmarks": 20,
+          "peak_ratio": 0.7142,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": 0.4545,
+          "verdict": "mismatch"
+        },
+        "multi_scale": {
+          "audio_similarity": 0.6,
+          "best_peak": 0.6364,
+          "best_shift": -800,
+          "clarity": "clear",
+          "error": null,
+          "landmarks": 22,
+          "peak_ratio": 0.8572,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5455,
+          "verdict": "mismatch"
+        },
+        "single_scale": {
+          "audio_similarity": 0.6,
+          "best_peak": 0.6364,
+          "best_shift": -800,
+          "clarity": "clear",
+          "error": null,
+          "landmarks": 22,
+          "peak_ratio": 0.8572,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5455,
+          "verdict": "mismatch"
+        }
+      },
+      "salience": {
+        "major": 20,
+        "micro": 0,
+        "minor": 2
+      },
+      "true_shift_ms": 0
+    },
+    {
+      "case": "different_intro",
+      "coarse_landmarks": 24,
+      "coarse_quality": "strong",
+      "envelope_samples": 74,
+      "expected": "mismatch",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.8182,
+          "best_peak": 0.8333,
+          "best_shift": -1025,
+          "clarity": "clear",
+          "error": null,
+          "landmarks": 24,
+          "peak_ratio": 0.7,
+          "region_offsets": [
+            -2025,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5833,
+          "verdict": "mismatch"
+        },
+        "multi_scale": {
+          "audio_similarity": 0.8182,
+          "best_peak": 0.8333,
+          "best_shift": -1025,
+          "clarity": "clear",
+          "error": null,
+          "landmarks": 24,
+          "peak_ratio": 0.7,
+          "region_offsets": [
+            -2025,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5833,
+          "verdict": "mismatch"
+        },
+        "single_scale": {
+          "audio_similarity": 0.8182,
+          "best_peak": 0.8333,
+          "best_shift": -1025,
+          "clarity": "clear",
+          "error": null,
+          "landmarks": 24,
+          "peak_ratio": 0.7,
+          "region_offsets": [
+            -2025,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5833,
+          "verdict": "mismatch"
+        }
+      },
+      "salience": {
+        "major": 24,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 12000
+    },
+    {
+      "case": "rapid_dialogue_same_cut",
+      "coarse_landmarks": 2,
+      "coarse_quality": "weak",
+      "envelope_samples": 17,
+      "expected": "match",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": null,
+          "best_peak": null,
+          "best_shift": 0,
+          "clarity": "no_signal",
+          "error": "NO_SIGNAL",
+          "landmarks": 2,
+          "peak_ratio": null,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": null,
+          "verdict": "abstain"
+        },
+        "multi_scale": {
+          "audio_similarity": null,
+          "best_peak": 1.0,
+          "best_shift": 0,
+          "clarity": "ambiguous",
+          "error": "AMBIGUOUS_SIGNAL",
+          "landmarks": 24,
+          "peak_ratio": 0.9167,
+          "region_offsets": [
+            3000,
+            3120,
+            3300,
+            3020
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.9167,
+          "verdict": "abstain"
+        },
+        "single_scale": {
+          "audio_similarity": null,
+          "best_peak": null,
+          "best_shift": 0,
+          "clarity": "no_signal",
+          "error": "NO_SIGNAL",
+          "landmarks": 2,
+          "peak_ratio": null,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": null,
+          "verdict": "abstain"
+        }
+      },
+      "salience": {
+        "major": 2,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 0
+    },
+    {
+      "case": "dense_micro_same_cut",
+      "coarse_landmarks": 8,
+      "coarse_quality": "strong",
+      "envelope_samples": 26,
+      "expected": "match",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.4545,
+          "best_peak": 0.4167,
+          "best_shift": 22275,
+          "clarity": "clear",
+          "error": "SAME_CUT_FALSE_REJECTED",
+          "landmarks": 8,
+          "peak_ratio": 0.7999,
+          "region_offsets": [
+            22275,
+            47205,
+            21875,
+            15200
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.3333,
+          "verdict": "mismatch"
+        },
+        "multi_scale": {
+          "audio_similarity": null,
+          "best_peak": 1.0,
+          "best_shift": 0,
+          "clarity": "ambiguous",
+          "error": "AMBIGUOUS_SIGNAL",
+          "landmarks": 24,
+          "peak_ratio": 1.0,
+          "region_offsets": [
+            5000,
+            5715,
+            5305,
+            5105
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 1.0,
+          "verdict": "abstain"
+        },
+        "single_scale": {
+          "audio_similarity": 0.4545,
+          "best_peak": 0.4167,
+          "best_shift": 22275,
+          "clarity": "clear",
+          "error": "SAME_CUT_FALSE_REJECTED",
+          "landmarks": 8,
+          "peak_ratio": 0.7999,
+          "region_offsets": [
+            22275,
+            47205,
+            21875,
+            15200
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.3333,
+          "verdict": "mismatch"
+        }
+      },
+      "salience": {
+        "major": 8,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 0
+    },
+    {
+      "case": "near_continuous_same_cut",
+      "coarse_landmarks": 2,
+      "coarse_quality": "weak",
+      "envelope_samples": 81,
+      "expected": "match",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": true,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": null,
+          "best_peak": null,
+          "best_shift": 0,
+          "clarity": "no_signal",
+          "error": "NO_SIGNAL",
+          "landmarks": 2,
+          "peak_ratio": null,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": null,
+          "verdict": "abstain"
+        },
+        "multi_scale": {
+          "audio_similarity": null,
+          "best_peak": 0.9167,
+          "best_shift": 0,
+          "clarity": "ambiguous",
+          "error": "AMBIGUOUS_SIGNAL",
+          "landmarks": 24,
+          "peak_ratio": 0.909,
+          "region_offsets": [
+            23413,
+            -400,
+            -1110,
+            -280
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.8333,
+          "verdict": "abstain"
+        },
+        "single_scale": {
+          "audio_similarity": null,
+          "best_peak": null,
+          "best_shift": 0,
+          "clarity": "no_signal",
+          "error": "NO_SIGNAL",
+          "landmarks": 2,
+          "peak_ratio": null,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": null,
+          "verdict": "abstain"
+        }
+      },
+      "salience": {
+        "major": 2,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": -413
+    },
+    {
+      "case": "short_segment_cut",
+      "coarse_landmarks": 22,
+      "coarse_quality": "strong",
+      "envelope_samples": 75,
+      "expected": "mismatch",
+      "fine_landmarks": 22,
+      "fine_quality": "strong",
+      "hold_out": true,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.7,
+          "best_peak": 0.7273,
+          "best_shift": -6300,
+          "clarity": "clear",
+          "error": "WRONG_CUT_MISSED",
+          "landmarks": 20,
+          "peak_ratio": 0.6249,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": 0.4545,
+          "verdict": "match"
+        },
+        "multi_scale": {
+          "audio_similarity": 0.7,
+          "best_peak": 0.7273,
+          "best_shift": -1000,
+          "clarity": "clear",
+          "error": "WRONG_CUT_MISSED",
+          "landmarks": 22,
+          "peak_ratio": 0.6249,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": 0.4545,
+          "verdict": "match"
+        },
+        "single_scale": {
+          "audio_similarity": 0.7,
+          "best_peak": 0.7273,
+          "best_shift": -1000,
+          "clarity": "clear",
+          "error": "WRONG_CUT_MISSED",
+          "landmarks": 22,
+          "peak_ratio": 0.6249,
+          "region_offsets": [],
+          "regional_consistency": "unknown",
+          "second_peak": 0.4545,
+          "verdict": "match"
+        }
+      },
+      "salience": {
+        "major": 20,
+        "micro": 0,
+        "minor": 2
+      },
+      "true_shift_ms": 0
+    },
+    {
+      "case": "major_segment_cut",
+      "coarse_landmarks": 24,
+      "coarse_quality": "strong",
+      "envelope_samples": 74,
+      "expected": "mismatch",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.7273,
+          "best_peak": 0.6667,
+          "best_shift": 8475,
+          "clarity": "clear",
+          "error": "WRONG_CUT_MISSED",
+          "landmarks": 24,
+          "peak_ratio": 0.8749,
+          "region_offsets": [
+            7000,
+            -15000,
+            41975,
+            -19025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5833,
+          "verdict": "match"
+        },
+        "multi_scale": {
+          "audio_similarity": 0.7273,
+          "best_peak": 0.6667,
+          "best_shift": 8475,
+          "clarity": "clear",
+          "error": "WRONG_CUT_MISSED",
+          "landmarks": 24,
+          "peak_ratio": 0.8749,
+          "region_offsets": [
+            7000,
+            -15000,
+            41975,
+            -19025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5833,
+          "verdict": "match"
+        },
+        "single_scale": {
+          "audio_similarity": 0.7273,
+          "best_peak": 0.6667,
+          "best_shift": 8475,
+          "clarity": "clear",
+          "error": "WRONG_CUT_MISSED",
+          "landmarks": 24,
+          "peak_ratio": 0.8749,
+          "region_offsets": [
+            7000,
+            -15000,
+            41975,
+            -19025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5833,
+          "verdict": "match"
+        }
+      },
+      "salience": {
+        "major": 24,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 0
+    },
+    {
+      "case": "extreme_offset",
+      "coarse_landmarks": 24,
+      "coarse_quality": "strong",
+      "envelope_samples": 87,
+      "expected": "match",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.9091,
+          "best_peak": 0.9167,
+          "best_shift": -601000,
+          "clarity": "clear",
+          "error": "WRONG_GLOBAL_SHIFT",
+          "landmarks": 24,
+          "peak_ratio": 0.1818,
+          "region_offsets": [
+            -601000,
+            -601025,
+            -601025,
+            -601025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.1667,
+          "verdict": "match"
+        },
+        "multi_scale": {
+          "audio_similarity": 0.9091,
+          "best_peak": 0.9167,
+          "best_shift": -601000,
+          "clarity": "clear",
+          "error": "WRONG_GLOBAL_SHIFT",
+          "landmarks": 24,
+          "peak_ratio": 0.1818,
+          "region_offsets": [
+            -601000,
+            -601025,
+            -601025,
+            -601025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.1667,
+          "verdict": "match"
+        },
+        "single_scale": {
+          "audio_similarity": 0.9091,
+          "best_peak": 0.9167,
+          "best_shift": -601000,
+          "clarity": "clear",
+          "error": "WRONG_GLOBAL_SHIFT",
+          "landmarks": 24,
+          "peak_ratio": 0.1818,
+          "region_offsets": [
+            -601000,
+            -601025,
+            -601025,
+            -601025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.1667,
+          "verdict": "match"
+        }
+      },
+      "salience": {
+        "major": 24,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 600000
+    },
+    {
+      "case": "similar_timing_models",
+      "coarse_landmarks": 24,
+      "coarse_quality": "strong",
+      "envelope_samples": 87,
+      "expected": "match",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": true,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.9091,
+          "best_peak": 0.9167,
+          "best_shift": -1000,
+          "clarity": "clear",
+          "error": null,
+          "landmarks": 24,
+          "peak_ratio": 0.7273,
+          "region_offsets": [
+            -1000,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.6667,
+          "verdict": "match"
+        },
+        "multi_scale": {
+          "audio_similarity": 0.9091,
+          "best_peak": 0.9167,
+          "best_shift": -1000,
+          "clarity": "clear",
+          "error": null,
+          "landmarks": 24,
+          "peak_ratio": 0.7273,
+          "region_offsets": [
+            -1000,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.6667,
+          "verdict": "match"
+        },
+        "single_scale": {
+          "audio_similarity": 0.9091,
+          "best_peak": 0.9167,
+          "best_shift": -1000,
+          "clarity": "clear",
+          "error": null,
+          "landmarks": 24,
+          "peak_ratio": 0.7273,
+          "region_offsets": [
+            -1000,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.6667,
+          "verdict": "match"
+        }
+      },
+      "salience": {
+        "major": 24,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 0
+    },
+    {
+      "case": "fine_strong_coarse_wrong",
+      "coarse_landmarks": 24,
+      "coarse_quality": "strong",
+      "envelope_samples": 87,
+      "expected": "mismatch",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": false,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.6364,
+          "best_peak": 0.5833,
+          "best_shift": -1025,
+          "clarity": "clear",
+          "error": "WRONG_CUT_MISSED",
+          "landmarks": 24,
+          "peak_ratio": 0.7144,
+          "region_offsets": [
+            -25000,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.4167,
+          "verdict": "match"
+        },
+        "multi_scale": {
+          "audio_similarity": 0.6364,
+          "best_peak": 0.5833,
+          "best_shift": -1025,
+          "clarity": "clear",
+          "error": "WRONG_CUT_MISSED",
+          "landmarks": 24,
+          "peak_ratio": 0.7144,
+          "region_offsets": [
+            -25000,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.4167,
+          "verdict": "match"
+        },
+        "single_scale": {
+          "audio_similarity": 0.6364,
+          "best_peak": 0.5833,
+          "best_shift": -1025,
+          "clarity": "clear",
+          "error": "WRONG_CUT_MISSED",
+          "landmarks": 24,
+          "peak_ratio": 0.7144,
+          "region_offsets": [
+            -25000,
+            -1025,
+            -1025,
+            -1025
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.4167,
+          "verdict": "match"
+        }
+      },
+      "salience": {
+        "major": 24,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 24000
+    },
+    {
+      "case": "coarse_strong_fine_noisy",
+      "coarse_landmarks": 24,
+      "coarse_quality": "strong",
+      "envelope_samples": 87,
+      "expected": "match",
+      "fine_landmarks": 24,
+      "fine_quality": "strong",
+      "hold_out": true,
+      "results": {
+        "coarse_only_major": {
+          "audio_similarity": 0.8182,
+          "best_peak": 0.8333,
+          "best_shift": -5000,
+          "clarity": "clear",
+          "error": "SAME_CUT_FALSE_REJECTED",
+          "landmarks": 24,
+          "peak_ratio": 0.7,
+          "region_offsets": [
+            -1025,
+            -5100,
+            -5200,
+            -5400
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5833,
+          "verdict": "mismatch"
+        },
+        "multi_scale": {
+          "audio_similarity": 0.8182,
+          "best_peak": 0.8333,
+          "best_shift": -5000,
+          "clarity": "clear",
+          "error": "SAME_CUT_FALSE_REJECTED",
+          "landmarks": 24,
+          "peak_ratio": 0.7,
+          "region_offsets": [
+            -1025,
+            -5100,
+            -5200,
+            -5400
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5833,
+          "verdict": "mismatch"
+        },
+        "single_scale": {
+          "audio_similarity": 0.8182,
+          "best_peak": 0.8333,
+          "best_shift": -5000,
+          "clarity": "clear",
+          "error": "SAME_CUT_FALSE_REJECTED",
+          "landmarks": 24,
+          "peak_ratio": 0.7,
+          "region_offsets": [
+            -1025,
+            -5100,
+            -5200,
+            -5400
+          ],
+          "regional_consistency": "unknown",
+          "second_peak": 0.5833,
+          "verdict": "mismatch"
+        }
+      },
+      "salience": {
+        "major": 24,
+        "micro": 0,
+        "minor": 0
+      },
+      "true_shift_ms": 0
+    }
+  ],
+  "note": "TASK-LEVEL benchmark. Scored by the decision each case produces, not by how many landmarks were recovered. Synthetic audio; no real programme material has been measured. Hold-out cases are reported separately and were not used to choose any parameter."
+}
