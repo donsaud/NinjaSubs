@@ -1,9 +1,9 @@
 """Subsource official REST API v1 provider integration."""
 
-import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
@@ -347,6 +347,7 @@ class SubSourceService:
         year: int | None = None,
         release_info: str | None = None,
         exclude_hi: bool = False,
+        languages: list[str] | tuple[str, ...] | None = None,
         **kwargs,
     ) -> list:
         try:
@@ -504,15 +505,20 @@ class SubSourceService:
             logger.info(f"[SubSource Response] Total candidate items extracted: {len(items)}")
 
             # Step 3: Filter & Parse results locally by season, episode, and language
-            lang_lower = language.lower()
-            lang_full = get_subsource_lang_name(language).lower()
+            target_langs_list = list(languages) if languages else [language]
+            target_lang_tokens = set()
+            for tl in target_langs_list:
+                tl_clean = str(tl).strip().lower()
+                target_lang_tokens.add(tl_clean)
+                target_lang_tokens.add(get_subsource_lang_name(tl_clean).lower())
+
             raw_items = [
                 it
                 for it in items
                 if isinstance(it, dict)
-                and (
-                    lang_lower in str(it.get("lang") or it.get("language") or "").lower()
-                    or lang_full in str(it.get("lang") or it.get("language") or "").lower()
+                and any(
+                    tok in str(it.get("lang") or it.get("language") or "").lower()
+                    for tok in target_lang_tokens
                 )
             ]
 
@@ -598,6 +604,35 @@ class SubSourceService:
             return []
 
 
+class SubsourceCircuitBreaker:
+    """Process-wide cooldown after Subsource rate-limits (HTTP 429)."""
+
+    def __init__(self, cooldown: float = 60.0) -> None:
+        self.cooldown = cooldown
+        self._open_until = 0.0
+
+    def trip(self, cooldown: float | None = None) -> None:
+        duration = cooldown if cooldown is not None else self.cooldown
+        self._open_until = time.monotonic() + duration
+        logger.warning(
+            "[SubSource] Circuit breaker tripped (HTTP 429); skipping SubSource for %.0fs",
+            duration,
+        )
+
+    def is_open(self) -> bool:
+        return time.monotonic() < self._open_until
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self._open_until - time.monotonic())
+
+    def reset(self) -> None:
+        self._open_until = 0.0
+
+
+SUBSOURCE_BREAKER = SubsourceCircuitBreaker()
+
+
 class SubsourceProvider(BaseSubtitleProvider):
     """Subtitle provider implementation for Subsource.net official REST API v1."""
 
@@ -605,6 +640,9 @@ class SubsourceProvider(BaseSubtitleProvider):
     BASE_URL = "https://api.subsource.net/api/v1"
     API_SUBTITLES_PATH = "/subtitles"
     API_DOWNLOAD_PATH = "/subtitles/{subtitle_id}/download"
+
+    def is_breaker_open(self) -> bool:
+        return SUBSOURCE_BREAKER.is_open()
 
     def _get_headers(self, api_key: str | None = None) -> dict[str, str]:
         headers = {
@@ -667,43 +705,20 @@ class SubsourceProvider(BaseSubtitleProvider):
         service = SubSourceService(effective_key)
         target_languages = languages if languages else ["ara"]
 
-        if len(target_languages) == 1:
-            lang_arg = get_subsource_lang_name(target_languages[0])
-            raw_subs = await service.get_subtitles(
-                client=self.client,
-                media_type=media_type,
-                imdb_id=clean_imdb_id,
-                season=season,
-                episode=episode,
-                language=lang_arg,
-                title=title,
-                year=year,
-                release_info=target_filename,
-                exclude_hi=exclude_hi,
-            )
-        else:
-            tasks = [
-                service.get_subtitles(
-                    client=self.client,
-                    media_type=media_type,
-                    imdb_id=clean_imdb_id,
-                    season=season,
-                    episode=episode,
-                    language=get_subsource_lang_name(lang),
-                    title=title,
-                    year=year,
-                    release_info=target_filename,
-                    exclude_hi=exclude_hi,
-                )
-                for lang in target_languages
-            ]
-            lang_results = await asyncio.gather(*tasks, return_exceptions=True)
-            raw_subs = []
-            for r in lang_results:
-                if isinstance(r, list):
-                    raw_subs.extend(r)
-                elif isinstance(r, Exception):
-                    logger.warning(f"[SubSource] Language fetch task failed: {r}")
+        lang_names = [get_subsource_lang_name(lang) for lang in target_languages]
+        raw_subs = await service.get_subtitles(
+            client=self.client,
+            media_type=media_type,
+            imdb_id=clean_imdb_id,
+            season=season,
+            episode=episode,
+            language=lang_names[0] if len(lang_names) == 1 else "Arabic",
+            languages=lang_names,
+            title=title,
+            year=year,
+            release_info=target_filename,
+            exclude_hi=exclude_hi,
+        )
 
         results: list[SubtitleRelease] = []
         for item in raw_subs:
@@ -775,6 +790,14 @@ class SubsourceProvider(BaseSubtitleProvider):
         Download subtitle archive (.zip or .srt) from Subsource using X-API-Key.
         Handles both direct binary streams and JSON redirects with downloadUrl.
         """
+        if SUBSOURCE_BREAKER.is_open():
+            logger.info(
+                "[SubSource Download] Circuit breaker open (%.0fs remaining); skipping download for %s",
+                SUBSOURCE_BREAKER.remaining,
+                download_ref,
+            )
+            return None
+
         effective_key = (api_key or settings.SUBSOURCE_API_KEY or "").strip()
         headers = self._get_headers(effective_key)
         headers["Accept"] = "*/*"
@@ -823,6 +846,7 @@ class SubsourceProvider(BaseSubtitleProvider):
                 return None
             if resp.status_code == 429:
                 logger.warning("Subsource download rate limit reached (HTTP 429).")
+                SUBSOURCE_BREAKER.trip()
                 return None
             logger.warning(f"Subsource download returned HTTP {resp.status_code} for {url}")
             return None

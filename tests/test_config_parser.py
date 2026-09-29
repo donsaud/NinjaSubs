@@ -205,8 +205,25 @@ def test_opensubtitles_language_mapping():
 
 
 def test_auto_sync_config_roundtrip_and_backward_compat():
-    """auto_sync defaults to False, round-trips, and is absent-safe for old URLs."""
-    assert parse_user_config(encode_user_config()).auto_sync is False
+    """auto_sync defaults to True, round-trips, and is absent-safe for old URLs."""
+    assert parse_user_config(encode_user_config()).auto_sync is True
+    assert parse_user_config(encode_user_config(auto_sync=False)).auto_sync is False
     assert parse_user_config(encode_user_config(auto_sync=True)).auto_sync is True
-    # Legacy/absent value defaults to False.
-    assert parse_user_config("subdl=k1").auto_sync is False
+    # Legacy/absent value defaults to True.
+    assert parse_user_config("subdl=k1").auto_sync is True
+
+
+def test_stream_addon_url_config_roundtrip():
+    """stream_addon_url round-trips through Base64 JSON and query strings."""
+    url = "https://torrentio.strem.fun/sort=quality/manifest.json"
+    encoded = encode_user_config(subdl_key="k1", stream_addon_url=url)
+    prefs = parse_user_config(encoded)
+    assert prefs.stream_addon_url == url
+
+    # Default is empty string
+    assert parse_user_config(encode_user_config()).stream_addon_url == ""
+
+    # Query string format
+    qs = f"subdl=k1&stream_addon_url={url}"
+    assert parse_user_config(qs).stream_addon_url == url
+

@@ -1,0 +1,25 @@
+{
+  "id": "org.ninjasubs.addon",
+  "name": "NinjaSubs",
+  "version": "1.1.0",
+  "description": "Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization and alass auto-sync.",
+  "logo": "https://raw.githubusercontent.com/donsaud/NinjaSubs/main/app/static/icon.png",
+  "icon": "https://raw.githubusercontent.com/donsaud/NinjaSubs/main/app/static/icon.png",
+  "resources": [
+    "subtitles"
+  ],
+  "types": [
+    "movie",
+    "series",
+    "anime"
+  ],
+  "idPrefixes": [
+    "tt",
+    "kitsu"
+  ],
+  "catalogs": [],
+  "behaviorHints": {
+    "configurable": true,
+    "configurationRequired": false
+  }
+}

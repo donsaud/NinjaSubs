@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     NINJASUBS_DEBUG_RANKING: bool = False
 
     # Subtitle auto-synchronization (alass) & result cache
-    ENABLE_SUBTITLE_SYNC: bool = False
+    ENABLE_SUBTITLE_SYNC: bool = True
     ALASS_PATH: str = "alass"
     ALASS_TIMEOUT_SECONDS: float = 10.0
     ALASS_MAX_CONCURRENT_SYNCS: int = 1

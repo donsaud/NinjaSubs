@@ -177,6 +177,37 @@ async def test_orchestrator_keys_isolate_distinct_payloads(monkeypatch):
     assert orch._embedded_strategy.calls == 2
 
 
+@pytest.mark.asyncio
+async def test_orchestrator_falls_back_to_external_when_embedded_fails_sync(monkeypatch, caplog):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
+
+    class FailingEmbeddedSyncService(_FakeSyncService):
+        async def sync_async(self, target_srt, reference, decision_kind="edition", **kwargs):
+            self.calls += 1
+            if decision_kind == "embedded":
+                # Embedded reference fails validation (e.g. collapsed cues)
+                return None
+            return "1\n00:00:09,000 --> 00:00:10,000\nsynced via external\n"
+
+    sync_svc = FailingEmbeddedSyncService()
+    orch = _orchestrator(
+        embedded_strategy=_FakeStrategy(BIG_REF.decode(), kind="embedded"),
+        external_strategy=_FakeStrategy(BIG_REF.decode(), kind="edition"),
+        sync_service=sync_svc,
+    )
+
+    with caplog.at_level("WARNING"):
+        out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
+
+    assert b"synced via external" in out
+    assert orch._embedded_strategy.calls == 1
+    assert orch._external_strategy.calls == 1
+    assert sync_svc.calls == 2
+    assert "embedded strategy reference failed sync/validation -> falling back to next strategy" in caplog.text
+
+
 def test_synced_cache_key_binds_payload():
     meta = {"imdb_id": "tt1", "season": 1, "episode": 1, "video_hash": "VH"}
     key_a = build_synced_cache_key(meta, "s", content_hash="a", decision="team")

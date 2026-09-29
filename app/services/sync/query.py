@@ -23,14 +23,22 @@ class ReferenceQuery:
     video_hash: str | None = None
     video_size: int | str | None = None
     stream_url: str | None = None
+    stream_addon_url: str | None = None
     season: int | None = None
     episode: int | None = None
     api_keys: dict[str, str] = field(default_factory=dict)
     languages: tuple[str, ...] = ("eng",)
+    target_download_url: str | None = None
+    target_sub_id: str | None = None
+    target_sub_release_name: str | None = None
 
     @property
     def is_series(self) -> bool:
-        return self.media_type == "series" or self.season is not None
+        return (
+            str(self.media_type or "").lower() in ("series", "anime", "tv")
+            or self.season is not None
+            or self.episode is not None
+        )
 
     @property
     def effective_group(self) -> str:

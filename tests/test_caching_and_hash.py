@@ -31,7 +31,8 @@ from app.utils.config_parser import encode_user_config
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 # ==========================================
@@ -843,3 +844,93 @@ def test_stremio_endpoint_hash_short_circuit_e2e(client):
         # Candidate #2: The text-matched release
         assert "[OpenSubtitles]" not in items[1]["title"]
         assert "[SubDL]" in items[1]["title"]
+
+
+def test_series_sub_id_scoped_to_season_episode(client):
+    """Verify series subtitles from a season pack receive episode-scoped sub_ids."""
+    sub_pack = SubtitleRelease(
+        release_name="Mad.Men.S01.1080p.BluRay.DD5.1.x264-SA89.srt",
+        download_url="https://subdl.com/pack.zip",
+        provider="subdl",
+        lang="ara",
+    )
+
+    user_cfg = encode_user_config(subdl_key="test_key")
+    with (
+        patch("app.providers.subdl.SubdlProvider.search_subtitles", new=AsyncMock(return_value=[sub_pack])),
+        patch("app.providers.subsource.SubsourceProvider.search_subtitles", new=AsyncMock(return_value=[])),
+        patch("app.providers.opensubtitles.OpenSubtitlesProvider.search_subtitles", new=AsyncMock(return_value=[])),
+        patch("app.providers.cinemeta.CinemetaClient.get_metadata", new=AsyncMock(return_value=None)),
+    ):
+        resp_ep2 = client.get(f"/{user_cfg}/subtitles/series/tt0804503%3A1%3A2.json")
+        assert resp_ep2.status_code == 200
+        subs_ep2 = resp_ep2.json()["subtitles"]
+        assert len(subs_ep2) == 1
+        url_ep2 = subs_ep2[0]["url"]
+
+        resp_ep3 = client.get(f"/{user_cfg}/subtitles/series/tt0804503%3A1%3A3.json")
+        assert resp_ep3.status_code == 200
+        subs_ep3 = resp_ep3.json()["subtitles"]
+        assert len(subs_ep3) == 1
+        url_ep3 = subs_ep3[0]["url"]
+
+        # Different episodes of the same season pack MUST have distinct sub_ids
+        assert url_ep2 != url_ep3
+
+
+@pytest.mark.asyncio
+async def test_serve_subtitle_cross_episode_collision_guard(client):
+    """Verify that a stale cached subtitle for a different episode is discarded."""
+    from app.main import cache_manager
+
+    stale_sub_id = "stale_s1e2_sub"
+    # Store metadata indicating season 1 episode 2
+    cache_manager.store_metadata(
+        stale_sub_id,
+        {
+            "sub_id": stale_sub_id,
+            "imdb_id": "tt0804503",
+            "media_type": "series",
+            "provider": "subdl",
+            "download_url": "https://subdl.com/pack.zip",
+            "release_name": "Mad.Men.S01.srt",
+            "season": 1,
+            "episode": 2,
+            "lang": "ara",
+        },
+    )
+    # Save dummy subtitle content for ep 2
+    await cache_manager.save_subtitle(stale_sub_id, b"1\n00:00:01,000 --> 00:00:05,000\nEpisode 2 Content\n")
+
+    # Now simulate a request asking for Episode 3 with this stale sub_id
+    valid_sub_bytes = b"1\n00:00:01,000 --> 00:00:05,000\nEpisode 3 Fresh Content\n"
+    with patch("app.providers.subdl.SubdlProvider.download_archive", new=AsyncMock(return_value=valid_sub_bytes)):
+        resp = client.get(f"/sub/{stale_sub_id}.srt?imdb=tt0804503&type=series&season=1&episode=3")
+        assert resp.status_code == 200
+        # Must NOT serve the stale Episode 2 content
+        assert "Episode 2 Content" not in resp.text
+        assert "Episode 3 Fresh Content" in resp.text
+
+
+def test_reference_disk_cache_partial_roundtrip(tmp_path):
+    """Verify ReferenceDiskCache preserves the partial flag across saves and gets."""
+    from app.services.sync.cache import ReferenceDiskCache
+    from app.services.sync.query import ReferenceQuery
+
+    cache = ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=10)
+    query = ReferenceQuery(imdb_id="tt0804503", media_type="series", season=1, episode=3)
+    text = "1\n00:00:01,000 --> 00:00:02,000\nPartial dialogue line\n"
+
+    # Save with partial=True
+    cache.set(query, "embedded", text, kind="embedded", partial=True)
+    res = cache.get(query)
+    assert res is not None
+    assert res.kind == "embedded"
+    assert res.partial is True
+
+    # Save with partial=False (e.g. full local extraction)
+    cache.set(query, "embedded", text, kind="embedded", partial=False)
+    res2 = cache.get(query)
+    assert res2 is not None
+    assert res2.partial is False
+

@@ -2,6 +2,7 @@
 
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
@@ -15,12 +16,48 @@ from app.utils.uploader import extract_uploader
 logger = logging.getLogger("uvicorn.error")
 
 
+class OpenSubtitlesCircuitBreaker:
+    """Process-wide cooldown after OpenSubtitles rate-limits (HTTP 429) or quota exhaustion (HTTP 406)."""
+
+    def __init__(self, default_cooldown: float = 3600.0) -> None:
+        self.default_cooldown = default_cooldown
+        self._open_until = 0.0
+        self._reason = ""
+
+    def trip(self, cooldown: float | None = None, reason: str = "") -> None:
+        duration = cooldown if cooldown is not None else self.default_cooldown
+        self._open_until = time.monotonic() + duration
+        self._reason = reason
+        logger.warning(
+            "[OpenSubtitles] Circuit breaker tripped (%s); skipping OpenSubtitles downloads for %.0fs",
+            reason or "Quota/RateLimit",
+            duration,
+        )
+
+    def is_open(self) -> bool:
+        return time.monotonic() < self._open_until
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self._open_until - time.monotonic())
+
+    def reset(self) -> None:
+        self._open_until = 0.0
+        self._reason = ""
+
+
+OPENSUBTITLES_BREAKER = OpenSubtitlesCircuitBreaker()
+
+
 class OpenSubtitlesProvider(BaseSubtitleProvider):
     """Subtitle provider implementation for OpenSubtitles.com v1 REST API."""
 
     name = "opensubtitles"
     BASE_URL = "https://api.opensubtitles.com/api/v1"
     USER_AGENT = "StremioArabicSubs v1.0.0"
+
+    def is_breaker_open(self) -> bool:
+        return OPENSUBTITLES_BREAKER.is_open()
 
     def _get_headers(self, api_key: str) -> dict[str, str]:
         headers = {
@@ -222,6 +259,14 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         """
         Request temporary download link for subtitle file_id via POST /api/v1/download.
         """
+        if OPENSUBTITLES_BREAKER.is_open():
+            logger.info(
+                "[OpenSubtitles] Circuit breaker open (%.0fs remaining); skipping download request for file %s",
+                OPENSUBTITLES_BREAKER.remaining,
+                file_id,
+            )
+            return None
+
         effective_key = (api_key or getattr(settings, "OPENSUBTITLES_API_KEY", "") or "").strip()
         if not effective_key:
             logger.error("[OpenSubtitles Download Fail] Missing API key")
@@ -248,6 +293,19 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
             )
             if res.status_code in (200, 201):
                 return res.json().get("link")
+
+            if res.status_code in (406, 429):
+                delay = 3600.0 if res.status_code == 406 else 60.0
+                try:
+                    data = res.json()
+                    reset_unix = data.get("reset_time_unix")
+                    if reset_unix:
+                        diff = float(reset_unix) - time.time()
+                        delay = max(60.0, min(diff, 86400.0))
+                except Exception:
+                    pass
+                OPENSUBTITLES_BREAKER.trip(delay, reason=f"HTTP {res.status_code}")
+
             logger.error(
                 f"[OpenSubtitles Download Fail] Status: {res.status_code} | {res.text[:200]}"
             )
@@ -264,6 +322,14 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         Download subtitle file from OpenSubtitles.
         Resolves direct download URL via get_download_url using file_id.
         """
+        if OPENSUBTITLES_BREAKER.is_open():
+            logger.info(
+                "[OpenSubtitles Download] Circuit breaker open (%.0fs remaining); skipping download for %s",
+                OPENSUBTITLES_BREAKER.remaining,
+                download_ref,
+            )
+            return None
+
         effective_key = (api_key or getattr(settings, "OPENSUBTITLES_API_KEY", "") or "").strip()
 
         m = re.search(r"(\d+)(?:\.srt)?$", str(download_ref).strip())

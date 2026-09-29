@@ -56,6 +56,9 @@ class SubdlProvider(BaseSubtitleProvider):
     BASE_URL = "https://api.subdl.com/api/v1/subtitles"
     DOWNLOAD_BASE = "https://dl.subdl.com"
 
+    def is_breaker_open(self) -> bool:
+        return SUBDL_BREAKER.is_open()
+
     async def search_subtitles(
         self,
         imdb_id: str,

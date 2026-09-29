@@ -24,15 +24,18 @@ from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.decode import decode_payload, select_zip_member
 from app.services.sync.matching import (
     _codec_kind,
+    _regional_tags,
     _release_group,
     _resolution,
     _season_number,
     _source_kind,
     _sources_compatible,
     candidate_episode_number,
+    guess_metadata,
     is_informative_release_name,
     is_retail_disc_source,
     looks_like_season_pack,
+    reference_group_rank,
 )
 from app.services.sync.query import ResolvedReference
 
@@ -47,9 +50,11 @@ _DEFAULT_TIMEOUT = 5.0
 _MIN_REFERENCE_BYTES = 5120
 
 # Language codes searched/fetched for the *reference* track (independent of the
-# user's subtitle-language preference): common retail tracks are all valid
-# timing anchors for alass. ISO-639-1 here; providers normalize to their own.
-_REFERENCE_LANGUAGES = ("en", "es", "fr", "de", "it")
+# user's subtitle-language preference): English is the primary universal retail
+# timing reference anchor, with Arabic as secondary reference. Foreign European
+# tracks (it/de/fr/es) are excluded from the reference search pool because they
+# often carry distributor intro offsets, dubbed audio pacing, or PAL 25fps shifts.
+_REFERENCE_LANGUAGES = ("en", "ar")
 
 # Weighted-scoring weights for candidate reference selection. The goal is to pick
 # the reference whose release quality matches the playing video file.
@@ -57,17 +62,25 @@ _GROUP_SCORE = 50  # exact release group
 _SOURCE_SCORE = 30  # shared source family (web-dl/web, bluray/remux)
 _PLATFORM_SCORE = 20  # identical streaming service (HMAX/ATVP/NF/AMZN/DSNP)
 _STREAMING_FAMILY_SCORE = 10  # different streaming service, same streaming family
+_REGIONAL_SCORE = 30  # matching regional release markers (MULTI, FRENCH, GERMAN...)
 _RESOLUTION_SCORE = 10  # identical resolution
 _RESOLUTION_NEAR_SCORE = 5  # 1080p neighbour of a 4K target
 _CODEC_SCORE = 5  # shared codec (x265/HEVC/x264)
 _EPISODE_SCORE = 10  # explicit episode single (vs a whole-season pack)
 _EN_SCORE = 10  # English preferred on ties
-_ALT_LANG_SCORE = 5  # es / fr / de / it
+_ALT_LANG_SCORE = 5  # ar / es / fr / de / it
 _NON_HI_SCORE = 5  # standard dialogue over hearing-impaired
+_PREFERRED_GROUP_SCORE = 25  # reliable scene retail groups (CHD/SURCODE/FraMeSToR...)
+_DEPRIORITIZED_GROUP_PENALTY = 50  # micro-rip/custom repack groups (YTS/YIFY/JYK/Tigole...)
+_THEATRICAL_COMPAT_SCORE = 20  # retail BluRay/UHD theatrical disc master compatible with WEB-DL for films
+_EDITION_SCORE = 40  # matching cut/edition (Extended, Theatrical, Directors Cut, IMAX, etc.)
+_EDITION_MISMATCH_PENALTY = 40  # conflicting cut/edition
 
 _LANG_SCORES = {
     "eng": _EN_SCORE,
     "en": _EN_SCORE,
+    "ara": _ALT_LANG_SCORE,
+    "ar": _ALT_LANG_SCORE,
     "spa": _ALT_LANG_SCORE,
     "es": _ALT_LANG_SCORE,
     "fra": _ALT_LANG_SCORE,
@@ -78,16 +91,110 @@ _LANG_SCORES = {
     "it": _ALT_LANG_SCORE,
 }
 
+_EDITION_PATTERNS = [
+    (
+        re.compile(
+            r"(?i)\b(director'?s?[-._ ]?cut|directors[-._ ]?cut|directors|dc[-._ ]?cut|dir[-._ ]?cut)\b"
+        ),
+        "DIRECTORS_CUT",
+    ),
+    (
+        re.compile(r"(?i)\b(extended[-._ ]?(?:cut|edition)?|ext[-._ ]?cut)\b"),
+        "EXTENDED",
+    ),
+    (
+        re.compile(r"(?i)\b(unrated[-._ ]?(?:cut|edition)?)\b"),
+        "UNRATED",
+    ),
+    (
+        re.compile(r"(?i)\b(theatrical[-._ ]?(?:cut|edition)?)\b"),
+        "THEATRICAL",
+    ),
+    (
+        re.compile(r"(?i)\b(imax[-._ ]?(?:enhanced|edition|cut)?)\b"),
+        "IMAX",
+    ),
+    (
+        re.compile(r"(?i)\b(special[-._ ]?edition|se[-._ ]?cut)\b"),
+        "SPECIAL_EDITION",
+    ),
+    (
+        re.compile(r"(?i)\b(remastered|remaster)\b"),
+        "REMASTERED",
+    ),
+]
+
+
+_GUESSIT_PLATFORM_MAP = {
+    "hbo max": "hmax",
+    "max": "hmax",
+    "apple tv": "atvp",
+    "apple tv+": "atvp",
+    "netflix": "nf",
+    "amazon prime": "amzn",
+    "amazon": "amzn",
+    "disney+": "dsnp",
+    "hulu": "hulu",
+    "peacock": "pcok",
+    "itunes": "itunes",
+    "stan": "stan",
+    "paramount+": "paramount",
+    "paramount": "paramount",
+    "bcore": "bcore",
+    "bravia core": "bcore",
+    "crav": "crav",
+    "crave": "crav",
+    "iplayer": "iplayer",
+    "bbc iplayer": "iplayer",
+    "starz": "starz",
+    "sho": "sho",
+    "showtime": "sho",
+}
+
+
+def _edition_kind(name: str | None) -> str | None:
+    """Recognize standard movie/series cut editions from release filename."""
+    if not name:
+        return None
+    meta = guess_metadata(name)
+    ed = meta.get("edition")
+    if ed:
+        ed_str = str(ed).lower()
+        if "director" in ed_str:
+            return "DIRECTORS_CUT"
+        if "extended" in ed_str:
+            return "EXTENDED"
+        if "unrated" in ed_str:
+            return "UNRATED"
+        if "theatrical" in ed_str:
+            return "THEATRICAL"
+        if "imax" in ed_str:
+            return "IMAX"
+        if "special" in ed_str:
+            return "SPECIAL_EDITION"
+        if "remaster" in ed_str:
+            return "REMASTERED"
+    for pattern, edition in _EDITION_PATTERNS:
+        if pattern.search(name):
+            return edition
+    return None
+
 _PLATFORM_PATTERNS = {
-    "hmax": re.compile(r"(?i)\b(?:hmax|hbo[\s._-]?max)\b"),
+    "hmax": re.compile(r"(?i)\b(?:hmax|hbo[\s._-]?max|max)\b"),
     "atvp": re.compile(r"(?i)\b(?:atvp|apple[\s._-]?tv)\b"),
     "nf": re.compile(r"(?i)\bnf\b"),
     "amzn": re.compile(r"(?i)\bamzn\b"),
     "dsnp": re.compile(r"(?i)\bdsnp\b"),
     "hulu": re.compile(r"(?i)\bhulu\b"),
-    "pcok": re.compile(r"(?i)\bpcok\b"),
+    "pcok": re.compile(r"(?i)\b(?:pcok|peacock)\b"),
     "itunes": re.compile(r"(?i)\bitunes\b"),
     "stan": re.compile(r"(?i)\bstan\b"),
+    "paramount": re.compile(r"(?i)\b(?:pmtp|paramount(?:[\s._-]?plus)?)\b"),
+    "bcore": re.compile(r"(?i)\b(?:bcore|bravia[\s._-]?core)\b"),
+    "crav": re.compile(r"(?i)\bcrav(?:e)?\b"),
+    "iplayer": re.compile(r"(?i)\b(?:iplayer|bbc[\s._-]?iplayer)\b"),
+    "starz": re.compile(r"(?i)\bstarz\b"),
+    "sho": re.compile(r"(?i)\b(?:sho|showtime)\b"),
 }
 
 
@@ -98,7 +205,14 @@ def _release_name(release) -> str:
 def _platform_tags(name: str | None) -> frozenset[str]:
     """Streaming-service tags present in a release name (HMAX/NF/AMZN/...)."""
     lowered = name or ""
-    return frozenset(tag for tag, pattern in _PLATFORM_PATTERNS.items() if pattern.search(lowered))
+    tags = set(tag for tag, pattern in _PLATFORM_PATTERNS.items() if pattern.search(lowered))
+    meta = guess_metadata(name)
+    svc = meta.get("streaming_service")
+    if svc:
+        matched = _GUESSIT_PLATFORM_MAP.get(str(svc).lower())
+        if matched:
+            tags.add(matched)
+    return frozenset(tags)
 
 
 def score_candidate(target_name: str | None, release) -> int:
@@ -124,8 +238,20 @@ def score_candidate(target_name: str | None, release) -> int:
 
     target_source = _source_kind(target_name)
     cand_source = _source_kind(cand_name)
-    if target_source and cand_source and _sources_compatible(target_source, cand_source):
-        score += _SOURCE_SCORE
+    if target_source and cand_source:
+        if _sources_compatible(target_source, cand_source):
+            score += _SOURCE_SCORE
+        elif {target_source, cand_source} in (
+            {"bluray", "webdl"},
+            {"remux", "webdl"},
+            {"bluray", "stream"},
+            {"remux", "stream"},
+        ):
+            # For films (non-episodic), retail BluRay/UHD theatrical disc masters and
+            # official studio WEB-DL/stream releases share the identical theatrical cut.
+            is_film = candidate_episode_number(target_name) is None and not looks_like_season_pack(target_name)
+            if is_film:
+                score += _THEATRICAL_COMPAT_SCORE
 
     target_platforms = _platform_tags(target_name)
     cand_platforms = _platform_tags(cand_name)
@@ -148,33 +274,118 @@ def score_candidate(target_name: str | None, release) -> int:
     if target_codec and target_codec == _codec_kind(cand_name):
         score += _CODEC_SCORE
 
-    if candidate_episode_number(cand_name) is not None:
-        score += _EPISODE_SCORE
-    elif looks_like_season_pack(cand_name):
-        score -= _EPISODE_SCORE
+    target_ed = _edition_kind(target_name)
+    cand_ed = _edition_kind(cand_name)
+    if target_ed and cand_ed:
+        if target_ed == cand_ed:
+            score += _EDITION_SCORE
+        else:
+            score -= _EDITION_MISMATCH_PENALTY
+
+    target_regional = _regional_tags(target_name)
+    cand_regional = _regional_tags(cand_name)
+    if target_regional & cand_regional:
+        score += _REGIONAL_SCORE
+
+    # Episode scoring: reward matching episode singles for series; penalize
+    # episodic or season-pack candidates when matching a movie.
+    target_ep = candidate_episode_number(target_name)
+    cand_ep = candidate_episode_number(cand_name)
+    if target_ep is not None:
+        if cand_ep is not None:
+            if cand_ep == target_ep:
+                score += _EPISODE_SCORE
+            else:
+                score -= _EPISODE_SCORE
+        elif looks_like_season_pack(cand_name):
+            score -= _EPISODE_SCORE
+    elif target_name is not None and not looks_like_season_pack(target_name):
+        # Target is non-episodic (e.g. Movie)
+        if cand_ep is not None or looks_like_season_pack(cand_name):
+            score -= _EPISODE_SCORE
+    else:
+        # Fallback when target_name is None
+        if cand_ep is not None:
+            score += _EPISODE_SCORE
+        elif looks_like_season_pack(cand_name):
+            score -= _EPISODE_SCORE
 
     score += _LANG_SCORES.get(str(getattr(release, "lang", "") or "").strip().lower(), 0)
 
     if not getattr(release, "hearing_impaired", False):
         score += _NON_HI_SCORE
+
+    # Release-group timeline reliability: scene retail encodes preserve studio
+    # bumpers/timelines; micro-rips and custom repacks often trim them and desync.
+    rank = reference_group_rank(cand_name)
+    if rank == 0:
+        score += _PREFERRED_GROUP_SCORE
+    elif rank == 2:
+        score -= _DEPRIORITIZED_GROUP_PENALTY
+
     return score
 
 
-def _select_reference(releases, query: ReferenceQuery):
-    """Pick the best season/episode-matched reference by weighted score.
+def _has_audio_match(target_name: str | None, cand_name: str) -> int:
+    target_meta = guess_metadata(target_name)
+    cand_meta = guess_metadata(cand_name)
+    target_audio = target_meta.get("audio_codec")
+    cand_audio = cand_meta.get("audio_codec")
+    if target_audio and cand_audio and str(target_audio).lower() == str(cand_audio).lower():
+        return 1
+    return 0
+
+
+def _is_scene_named(cand_name: str) -> int:
+    clean = cand_name.rsplit("/", 1)[-1].strip()
+    return 1 if ("." in clean and " " not in clean) else 0
+
+
+def _is_rel_provider_broken(rel) -> bool:
+    """True when the candidate's provider circuit breaker is currently open."""
+    prov = str(getattr(rel, "provider", "") or "").lower()
+    if prov == "opensubtitles":
+        from app.providers.opensubtitles import OPENSUBTITLES_BREAKER
+        return OPENSUBTITLES_BREAKER.is_open()
+    if prov == "subdl":
+        from app.providers.subdl import SUBDL_BREAKER
+        return SUBDL_BREAKER.is_open()
+    if prov == "subsource":
+        from app.providers.subsource import SUBSOURCE_BREAKER
+        return SUBSOURCE_BREAKER.is_open()
+    return False
+
+
+_PROVIDER_TIE_PRIORITY = {
+    "subsource": 2,
+    "subdl": 2,
+    "opensubtitles": 1,
+}
+
+
+def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
+    """Return all season/episode-matched reference candidates sorted by rank descending.
 
     Eligible candidates (matching season/episode) are sorted by score
     descending; ties keep provider order. A byte-exact MovieHash match always
-    wins. An all-zero field falls back to the first available candidate rather
-    than aborting â€” ``None`` is returned only when nothing matches S/E.
+    wins.
     """
     pool = list(releases or [])
     if not pool:
-        return None
+        return []
+    if query and query.target_download_url:
+        pool = [rel for rel in pool if getattr(rel, "download_url", None) != query.target_download_url]
+    if query and query.target_sub_release_name:
+        tgt_group = (_release_group(query.target_sub_release_name) or "").lower()
+        stream_group = (_release_group(query.target_filename) or "").lower()
+        if not (tgt_group and stream_group and tgt_group == stream_group):
+            pool = [rel for rel in pool if _release_name(rel) != query.target_sub_release_name]
+    if not pool:
+        return []
     if query.season is not None:
         matched = [rel for rel in pool if _season_number(_release_name(rel)) == query.season]
         if not matched:
-            return None
+            return []
         pool = matched
     if query.episode is not None:
         pool = [
@@ -183,24 +394,44 @@ def _select_reference(releases, query: ReferenceQuery):
             if candidate_episode_number(_release_name(rel)) in (None, query.episode)
         ]
     if not pool:
-        return None
+        return []
 
     scored = [(score_candidate(query.target_filename, rel), rel) for rel in pool]
-    # Hash-confirmed tracks are byte-exact ground truth; otherwise the highest
-    # weighted score wins, preserving provider order on ties.
+    # Hash-confirmed tracks are byte-exact ground truth; active (non-broken)
+    # providers are prioritized; score is primary; on exact score ties:
+    # matching audio codec, standard scene dot-naming, matching target language, and generous-quota providers.
+    target_langs = tuple(
+        str(lang).lower()
+        for lang in (query.languages if query and query.languages else ("ara", "ar"))
+    )
     scored.sort(
-        key=lambda item: (1 if getattr(item[1], "is_hash_match", False) else 0, item[0]),
+        key=lambda item: (
+            1 if getattr(item[1], "is_hash_match", False) else 0,
+            0 if _is_rel_provider_broken(item[1]) else 1,
+            item[0],
+            _is_scene_named(_release_name(item[1])),
+            _has_audio_match(query.target_filename, _release_name(item[1])),
+            1 if str(getattr(item[1], "lang", "")).lower() in target_langs else 0,
+            _PROVIDER_TIE_PRIORITY.get(str(getattr(item[1], "provider", "") or "").lower(), 0),
+        ),
         reverse=True,
     )
     for score, rel in scored[:5]:
         logger.info(
-            "[reference] candidate score=%d lang=%s hash=%s %r",
+            "[reference] candidate score=%d lang=%s hash=%s provider=%s %r",
             score,
             getattr(rel, "lang", "?"),
             bool(getattr(rel, "is_hash_match", False)),
+            getattr(rel, "provider", "?"),
             _release_name(rel),
         )
-    return scored[0][1]
+    return [rel for _, rel in scored]
+
+
+def _select_reference(releases, query: ReferenceQuery):
+    """Pick the single best season/episode-matched reference by weighted score."""
+    ranked = _select_candidates_ranked(releases, query)
+    return ranked[0] if ranked else None
 
 
 class ExternalExactStrategy:
@@ -273,15 +504,66 @@ class ExternalExactStrategy:
             return ResolvedReference(None)
 
         provider_of = {id(rel): provider for rel, provider in candidates}
-        best = _select_reference([rel for rel, _ in candidates], query)
-        if best is None:
+        ranked = _select_candidates_ranked([rel for rel, _ in candidates], query)
+        if not ranked:
             logger.warning("[reference] aborting: no season/episode-matched reference")
             return ResolvedReference(None)
-        provider = provider_of.get(id(best))
 
-        result = await self._download_candidate(best, provider, query)
+        result = ResolvedReference(None)
+        winning_provider = None
+        exhausted_providers: set[str] = set()
+
+        max_attempts = 6
+        attempts = 0
+
+        for cand in ranked:
+            cand_provider = provider_of.get(id(cand))
+            if cand_provider is None:
+                continue
+
+            provider_lbl = self._provider_label(cand_provider)
+            if provider_lbl in exhausted_providers:
+                continue
+
+            if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
+                logger.info(
+                    "[reference] provider %s circuit breaker is open; skipping candidate %r",
+                    provider_lbl,
+                    getattr(cand, "release_name", "?"),
+                )
+                exhausted_providers.add(provider_lbl)
+                continue
+
+            attempts += 1
+            cand_result = await self._download_candidate(cand, cand_provider, query)
+            if cand_result.text:
+                result = cand_result
+                winning_provider = cand_provider
+                break
+
+            # If download failed and tripped the breaker (e.g. quota 406 or rate limit 429),
+            # mark this provider exhausted so all its remaining candidates are skipped.
+            if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
+                logger.info(
+                    "[reference] provider %s tripped circuit breaker; skipping remaining candidates from this provider",
+                    provider_lbl,
+                )
+                exhausted_providers.add(provider_lbl)
+
+            logger.warning(
+                "[reference] candidate %r (provider=%s) failed download/decode; trying next candidate",
+                getattr(cand, "release_name", "?"),
+                provider_lbl,
+            )
+            if attempts >= max_attempts:
+                logger.warning(
+                    "[reference] reached maximum candidate download attempts (%d)", max_attempts
+                )
+                break
+
         text = result.text
-        if text is None:
+        if text is None or winning_provider is None:
+            logger.warning("[reference] all candidate attempts failed to produce a usable reference")
             return ResolvedReference(None)
 
         # Persist a sanitised copy so later switches for this episode are instant.
@@ -291,7 +573,7 @@ class ExternalExactStrategy:
         if sanitized:
             self.cache.set(
                 query,
-                self._provider_label(provider),
+                self._provider_label(winning_provider),
                 sanitized,
                 kind=result.kind,
                 bluray_match=result.bluray_match,
@@ -500,6 +782,8 @@ class ExternalExactStrategy:
         async def _search(episode: int | None):
             return await self._subdl.search_subtitles(
                 imdb_id=query.imdb_id,
+                title=query.title,
+                year=query.year,
                 is_series=query.is_series,
                 season=query.season,
                 episode=episode,
@@ -516,6 +800,8 @@ class ExternalExactStrategy:
         async def _search(episode: int | None):
             return await self._subsource.search_subtitles(
                 imdb_id=query.imdb_id,
+                title=query.title,
+                year=query.year,
                 is_series=query.is_series,
                 season=query.season,
                 episode=episode,
@@ -532,12 +818,17 @@ class ExternalExactStrategy:
         async def _search(episode: int | None):
             return await self._opensubtitles.search_subtitles(
                 imdb_id=query.imdb_id,
+                title=query.title,
+                year=query.year,
                 is_series=query.is_series,
                 season=query.season,
                 episode=episode,
                 api_key=api_key,
                 languages=list(_REFERENCE_LANGUAGES),
                 target_filename=self._match_filename(query),
+                moviehash=query.video_hash,
+                moviebytesize=query.video_size,
             )
 
         return await self._search_tiers(_search, query, "opensubtitles")
+

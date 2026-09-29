@@ -33,7 +33,7 @@ def test_manifest_schema_and_cors(client):
     assert data["description"] == (
         "Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization."
     )
-    assert data["version"] == "1.0.0"
+    assert data["version"] == "1.1.0"
     assert data["resources"] == ["subtitles"]
     assert "movie" in data["types"]
     assert "series" in data["types"]
@@ -547,6 +547,7 @@ async def test_configure_page_rendering(client):
     )
 
 
+@pytest.mark.asyncio
 async def test_configured_subtitles_endpoint(client):
     """Verify /{config}/subtitles/... parses user keys and injects them into providers."""
     from app.utils.config_parser import encode_user_config

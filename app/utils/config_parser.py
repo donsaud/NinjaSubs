@@ -47,7 +47,8 @@ def encode_user_config(
     eastern_arabic_numerals: bool = False,
     strip_diacritics: bool = False,
     convert_ass_to_srt: bool = True,
-    auto_sync: bool = False,
+    auto_sync: bool = True,
+    stream_addon_url: str | None = None,
 ) -> str:
     """
     Encode user configuration into a URL-safe base64 string matching community addons.
@@ -111,8 +112,10 @@ def encode_user_config(
         payload["strip_diacritics"] = True
     if convert_ass_to_srt is False:
         payload["convert_ass_to_srt"] = False
-    if auto_sync:
-        payload["auto_sync"] = True
+    if auto_sync is False:
+        payload["auto_sync"] = False
+    if stream_addon_url and stream_addon_url.strip():
+        payload["stream_addon_url"] = stream_addon_url.strip()
 
     if badge_parts is not None:
         resolved_parts = normalize_badge_parts(badge_parts)
@@ -165,7 +168,8 @@ def parse_user_config(
     eastern_arabic_numerals: bool = False
     strip_diacritics: bool = False
     convert_ass_to_srt: bool = True
-    auto_sync: bool = False
+    auto_sync: bool = True
+    stream_addon_url: str = ""
 
     def _as_bool(value: Any, default: bool = True) -> bool:
         if value is None:
@@ -311,8 +315,15 @@ def parse_user_config(
                     )
                 if "auto_sync" in data or "autoSync" in data:
                     auto_sync = _as_bool(
-                        data.get("auto_sync", data.get("autoSync")), False
+                        data.get("auto_sync", data.get("autoSync")), True
                     )
+                if "stream_addon_url" in data or "streamAddonUrl" in data or "stream_addon" in data:
+                    stream_addon_url = str(
+                        data.get("stream_addon_url")
+                        or data.get("streamAddonUrl")
+                        or data.get("stream_addon")
+                        or ""
+                    ).strip()
         except Exception as e:
             logger.debug(f"Base64 JSON decode skipped for config string: {e}")
 
@@ -411,7 +422,13 @@ def parse_user_config(
                         parsed_qs["convert_ass_to_srt"][0], True
                     )
                 if "auto_sync" in parsed_qs:
-                    auto_sync = _as_bool(parsed_qs["auto_sync"][0], False)
+                    auto_sync = _as_bool(parsed_qs["auto_sync"][0], True)
+                if not stream_addon_url and "stream_addon_url" in parsed_qs:
+                    stream_addon_url = parsed_qs["stream_addon_url"][0].strip()
+                elif not stream_addon_url and "streamAddonUrl" in parsed_qs:
+                    stream_addon_url = parsed_qs["streamAddonUrl"][0].strip()
+                elif not stream_addon_url and "stream_addon" in parsed_qs:
+                    stream_addon_url = parsed_qs["stream_addon"][0].strip()
             except Exception:
                 pass
 
@@ -435,6 +452,12 @@ def parse_user_config(
                                 and not user_opensubtitles
                             ):
                                 user_opensubtitles = v.strip()
+                            elif (
+                                k_lower
+                                in ("stream_addon_url", "streamaddonurl", "stream_addon")
+                                and not stream_addon_url
+                            ):
+                                stream_addon_url = v.strip()
                 else:
                     if len(parts) >= 1 and not user_subdl and parts[0].strip():
                         user_subdl = parts[0].strip()
@@ -500,4 +523,5 @@ def parse_user_config(
         strip_diacritics=strip_diacritics,
         convert_ass_to_srt=convert_ass_to_srt,
         auto_sync=auto_sync,
+        stream_addon_url=stream_addon_url,
     )

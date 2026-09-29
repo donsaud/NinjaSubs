@@ -749,3 +749,214 @@ def test_audit_performance_benchmark_50_plus_candidates():
         audit_res["avg_per_candidate_ms"] < 10.0
     ), f"Performance too slow: {audit_res['avg_per_candidate_ms']} ms/candidate"
     assert audit_res["ranked_count"] == len(candidates)
+
+
+# ============================================================================
+# M. ZERO-TOLERANCE MONOTONIC RANKING INVARIANTS
+# ============================================================================
+# The core guarantee: for a single language pool, the player list is ordered by
+# match_percentage strictly descending. These tests build the exact scenario
+# pools from the audit matrix and assert the invariant on every adjacent pair.
+
+
+def _audit_pool(names: list[str]) -> list[SubtitleRelease]:
+    return [
+        SubtitleRelease(release_name=n, download_url=f"http://cdn/{i}.srt", provider="subdl")
+        for i, n in enumerate(names)
+    ]
+
+
+def _audit_rank(target: str, names: list[str], **kwargs) -> list[SubtitleRelease]:
+    return rank_subtitles(
+        target,
+        _audit_pool(names),
+        preferred_languages=["ara"],
+        **kwargs,
+    )
+
+
+def _assert_monotonic_descending(ranked: list[SubtitleRelease]) -> None:
+    """candidates[i].match_percentage >= candidates[i+1].match_percentage."""
+    for prev, curr in zip(ranked, ranked[1:], strict=False):
+        prev_pct = getattr(prev, "match_percentage", 0)
+        curr_pct = getattr(curr, "match_percentage", 0)
+        assert prev_pct >= curr_pct, (
+            f"Sorting violation: {prev.release_name} ({prev_pct}%) ranked lower than "
+            f"{curr.release_name} ({curr_pct}%)"
+        )
+
+
+def _assert_percentages_clamped(ranked: list[SubtitleRelease]) -> None:
+    for sub in ranked:
+        pct = getattr(sub, "match_percentage", 0)
+        assert 0 <= pct <= 100, (
+            f"Clamp violation: {sub.release_name} -> {pct}% (must be within [0, 100])"
+        )
+
+
+def test_audit_invariant_movie_scenario_a_exact_group_master_vs_alternatives():
+    """Dune Part Two: exact group+master > platform web equivalent > alternates."""
+    target = "Dune.Part.Two.2024.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX.mkv"
+    exact = "Dune.Part.Two.2024.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX.srt"
+    platform_web = "Dune.Part.Two.2024.1080p.MAX.WEB-DL.DDP5.1.H.264-NTb.srt"
+    alt_webrip = "Dune.Part.Two.2024.1080p.AMZN.WEBRip.DDP5.1-GRP.srt"
+    microrip = "Dune.Part.Two.2024.720p.WEBRip.x264.YTS.srt"
+
+    ranked = _audit_rank(target, [microrip, alt_webrip, platform_web, exact])
+    _assert_monotonic_descending(ranked)
+    _assert_percentages_clamped(ranked)
+
+    assert len(ranked) == 4, "all four WEB variants must be accepted (no hard reject)"
+    assert ranked[0].release_name == exact, "exact group + master match must rank #1"
+    assert ranked[0].match_percentage == 100
+    assert ranked[1].release_name == platform_web, "same-platform WEB-DL must rank #2"
+    # The two remaining alternates rank below the platform equivalent. (The
+    # wrong-service AMZN WEBRip carries the streaming-service mismatch penalty,
+    # so it can sit below the generic WEBRip; both are still monotonic.)
+    assert {ranked[2].release_name, ranked[3].release_name} == {alt_webrip, microrip}
+    assert ranked[1].match_percentage >= ranked[2].match_percentage
+
+
+def test_audit_invariant_movie_scenario_b_edition_isolation():
+    """Avatar Extended: a non-Extended/Theatrical subtitle must rank strictly lower."""
+    target = "Avatar.The.Way.of.Water.2022.Extended.1080p.BluRay.x264-SPARKS.mkv"
+    extended = "Avatar.The.Way.of.Water.2022.Extended.1080p.BluRay.x264-SPARKS.srt"
+    same_group_plain = "Avatar.The.Way.of.Water.2022.1080p.BluRay.x264-SPARKS.srt"
+    theatrical = "Avatar.The.Way.of.Water.2022.Theatrical.1080p.BluRay.x264-SPARKS.srt"
+
+    ranked = _audit_rank(target, [same_group_plain, theatrical, extended])
+    _assert_monotonic_descending(ranked)
+    _assert_percentages_clamped(ranked)
+
+    assert ranked[0].release_name == extended, "Extended subtitle must rank #1"
+    assert ranked[0].match_percentage == 100
+    # Theatrical is a hard edition conflict -> filtered out entirely.
+    assert theatrical not in [s.release_name for s in ranked]
+
+    # The same-group but non-Extended release is accepted yet ranks strictly lower.
+    plain = next(s for s in ranked if s.release_name == same_group_plain)
+    assert plain.match_percentage < ranked[0].match_percentage, (
+        f"Non-Extended same-group release ({plain.match_percentage}%) must rank below "
+        f"Extended ({ranked[0].match_percentage}%)"
+    )
+
+    # With mismatches retained, the Theatrical cut still scores 0% and stays last.
+    retained = _audit_rank(
+        target, [same_group_plain, theatrical, extended], discard_mismatches=False
+    )
+    _assert_monotonic_descending(retained)
+    _assert_percentages_clamped(retained)
+    assert retained[-1].release_name == theatrical
+    assert retained[-1].match_percentage == 0
+
+
+def test_audit_invariant_series_scenario_a_season_episode_integrity():
+    """House of the Dragon S02E04: other episodes/seasons are excluded or ranked lower."""
+    target = (
+        "House.of.the.Dragon.S02E04.The.Red.Dragon.and.the.Gold.1080p.MAX.WEB-DL.H.264-FLUX.mkv"
+    )
+    match = "House.of.the.Dragon.S02E04.1080p.MAX.WEB-DL.H.264-FLUX.srt"
+    wrong_ep_pre = "House.of.the.Dragon.S02E03.1080p.MAX.WEB-DL.H.264-FLUX.srt"
+    wrong_ep_post = "House.of.the.Dragon.S02E05.1080p.MAX.WEB-DL.H.264-FLUX.srt"
+    wrong_season = "House.of.the.Dragon.S01E04.1080p.MAX.WEB-DL.H.264-FLUX.srt"
+    pool = [wrong_season, wrong_ep_pre, wrong_ep_post, match]
+
+    ranked = _audit_rank(target, pool)
+    _assert_monotonic_descending(ranked)
+    _assert_percentages_clamped(ranked)
+    assert ranked[0].release_name == match
+    assert ranked[0].match_percentage == 100
+    # Wrong season/episode candidates are disqualified completely.
+    assert [s.release_name for s in ranked] == [match]
+
+    # When mismatches are retained they must still be strictly lower than the match.
+    retained = _audit_rank(target, pool, discard_mismatches=False)
+    _assert_monotonic_descending(retained)
+    _assert_percentages_clamped(retained)
+    assert retained[0].release_name == match
+    assert all(s.match_percentage <= retained[0].match_percentage for s in retained[1:])
+
+
+def test_audit_invariant_series_scenario_b_audio_channels_and_multi_episode():
+    """Shogun S01E05: 5.1/7.1 are audio (not episodes) and E05-E06 never trumps E05."""
+    target = "Shogun.2024.S01E05.1080p.DSNP.WEB-DL.DDP5.1.H.264-FLUX.mkv"
+    single = "Shogun.2024.S01E05.1080p.DSNP.WEB-DL.DDP5.1.H.264-FLUX.srt"
+    double = "Shogun.2024.S01E05-E06.1080p.DSNP.WEB-DL.DDP5.1.H.264-FLUX.srt"
+    audio_71 = "Shogun.2024.S01E05.1080p.DSNP.WEB-DL.DDP7.1.H.264-FLUX.srt"
+
+    # Audio channels must never be parsed as episode numbers.
+    for name in (target, single, double, audio_71):
+        meta = extract_metadata(name)
+        assert meta["season"] == 1, name
+        assert meta["episode"] == 5, f"{name} -> episode {meta['episode']} (audio mis-parsed?)"
+
+    # The double-episode pack must not outrank the exact single, in any order.
+    for pool in ([double, single, audio_71], [single, double, audio_71], [audio_71, double, single]):
+        ranked = _audit_rank(target, pool)
+        _assert_monotonic_descending(ranked)
+        _assert_percentages_clamped(ranked)
+        assert ranked[0].release_name == single, (
+            f"Exact single episode must rank #1, got {ranked[0].release_name}"
+        )
+
+
+def test_audit_invariant_tie_break_audio_codec():
+    """Equal group+source: the closer audio profile breaks the tie."""
+    target = "Movie.2024.1080p.BluRay.DTS-HD.MA.5.1.x264-GRP.mkv"
+    dts_hd = "Movie.2024.1080p.BluRay.DTS-HD.MA.5.1.x264-GRP.srt"
+    ddp = "Movie.2024.1080p.BluRay.DDP5.1.x264-GRP.srt"
+
+    ranked = _audit_rank(target, [ddp, dts_hd])
+    _assert_monotonic_descending(ranked)
+    _assert_percentages_clamped(ranked)
+    assert ranked[0].release_name == dts_hd
+    assert ranked[0].score > ranked[1].score, "matching audio profile must win the tie"
+
+
+def test_audit_invariant_tie_break_scene_over_reupload():
+    """Equal metadata: clean scene dot-notation beats a website-watermarked re-upload."""
+    target = "Movie.2024.1080p.BluRay.x264-GRP.mkv"
+    scene = "Movie.2024.1080p.BluRay.x264-GRP.srt"
+    reupload = "Movie 2024 1080p BluRay x264 GRP [www.SubScene.com].srt"
+
+    ranked = _audit_rank(target, [reupload, scene])
+    _assert_monotonic_descending(ranked)
+    _assert_percentages_clamped(ranked)
+    assert ranked[0].release_name == scene
+    assert ranked[0].score > ranked[1].score
+
+
+def test_audit_invariant_monotonic_and_clamped_over_large_mixed_pool():
+    """Every adjacent pair descends and every percentage is within [0, 100]."""
+    targets = [
+        "Shogun.2024.S01E05.1080p.DSNP.WEB-DL.DDP5.1.H.264-FLUX.mkv",
+        "Dune.Part.Two.2024.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX.mkv",
+    ]
+    services = ["DSNP", "HMAX", "AMZN", "NF", "ATVP"]
+    sources = ["WEB-DL", "WEBRip", "BluRay", "Remux", "HDTV"]
+    resolutions = ["2160p", "1080p", "720p"]
+    groups = ["FLUX", "NTb", "CMRG", "GRP", "YTS"]
+
+    pool: list[str] = []
+    i = 0
+    for svc in services:
+        for src in sources:
+            for res in resolutions:
+                pool.append(f"Shogun.2024.S01E05.{res}.{svc}.{src}.x264-{groups[i % len(groups)]}.srt")
+                pool.append(
+                    f"Dune.Part.Two.2024.{res}.{svc}.{src}.H.265-{groups[i % len(groups)]}.srt"
+                )
+                i += 1
+    pool += [
+        "Shogun.2024.S01E03.1080p.DSNP.WEB-DL.srt",
+        "Shogun.2024.S01E05-E06.1080p.DSNP.WEB-DL.srt",
+        "Dune.Part.Two.2024.1080p.AMZN.WEBRip.srt",
+    ]
+
+    asserted = 0
+    for target in targets:
+        ranked = _audit_rank(target, pool, discard_mismatches=False)
+        _assert_monotonic_descending(ranked)
+        _assert_percentages_clamped(ranked)
+        asserted += len(ranked)
+    assert asserted >= 50, "expected a large candidate pool"

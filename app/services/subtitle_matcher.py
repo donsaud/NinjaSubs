@@ -160,6 +160,12 @@ WEIGHT_RESOLUTION_MATCH = 15
 WEIGHT_RESOLUTION_CLOSE = 5
 WEIGHT_CODEC_MATCH = 10
 WEIGHT_AUDIO_MATCH = 10
+# Prefer the exact single episode over a multi-episode/range release (e.g.
+# S01E05-E06) for a single-episode target: identical content, weaker match.
+WEIGHT_MULTI_EP_PENALTY = 20
+# Tie-breaker: a re-uploaded/malformed filename (website URL, tracker domain)
+# must rank below a clean scene dot-notation release of otherwise equal metadata.
+WEIGHT_REUPLOAD_PENALTY = 10
 
 # Language tokens and streaming services to never confuse with scene release groups
 _LANGUAGE_TOKENS = {
@@ -402,6 +408,9 @@ EDITIONS = [
 
 _REPACK_REGEX = re.compile(r"(?i)\b(repack\d?|proper|rerip)\b")
 _REMUX_REGEX = re.compile(r"(?i)\b(uhd[-._ ]?remux|bdremux|remux)\b")
+# Re-upload / malformed markers (website URLs, tracker domains) that indicate a
+# non-scene name which should lose a tie to a clean scene dot-notation release.
+_REUPLOAD_REGEX = re.compile(r"(?i)(?:https?://|www\.|\.(?:com|net|org|info|tv|cc|me|link|club|xyz)\b)")
 
 _FPS_PATTERNS = [
     (re.compile(r"(?i)\b(23\.976(?:fps)?|23\.98(?:fps)?)\b"), 23.976),
@@ -982,6 +991,135 @@ def extract_metadata(filename: str) -> dict[str, Any]:
             or group.lower() in _SPEC_TAGS
         ):
             group = None
+
+    # Supplemental metadata extraction using guessit when fields are missing
+    needs_guessit = (
+        not group
+        or not source
+        or not resolution
+        or not video_codec
+        or (season is None and episode is None and absolute_episode is None)
+    )
+
+    g_meta = {}
+    if needs_guessit:
+        try:
+            from app.services.sync.matching import guess_metadata
+
+            g_meta = guess_metadata(raw_str)
+        except Exception:
+            g_meta = {}
+
+    if g_meta:
+        if not group and g_meta.get("release_group"):
+            g_cand = g_meta.get("release_group")
+            if isinstance(g_cand, list):
+                g_cand = g_cand[0]
+            if isinstance(g_cand, str):
+                g_cand = g_cand.strip(" ._-\t[]()")
+                if (
+                    g_cand
+                    and g_cand.lower() not in _ALL_INVALID_GROUPS
+                    and g_cand.lower() not in _SUBTITLE_PROVIDERS
+                    and g_cand.lower() not in _SPEC_TAGS
+                    and len(g_cand) >= 2
+                    and not g_cand.isdigit()
+                    and not re.match(
+                        r"(?i)^(?:s\d+(?:e\d+)?|e\d+|ep\d+|se\d+|\d+x\d+|season\d+|episode\d+|bd|dvd|\d+)$",
+                        g_cand,
+                    )
+                ):
+                    group = g_cand
+
+        if not edition and g_meta.get("edition"):
+            ed_raw = str(g_meta.get("edition")).lower()
+            for pattern, ed_key in EDITIONS:
+                if pattern.search(ed_raw):
+                    edition = ed_key
+                    break
+
+        if not service and g_meta.get("streaming_service"):
+            srv_raw = str(g_meta.get("streaming_service")).lower()
+            for pattern, s_key in SERVICES:
+                if pattern.search(srv_raw):
+                    service = s_key
+                    break
+
+        if not resolution and g_meta.get("screen_size"):
+            sc_raw = str(g_meta.get("screen_size")).lower()
+            res_m = _RES_REGEX.search(sc_raw)
+            if res_m:
+                res_tok = res_m.group(1).lower()
+                if res_tok in ("2160p", "4k", "uhd"):
+                    resolution = "2160p"
+                elif res_tok in ("1080p", "1080i"):
+                    resolution = "1080p"
+                elif res_tok in ("720p",):
+                    resolution = "720p"
+                elif res_tok in ("576p", "576i"):
+                    resolution = "576p"
+                elif res_tok in ("480p", "480i"):
+                    resolution = "480p"
+
+        if not video_codec and g_meta.get("video_codec"):
+            vc_raw = str(g_meta.get("video_codec")).lower()
+            for pattern, c_key in VIDEO_CODECS:
+                if pattern.search(vc_raw):
+                    video_codec = c_key
+                    break
+            if video_codec and not codec:
+                codec = video_codec
+
+        if not source:
+            other = g_meta.get("other")
+            if other and ("Remux" in other if isinstance(other, list) else other == "Remux"):
+                source = "Remux"
+                is_remux = True
+            elif g_meta.get("source"):
+                src_raw = str(g_meta.get("source")).lower()
+                for pattern, src_key in SOURCES:
+                    if pattern.search(src_raw):
+                        source = src_key
+                        break
+            if source:
+                source_family = SOURCE_FAMILIES.get(source)
+
+        if year is None and g_meta.get("year"):
+            try:
+                y_val = int(g_meta["year"])
+                if 1900 <= y_val <= 2099:
+                    year = y_val
+            except (ValueError, TypeError):
+                pass
+
+        if season is None and absolute_episode is None and not episodes and g_meta.get("season"):
+            try:
+                s_val = int(
+                    g_meta["season"][0]
+                    if isinstance(g_meta["season"], list)
+                    else g_meta["season"]
+                )
+                if 0 < s_val <= 99:
+                    season = s_val
+            except (ValueError, TypeError):
+                pass
+
+        if episode is None and absolute_episode is None and not episodes and g_meta.get("episode"):
+            try:
+                ep_val = int(
+                    g_meta["episode"][0]
+                    if isinstance(g_meta["episode"], list)
+                    else g_meta["episode"]
+                )
+                if ep_val > 0:
+                    episode = ep_val
+                    episodes = {ep_val}
+            except (ValueError, TypeError):
+                pass
+
+    if service and not source:
+        source = "WEB-DL"
+        source_family = "WEB"
 
     # 13. Clean Title Extraction
     title = _extract_pure_title(raw_str, year, season, episode)
@@ -1645,6 +1783,14 @@ def calculate_compatibility(
             score += 5
             reasons.append(f"TV Season {v_season} match (+5)")
 
+        # Prefer the exact single episode over a multi-episode/range release
+        # (S01E05-E06) for a single-episode target: same content, weaker match.
+        if v_ep is not None and len(s_eps) > 1 and v_ep in s_eps:
+            score -= WEIGHT_MULTI_EP_PENALTY
+            reasons.append(
+                f"Multi-episode release {sorted(s_eps)} (-{WEIGHT_MULTI_EP_PENALTY})"
+            )
+
         # Release Group Matching for Standard TV & Movies
         v_grp = v_meta.get("group")
         s_grp = s_meta.get("group")
@@ -1821,6 +1967,13 @@ def calculate_compatibility(
         elif {v_aud, s_aud} <= {"ddp5.1", "ddp", "dd5.1", "ac3"}:
             score += WEIGHT_AUDIO_MATCH
             reasons.append("Dolby Digital profile compatibility (+10)")
+
+    # 11. Re-upload / malformed filename penalty (website or tracker domain marker).
+    if _REUPLOAD_REGEX.search(s_meta.get("raw_filename", "")):
+        score -= WEIGHT_REUPLOAD_PENALTY
+        reasons.append(
+            f"Re-upload/website marker in filename (-{WEIGHT_REUPLOAD_PENALTY})"
+        )
 
     # Special Anime Elevation: Guarantee compatible anime episode subtitles reach 100% (score >= 135)
     if is_anime and is_anime_ep_match and not is_unshared_fansub and score > 0:
@@ -2171,10 +2324,18 @@ def rank_subtitles(
             except (ValueError, TypeError):
                 conf_val = 0.5
 
+        pct = (
+            getattr(s, "match_percentage", None)
+            if not isinstance(s, dict)
+            else s.get("match_percentage", 0)
+        )
+        pct_val = pct if pct is not None else 0
+
         return (
             l_idx,
             acc_idx,
             is_h,
+            -pct_val,
             -sc_val,
             hi_rank,
             -conf_val,

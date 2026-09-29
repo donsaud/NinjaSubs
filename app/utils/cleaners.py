@@ -33,7 +33,13 @@ _AD_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"قناة"),
     re.compile(r"تيليجرام"),
     re.compile(r"تويتر"),
+    re.compile(r"downloaded\s+from", re.IGNORECASE),
+    re.compile(r"rarbg", re.IGNORECASE),
+    re.compile(r"yts\.(?:mx|lt|ag)", re.IGNORECASE),
+    re.compile(r"addic7ed", re.IGNORECASE),
     re.compile(r"@\w+", re.IGNORECASE),
+    re.compile(r"منتديات"),
+    re.compile(r"ستار[\s._-]?تايمز"),
 )
 
 # Direct translation credits that are whitelisted when keep_translator_credits is on.
@@ -371,11 +377,13 @@ def _parse_seconds(timestamp_line: str) -> tuple[float, float] | None:
 
 
 def _has_ad(text: str) -> bool:
-    return any(pattern.search(text) for pattern in _AD_PATTERNS)
+    norm = text.replace("\u0640", "")
+    return any(pattern.search(text) for pattern in _AD_PATTERNS) or any(pattern.search(norm) for pattern in _AD_PATTERNS)
 
 
 def _has_credit(text: str) -> bool:
-    return any(pattern.search(text) for pattern in _CREDIT_PATTERNS)
+    norm = text.replace("\u0640", "")
+    return any(pattern.search(text) for pattern in _CREDIT_PATTERNS) or any(pattern.search(norm) for pattern in _CREDIT_PATTERNS)
 
 
 def _translator_protected_handle_spans(line: str) -> list[tuple[int, int]]:

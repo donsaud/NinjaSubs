@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import zipfile
 
 from app.services.sync.matching import (
@@ -13,6 +14,15 @@ from app.services.sync.matching import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SDH_MEMBER_PATTERN = re.compile(r"(?i)(?:^|[\s._\-\[])(?:sdh|cc|hi)(?:$|[\s._\-\]])|hearing[\s._-]?impaired")
+
+
+def _is_sdh_member(name: str) -> bool:
+    """True when a ZIP member filename indicates Hearing Impaired / SDH content."""
+    base = name.rsplit("/", 1)[-1].strip()
+    return bool(_SDH_MEMBER_PATTERN.search(base))
+
 
 
 def select_zip_member(
@@ -74,8 +84,14 @@ def select_zip_member(
             )
             return None
 
-    # Largest .srt first, then largest of any subtitle format.
-    pool.sort(key=lambda item: (not item[0].lower().endswith(".srt"), -item[1]))
+    # Non-SDH dialogue first, then .srt format, then largest size.
+    pool.sort(
+        key=lambda item: (
+            _is_sdh_member(item[0]),
+            not item[0].lower().endswith(".srt"),
+            -item[1],
+        )
+    )
     return pool[0][0] if pool else None
 
 

@@ -1106,10 +1106,12 @@
                             <p class="pref-desc">Automatically syncs subtitle timing to match your video stream perfectly.</p>
                         </div>
                         <label class="toggle">
-                            <input type="checkbox" id="autoSync" class="peer sr-only">
+                            <input type="checkbox" id="autoSync" class="peer sr-only" checked>
                             <span class="toggle-track"></span>
                         </label>
                     </div>
+
+
 
                     <div class="pref-row">
                         <div class="min-w-0">
@@ -1291,7 +1293,7 @@
         </div>
 
         <!-- Footer -->
-        <footer class="site-footer">Made with ❤️ by <a href="https://github.com/donsaud" target="_blank" rel="noopener noreferrer" class="footer-link">donsaud</a> &bull; Free &amp; <a href="https://github.com/donsaud/NinjaSubs" target="_blank" rel="noopener noreferrer" class="footer-link">Open Source</a> &bull; <span class="version-tag">v1.0.0</span></footer>
+        <footer class="site-footer">Made with ❤️ by <a href="https://github.com/donsaud" target="_blank" rel="noopener noreferrer" class="footer-link">donsaud</a> &bull; Free &amp; <a href="https://github.com/donsaud/NinjaSubs" target="_blank" rel="noopener noreferrer" class="footer-link">Open Source</a> &bull; <span class="version-tag">v1.1.0</span></footer>
     </div>
 
     <!-- Minimal Toast Notification -->
@@ -1579,6 +1581,7 @@
             if (autoSyncToggle && typeof initialPrefs.auto_sync === "boolean") {
                 autoSyncToggle.checked = initialPrefs.auto_sync;
             }
+
             const stripDiacriticsToggle = document.getElementById("stripDiacritics");
             if (
                 stripDiacriticsToggle &&
@@ -1775,8 +1778,9 @@
             if (!convertAssEnabled) configObj.convert_ass_to_srt = false;
 
             const autoSyncToggle = document.getElementById("autoSync");
-            const autoSyncEnabled = autoSyncToggle ? autoSyncToggle.checked : false;
-            if (autoSyncEnabled) configObj.auto_sync = true;
+            const autoSyncEnabled = autoSyncToggle ? autoSyncToggle.checked : true;
+            // Default is on: serialize only when the user disables it.
+            if (!autoSyncEnabled) configObj.auto_sync = false;
 
             const stripHiToggle = document.getElementById("stripHiLabels");
             const stripHiEnabled = stripHiToggle ? stripHiToggle.checked : false;
@@ -1798,7 +1802,7 @@
                 !yifyEnabled || !catEnabled || !rtlEnabled || !adEnabled ||
                 !creditsEnabled || cleanFlagsNonDefault ||
                 easternNumeralsEnabled || stripDiacriticsEnabled ||
-                stripHiEnabled || !convertAssEnabled || autoSyncEnabled ||
+                stripHiEnabled || !convertAssEnabled || !autoSyncEnabled ||
                 !subdlEnabled || !subsourceEnabled || !opensubtitlesEnabled;
 
             if (!hasAnyPreference) {
@@ -2159,6 +2163,7 @@
             const el = document.getElementById(id);
             if (el) el.addEventListener("change", updateUrls);
         });
+
 
         applyInitialPrefs();
         updateProviderCollapse();

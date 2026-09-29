@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="NinjaSubs",
-    version="1.0.0",
+    version="1.1.0",
     description="Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization.",
     lifespan=lifespan,
 )
@@ -179,7 +179,7 @@ def _build_manifest(config_str: str | None = None, request: Request | None = Non
     return Manifest(
         id="org.ninjasubs.addon",
         name="NinjaSubs",
-        version="1.0.0",
+        version="1.1.0",
         description=desc,
         logo=logo_url,
         icon=icon_url,
@@ -587,8 +587,13 @@ async def _fetch_subtitles_handler(
         display_score = getattr(rel, "match_percentage", None)
         if display_score is None:
             display_score = rel.score
-        # Create deterministic sub_id hash
+        # Create deterministic sub_id hash scoped to season and episode for series
+        # to prevent cross-episode cache collisions on multi-episode / season packs
         unique_key = f"{rel.provider}:{rel.release_name}:{rel.download_url}"
+        if season is not None:
+            unique_key += f":s{season}"
+        if episode is not None:
+            unique_key += f":e{episode}"
         sub_id = hashlib.sha256(unique_key.encode("utf-8")).hexdigest()[:16]
 
         rel_lang = normalize_to_iso639_2(getattr(rel, "lang", "ara") or "ara")
@@ -618,6 +623,7 @@ async def _fetch_subtitles_handler(
             "subdl_key": prefs.subdl_key,
             "subsource_key": prefs.subsource_key,
             "opensubtitles_key": prefs.opensubtitles_key,
+            "stream_addon_url": prefs.stream_addon_url,
             "lang": rel_lang,
             "uploader": getattr(rel, "uploader", "") or "",
             "hearing_impaired": bool(getattr(rel, "hearing_impaired", False)),
@@ -1117,7 +1123,12 @@ def _merge_sync_meta(meta: dict | None, context: dict | None) -> dict:
     # edition matching and cache fingerprinting, preferring whichever of the
     # cached/context filenames is informative, then the stream URL's path.
     meaningful = ""
-    for candidate in (merged.get("target_filename"), context.get("target_filename")):
+    for candidate in (
+        merged.get("target_filename"),
+        context.get("target_filename"),
+        merged.get("release_name"),
+        context.get("release_name"),
+    ):
         resolved = prefer_meaningful_release_name(candidate)
         if is_informative_release_name(resolved):
             meaningful = resolved
@@ -1138,6 +1149,9 @@ def _sync_meta_for_user(meta: dict | None, context: dict | None, prefs: UserPref
     if prefs is not None:
         for name in ("subdl_key", "subsource_key", "opensubtitles_key"):
             merged[name] = getattr(prefs, name) or ""
+        addon = getattr(prefs, "stream_addon_url", "") or ""
+        if addon:
+            merged["stream_addon_url"] = addon
     return merged
 
 
@@ -1154,13 +1168,7 @@ async def _sync_subtitle_for_response(
 
 
 def _build_sync_orchestrator() -> SyncOrchestrator | None:
-    """Construct the lightweight sync orchestrator: one external reference.
-
-    The playing video stream is never touched — no embedded-track probing, no
-    MovieHash range reads, no header parsing. A single English reference is
-    fetched from SubDL/SubSource/OpenSubtitles for the same IMDb id / season /
-    episode, then ``alass`` aligns the Arabic subtitle to it.
-    """
+    """Construct the sync orchestrator using external exact-match references (SubDL/SubSource/OpenSubtitles)."""
     if _http_client is None:
         return None
     return SyncOrchestrator(
@@ -1414,7 +1422,7 @@ async def _serve_subtitle_handler(
             eastern_numerals_enabled = False
             strip_diacritics_enabled = False
             convert_ass_enabled = True
-            auto_sync_enabled = False
+            auto_sync_enabled = True
 
     # URL-decode incoming sub_id in case player encoded spaces/brackets (%5B...%5D)
     clean_sub_id = urllib.parse.unquote(sub_id).strip()
@@ -1447,25 +1455,54 @@ async def _serve_subtitle_handler(
     cached_content = await cache_manager.get_subtitle(target_id)
     if cached_content:
         meta = cache_manager.get_metadata(target_id)
-        release_name = meta.get("release_name", target_id) if meta else target_id
-        cached_content = await _sync_subtitle_for_response(
-            cached_content, meta, media_context, target_id, cfg_prefs,
-            auto_sync_enabled, convert_ass_enabled,
-        )
-        return _build_subtitle_response(
-            cached_content,
-            release_name,
-            detected_format,
-            rtl_fix_enabled,
-            ad_removal_enabled,
-            keep_credits_enabled,
-            clean_options,
-            strip_hi_enabled,
-            eastern_numerals_enabled,
-            strip_diacritics_enabled,
-            convert_ass_enabled,
-            auto_sync=auto_sync_enabled,
-        )
+        # Verify season/episode match if present in context (guards against legacy cache collision)
+        req_season = media_context.get("season")
+        req_episode = media_context.get("episode")
+        meta_season = meta.get("season") if meta else None
+        meta_episode = meta.get("episode") if meta else None
+        mismatch = False
+        if req_season is not None and meta_season is not None:
+            try:
+                if int(req_season) != int(meta_season):
+                    mismatch = True
+            except (ValueError, TypeError):
+                pass
+        if req_episode is not None and meta_episode is not None:
+            try:
+                if int(req_episode) != int(meta_episode):
+                    mismatch = True
+            except (ValueError, TypeError):
+                pass
+
+        if mismatch:
+            logger.warning(
+                "[cache] detected cross-episode collision for %s (req: S%sE%s, cached: S%sE%s) -> invalidating stale cache",
+                target_id, req_season, req_episode, meta_season, meta_episode,
+            )
+            cached_content = None
+        else:
+            release_name = meta.get("release_name", target_id) if meta else target_id
+            synced_content = await _sync_subtitle_for_response(
+                cached_content, meta, media_context, target_id, cfg_prefs,
+                auto_sync_enabled, convert_ass_enabled,
+            )
+            if synced_content and synced_content != cached_content:
+                cached_content = synced_content
+                await cache_manager.save_subtitle(target_id, cached_content)
+            return _build_subtitle_response(
+                cached_content,
+                release_name,
+                detected_format,
+                rtl_fix_enabled,
+                ad_removal_enabled,
+                keep_credits_enabled,
+                clean_options,
+                strip_hi_enabled,
+                eastern_numerals_enabled,
+                strip_diacritics_enabled,
+                convert_ass_enabled,
+                auto_sync=auto_sync_enabled,
+            )
 
     # Failed recently (broken upstream archive): short-circuit before any
     # provider fan-out so client retries cannot spam SubDL/SubSource.
@@ -1650,10 +1687,13 @@ async def _serve_subtitle_handler(
     cache_manager.clear_failed(target_id)
 
     # 5b. Optional auto-sync against a trusted reference (best-effort, strict timeout).
-    srt_bytes = await _sync_subtitle_for_response(
+    synced_bytes = await _sync_subtitle_for_response(
         srt_bytes, meta, media_context, target_id, cfg_prefs,
         auto_sync_enabled, convert_ass_enabled,
     )
+    if synced_bytes and synced_bytes != srt_bytes:
+        srt_bytes = synced_bytes
+        await cache_manager.save_subtitle(target_id, srt_bytes)
 
     # 6. Serve with appropriate headers preserving native subtitle format
     return _build_subtitle_response(
@@ -1721,7 +1761,7 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             eastern_numerals_enabled = False
             strip_diacritics_enabled = False
             convert_ass_enabled = True
-            auto_sync_enabled = False
+            auto_sync_enabled = True
     else:
         if "enable_rtl_fix" in request.query_params:
             rtl_fix_enabled = request.query_params.get("enable_rtl_fix", "1").lower() not in (
@@ -1767,22 +1807,48 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
     cached_content = await cache_manager.get_subtitle(str(file_id))
     if cached_content:
         meta = cache_manager.get_metadata(str(file_id))
-        release_name = meta.get("release_name", file_id) if meta else file_id
-        cached_content = await _sync_payload(cached_content, meta)
-        return _build_subtitle_response(
-            cached_content,
-            release_name,
-            req_fmt,
-            rtl_fix_enabled,
-            ad_removal_enabled,
-            keep_credits_enabled,
-            clean_options,
-            strip_hi_enabled,
-            eastern_numerals_enabled,
-            strip_diacritics_enabled,
-            convert_ass_enabled,
-            auto_sync=auto_sync_enabled,
-        )
+        media_ctx = _media_context_from_request(request)
+        req_season = media_ctx.get("season")
+        req_episode = media_ctx.get("episode")
+        meta_season = meta.get("season") if meta else None
+        meta_episode = meta.get("episode") if meta else None
+        mismatch = False
+        if req_season is not None and meta_season is not None:
+            try:
+                if int(req_season) != int(meta_season):
+                    mismatch = True
+            except (ValueError, TypeError):
+                pass
+        if req_episode is not None and meta_episode is not None:
+            try:
+                if int(req_episode) != int(meta_episode):
+                    mismatch = True
+            except (ValueError, TypeError):
+                pass
+
+        if mismatch:
+            logger.warning(
+                "[cache] detected cross-episode collision for OpenSubtitles %s (req: S%sE%s, cached: S%sE%s) -> invalidating stale cache",
+                file_id, req_season, req_episode, meta_season, meta_episode,
+            )
+            cached_content = None
+        else:
+            release_name = meta.get("release_name", file_id) if meta else file_id
+            cached_content = await _sync_payload(cached_content, meta)
+            return _build_subtitle_response(
+                cached_content,
+                release_name,
+                req_fmt,
+                rtl_fix_enabled,
+                ad_removal_enabled,
+                keep_credits_enabled,
+                clean_options,
+                strip_hi_enabled,
+                eastern_numerals_enabled,
+                strip_diacritics_enabled,
+                convert_ass_enabled,
+                auto_sync=auto_sync_enabled,
+            )
 
     # 2. Extract keys
     api_key = ""

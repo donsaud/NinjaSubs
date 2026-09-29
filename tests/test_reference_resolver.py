@@ -1217,6 +1217,8 @@ def test_looks_like_season_pack_and_candidate_episode():
 
     assert candidate_episode_number("Suits.Season.1.1080p.DTG.srt") is None
     assert candidate_episode_number("Suits.S01E02.Pilot.srt") == 2
+    assert candidate_episode_number("Into.the.Wild.2007.1080p.BluRay.DD5.1.x264-playHD-Rakuv.mkv") is None
+    assert candidate_episode_number("Movie.2023.TrueHD.Atmos.7.1.4.mkv") is None
 
 
 def test_reference_group_rank_prefers_retail_encodes():

@@ -12,7 +12,10 @@ services:
     volumes:
       # Persistent LRU disk cache
       - ./subs_cache:/app/cache
+      # Read-only access to local media streams (disabled for isolated stream addon URL testing)
+      # - /mnt/aiostreams:/mnt/aiostreams:ro
     environment:
+      - LOCAL_MEDIA_DIRS=
       - SUBDL_API_KEY=${SUBDL_API_KEY:-}
       - SUBSOURCE_API_KEY=${SUBSOURCE_API_KEY:-}
       - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:-}
@@ -23,7 +26,7 @@ services:
       - LAN_IP=${LAN_IP:-}
       - HOST_IP=${HOST_IP:-}
       # Optional subtitle auto-sync (alass) + Redis result cache
-      - ENABLE_SUBTITLE_SYNC=${ENABLE_SUBTITLE_SYNC:-false}
+      - ENABLE_SUBTITLE_SYNC=${ENABLE_SUBTITLE_SYNC:-true}
       - REDIS_URL=${REDIS_URL:-}
       - ALASS_PATH=${ALASS_PATH:-alass}
       - ALASS_TIMEOUT_SECONDS=${ALASS_TIMEOUT_SECONDS:-10}
@@ -45,3 +48,12 @@ services:
           memory: 150M
         reservations:
           memory: 50M
+    networks:
+      - default
+      - medianet
+
+networks:
+  default:
+  medianet:
+    external: true
+

@@ -92,12 +92,14 @@ class SyncOrchestrator:
         hash_strategy: Any | None = None,
         embedded_strategy: Any | None = None,
         external_strategy: Any | None = None,
+        stream_resolver: Any | None = None,
         sync_service: Any | None = None,
         sync_cache: Any | None = None,
     ) -> None:
         self._hash_strategy = hash_strategy
         self._embedded_strategy = embedded_strategy
         self._external_strategy = external_strategy
+        self._stream_resolver = stream_resolver
         self._sync_service = sync_service
         self._sync_cache = sync_cache
         self._inflight: dict[str, asyncio.Future] = {}
@@ -106,15 +108,49 @@ class SyncOrchestrator:
         self._warmups: set[str] = set()
 
     def _strategies(self) -> list[tuple[str, Any]]:
-        # The embedded track is the ground-truth reference (the video's own
-        # bytes), so it is tried first — the range-based extractor reads only a
-        # couple of small windows. Fall back to the external exact-match tree,
-        # then the stream MovieHash.
-        return [
-            ("embedded", self._embedded_strategy),
-            ("external exact-match", self._external_strategy),
-            ("hash-exact", self._hash_strategy),
-        ]
+        strats = []
+        if self._embedded_strategy is not None:
+            strats.append(("embedded", self._embedded_strategy))
+        if self._external_strategy is not None:
+            strats.append(("external exact-match", self._external_strategy))
+        if self._hash_strategy is not None:
+            strats.append(("hash-exact", self._hash_strategy))
+        return strats
+
+    async def _maybe_resolve_stream_url(self, query: ReferenceQuery) -> None:
+        """Resolve direct stream URL using the stream resolver if not already provided."""
+        if self._stream_resolver is None or self._embedded_strategy is None or (query.stream_url or "").strip():
+            return
+        # If media file is already found locally on disk, skip remote stream addon query
+        if self._embedded_strategy and hasattr(self._embedded_strategy, "_find_media_file"):
+            if query.target_filename:
+                local_found = await asyncio.to_thread(
+                    self._embedded_strategy._find_media_file,
+                    query.target_filename,
+                    query.video_size,
+                )
+                if local_found:
+                    return
+
+        kwargs: dict[str, Any] = {}
+        user_base = (query.stream_addon_url or "").strip()
+        if user_base:
+            kwargs["base_url"] = user_base
+        try:
+            url = await self._stream_resolver.resolve_stream_url(
+                query.imdb_id,
+                query.media_type,
+                query.target_filename,
+                season=query.season,
+                episode=query.episode,
+                **kwargs,
+            )
+        except Exception as exc:
+            logger.info("[sync] stream addon resolution failed: %s", exc)
+            return
+        if url:
+            query.stream_url = url
+            logger.info("[sync] stream addon resolved a direct stream URL for embedded probe")
 
     def _embedded_reference_from_disk(self, query: ReferenceQuery) -> ResolvedReference | None:
         """Return the on-disk internal-track reference if the warm-up produced one.
@@ -166,16 +202,20 @@ class SyncOrchestrator:
         finally:
             self._warmups.discard(key)
 
-    def _build_query(self, meta: dict) -> ReferenceQuery:
+    def _build_query(self, meta: dict, target_id: str | None = None) -> ReferenceQuery:
         return ReferenceQuery(
             imdb_id=str(meta.get("imdb_id") or ""),
             target_filename=meta.get("target_filename") or meta.get("release_name"),
+            target_sub_release_name=meta.get("release_name"),
+            target_sub_id=target_id or meta.get("sub_id"),
+            target_download_url=meta.get("download_url"),
             media_type=str(meta.get("media_type") or "movie"),
             title=meta.get("title"),
             year=_parse_year(meta.get("year")),
             video_hash=meta.get("video_hash"),
             video_size=meta.get("video_size"),
             stream_url=meta.get("stream_url"),
+            stream_addon_url=meta.get("stream_addon_url"),
             season=meta.get("season"),
             episode=meta.get("episode"),
             api_keys={
@@ -183,7 +223,7 @@ class SyncOrchestrator:
                 "subsource": meta.get("subsource_key") or "",
                 "opensubtitles": meta.get("opensubtitles_key") or "",
             },
-            languages=("eng",),
+            languages=("eng", "ara"),
         )
 
     async def evaluate_and_sync(
@@ -282,7 +322,7 @@ class SyncOrchestrator:
             str(meta.get("video_size") or ""), meta.get("lang"),
         ], ensure_ascii=False).encode()).hexdigest()[:16]
         strict = bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True))
-        return f"{key}:v2:{strict}:{context_digest}:{auth_digest}"
+        return f"{key}:v4:{strict}:{context_digest}:{auth_digest}"
 
     async def _execute(
         self, sub_bytes: bytes, meta: dict, target_id: str, auto_sync: bool
@@ -300,7 +340,7 @@ class SyncOrchestrator:
                 )
                 return cached
 
-        query = self._build_query(meta)
+        query = self._build_query(meta, target_id=target_id)
         ready_embedded: ResolvedReference | None = None
         if self._sync_cache is not None and await self._sync_cache.is_failed(resolution_key):
             # The previous attempt aborted before the background embedded warm-up
@@ -320,46 +360,6 @@ class SyncOrchestrator:
             )
             await self._sync_cache.clear_failed(resolution_key)
 
-        if ready_embedded is not None:
-            resolved = ready_embedded
-        else:
-            resolved = ResolvedReference(None)
-            for strategy_name, strategy in self._strategies():
-                if strategy is None:
-                    continue
-                try:
-                    resolved = await strategy.resolve_with_provenance(query)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning("[sync] %s strategy failed: %s -> next", strategy_name, exc)
-                    resolved = ResolvedReference(None)
-                if resolved.text:
-                    logger.info(
-                        "[sync] %s strategy provided a reference (decision=%s)",
-                        strategy_name,
-                        resolved.kind,
-                    )
-                    break
-            # Warm the internal-track reference in the background when the inline
-            # tiers did not use it, so a later request can sync against the
-            # video's own subtitle track without any player-visible latency.
-            self._schedule_embedded_warmup(query, meta, target_id, sub_bytes, resolved)
-
-        if not resolved.text:
-            logger.info("[sync] no deterministic reference available -> aborting sync")
-            if self._sync_cache is not None:
-                await self._sync_cache.mark_failed(resolution_key)
-            return sub_bytes
-        reference = resolved.text
-        decision_kind = resolved.kind
-        logger.info("[sync] reference selected (%d bytes) -> invoking alass", len(reference.encode()))
-
-        # Keep decision provenance alongside the result. Request-bound cache
-        # lookup already happened before any provider calls above.
-        key = build_synced_cache_key(
-            meta, target_id, content_hash=content_hash, decision=decision_kind
-        )
-        # Decoded with the same Arabic-aware priority order as the download path;
-        # decode_subtitle_bytes never raises, so no try/except is needed here.
         from app.extractor import decode_subtitle_bytes
 
         target_text = decode_subtitle_bytes(sub_bytes, lang=meta.get("lang"))
@@ -367,48 +367,97 @@ class SyncOrchestrator:
         if self._sync_service is None:  # pragma: no cover - defensive
             logger.warning("[sync] no sync service configured -> serving original subtitle")
             return sub_bytes
-        # A best-effort edition sync of a target with no release info at all is
-        # a relaxed fallback: tighten the pre-alass timeline gate because no
-        # edition attribute was available to confirm the reference.
-        relaxed = decision_kind == "edition" and not is_informative_release_name(
-            meta.get("target_filename") or meta.get("release_name")
-        )
-        # Embedded references are sampled prefixes (first ~15 min), so their
-        # end runtime is intentionally short: exempt them from duration gates.
-        reference_partial = decision_kind == "embedded" or bool(
-            getattr(resolved, "partial", False)
-        )
-        synced = await self._sync_service.sync_async(
-            target_text,
-            reference,
-            decision_kind=decision_kind,
-            is_series=query.is_series,
-            source_confirmed=resolved.bluray_match,
-            relaxed=relaxed,
-            reference_partial=reference_partial,
-        )
-        if not synced:
-            logger.warning("[sync] alass returned no output -> serving original subtitle")
-            if self._sync_cache is not None:
-                await self._sync_cache.mark_failed(resolution_key)
-            return sub_bytes
 
-        if self._sync_cache is not None:
-            await self._sync_cache.clear_failed(resolution_key)
-            await self._sync_cache.set(key, synced.encode("utf-8"))
-            await self._sync_cache.set(resolution_key, synced.encode("utf-8"))
-            await self._sync_cache.set_meta(
-                key,
-                {
-                    "status": "synced",
-                    "applied_shift": self._applied_shifts(target_text, synced),
-                    "reference_sha": hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16],
-                    "decision": decision_kind,
-                    "timestamp": datetime.now(UTC).isoformat(),
-                },
+        # Candidate reference sources to attempt sequentially:
+        # If ready_embedded exists on disk, try it first. Otherwise resolve stream URL and evaluate strategies.
+        attempts: list[tuple[str, Any]] = []
+        if ready_embedded is not None and ready_embedded.text:
+            attempts.append(("ready-embedded", ready_embedded))
+
+        await self._maybe_resolve_stream_url(query)
+        for sname, strat in self._strategies():
+            if strat is not None:
+                attempts.append((sname, strat))
+
+        last_resolved = ResolvedReference(None)
+        for strategy_name, strategy_obj in attempts:
+            if isinstance(strategy_obj, ResolvedReference):
+                resolved = strategy_obj
+            else:
+                try:
+                    resolved = await strategy_obj.resolve_with_provenance(query)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("[sync] %s strategy failed: %s -> next", strategy_name, exc)
+                    resolved = ResolvedReference(None)
+
+            if not resolved.text:
+                continue
+
+            last_resolved = resolved
+            reference = resolved.text
+            decision_kind = resolved.kind
+            logger.info(
+                "[sync] %s strategy provided a reference (decision=%s, %d bytes) -> invoking alass",
+                strategy_name,
+                decision_kind,
+                len(reference.encode("utf-8")),
             )
-        logger.info("[sync] synchronized subtitle %s (%d bytes) and cached", target_id, len(synced))
-        return synced.encode("utf-8")
+
+            relaxed = decision_kind == "edition" and not is_informative_release_name(
+                meta.get("target_filename") or meta.get("release_name")
+            )
+            reference_partial = bool(getattr(resolved, "partial", False))
+
+            synced = await self._sync_service.sync_async(
+                target_text,
+                reference,
+                decision_kind=decision_kind,
+                is_series=query.is_series,
+                source_confirmed=resolved.bluray_match,
+                relaxed=relaxed,
+                reference_partial=reference_partial,
+            )
+
+            if synced:
+                key = build_synced_cache_key(
+                    meta, target_id, content_hash=content_hash, decision=decision_kind
+                )
+                if self._sync_cache is not None:
+                    await self._sync_cache.clear_failed(resolution_key)
+                    await self._sync_cache.set(key, synced.encode("utf-8"))
+                    await self._sync_cache.set(resolution_key, synced.encode("utf-8"))
+                    await self._sync_cache.set_meta(
+                        key,
+                        {
+                            "status": "synced",
+                            "applied_shift": self._applied_shifts(target_text, synced),
+                            "reference_sha": hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16],
+                            "decision": decision_kind,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                logger.info(
+                    "[sync] synchronized subtitle %s (%d bytes, strategy=%s) and cached",
+                    target_id,
+                    len(synced),
+                    strategy_name,
+                )
+                self._schedule_embedded_warmup(query, meta, target_id, sub_bytes, resolved)
+                return synced.encode("utf-8")
+
+            logger.warning(
+                "[sync] %s strategy reference failed sync/validation -> falling back to next strategy",
+                strategy_name,
+            )
+
+        self._schedule_embedded_warmup(query, meta, target_id, sub_bytes, last_resolved)
+        if not last_resolved.text:
+            logger.info("[sync] no deterministic reference available -> aborting sync")
+        else:
+            logger.warning("[sync] all sync strategies failed -> serving original subtitle")
+        if self._sync_cache is not None:
+            await self._sync_cache.mark_failed(resolution_key)
+        return sub_bytes
 
     @staticmethod
     def _applied_shifts(target_text: str, synced: str) -> list[float]:

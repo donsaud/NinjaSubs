@@ -35,9 +35,11 @@ _BLANK_LINES_REGEX = re.compile(r"\n{3,}")
 _INLINE_ASS_TAG_REGEX = re.compile(r"\{[^}\n]*\}")
 
 # A SubRip timespan line, tolerating trailing positioning/styling tokens that
-# some generators append (e.g. ``00:03:03,508 --> 00:03:04,592 X1:0 Y1:0``).
+# A SubRip timespan line, tolerating trailing positioning/styling tokens that
+# some generators append (e.g. ``00:03:03,508 --> 00:03:04,592 X1:0 Y1:0``)
+# and WebVTT 2-part timestamps (e.g. ``03:03.508 --> 03:04.592``).
 _TIMESPAN_LINE_REGEX = re.compile(
-    r"(?P<start>\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(?P<end>\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})"
+    r"(?P<start>(?:\d{1,2}:)?\d{1,2}:\d{2}[,.]\d{1,3})\s*-->\s*(?P<end>(?:\d{1,2}:)?\d{1,2}:\d{2}[,.]\d{1,3})"
 )
 
 # Standalone positioning/style token lines to drop from cue text.
@@ -45,6 +47,9 @@ _POSITION_TOKEN_LINE_REGEX = re.compile(
     r"^\s*(?:x[12]|y[12]|w\d*|h\d*|line|position|align|margin[LVR]?|start|end)\s*[:=].*$",
     re.IGNORECASE,
 )
+
+# Filler/dummy cues containing only dots, dashes, asterisks or symbols (e.g. "..", "---", "***")
+_DUMMY_CUE_REGEX = re.compile(r"^[\s.\-*_~+=|/\\]+$")
 
 # A reference/target must contain at least this many well-formed cues to be
 # worth handing to alass.
@@ -72,10 +77,14 @@ def _vtt_to_srt(text: str) -> str:
         if timestamp_index is None:
             continue
         raw_ts = lines[timestamp_index]
-        start, _, end_and_settings = raw_ts.partition("-->")
-        end = end_and_settings.strip().split(" ")[0]
-        start = start.strip().replace(".", ",")
-        end = end.replace(".", ",")
+        start_part, _, end_and_settings = raw_ts.partition("-->")
+        end_part = end_and_settings.strip().split(" ")[0]
+        try:
+            start = _format_timestamp(start_part.strip())
+            end = _format_timestamp(end_part.strip())
+        except Exception:
+            start = start_part.strip().replace(".", ",")
+            end = end_part.replace(".", ",")
         cue_text = "\n".join(lines[timestamp_index + 1 :]).strip()
         if not cue_text:
             continue
@@ -84,18 +93,40 @@ def _vtt_to_srt(text: str) -> str:
 
 
 def _parse_timestamp_ms(value: str) -> int:
-    """Convert ``HH:MM:SS,mmm`` (or ``.`` separator) to milliseconds."""
+    """Convert ``HH:MM:SS,mmm`` or ``MM:SS.mmm`` (or ``.``/``,`` separator) to milliseconds."""
     time_part, _, fraction = value.replace(",", ".").partition(".")
-    hours, minutes, seconds = (int(part) for part in time_part.split(":"))
-    millis = int(fraction.ljust(3, "0")[:3])
+    parts = [int(part) for part in time_part.split(":") if part.strip()]
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+    elif len(parts) == 2:
+        hours = 0
+        minutes, seconds = parts
+    elif len(parts) == 1:
+        hours = 0
+        minutes = 0
+        seconds = parts[0]
+    else:
+        hours, minutes, seconds = 0, 0, 0
+    millis = int(fraction.ljust(3, "0")[:3]) if fraction else 0
     return ((hours * 3600) + (minutes * 60) + seconds) * 1000 + millis
 
 
 def _format_timestamp(value: str) -> str:
     """Re-format a parsed timestamp as strict ``HH:MM:SS,mmm``."""
     time_part, _, fraction = value.replace(",", ".").partition(".")
-    hours, minutes, seconds = (int(part) for part in time_part.split(":"))
-    millis = fraction.ljust(3, "0")[:3]
+    parts = [int(part) for part in time_part.split(":") if part.strip()]
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+    elif len(parts) == 2:
+        hours = 0
+        minutes, seconds = parts
+    elif len(parts) == 1:
+        hours = 0
+        minutes = 0
+        seconds = parts[0]
+    else:
+        hours, minutes, seconds = 0, 0, 0
+    millis = fraction.ljust(3, "0")[:3] if fraction else "000"
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis}"
 
 
@@ -163,7 +194,7 @@ _RELAXED_GAP_RATIO = 0.05
 # A different cut of the same content routinely differs in cue count; a whole
 # season/multi-episode pack or a substantially different master diverges far
 # more, so reject beyond this ratio (larger / smaller cue count).
-_MAX_CUE_COUNT_RATIO = 2.5
+_MAX_CUE_COUNT_RATIO = 3.2
 # A reference whose cue starts jump backwards by more than a minute is a
 # multi-episode/season pack (each episode restarts near zero), not a single.
 _PACK_RESET_THRESHOLD_MS = 60_000
@@ -201,8 +232,20 @@ def _timeline_rejection(
     """
     if reference_partial:
         return None
-    target_duration = _percentile_cue_end_ms(target_srt) / 1000.0
-    ref_duration = _percentile_cue_end_ms(reference) / 1000.0
+    raw_target_duration = _percentile_cue_end_ms(target_srt) / 1000.0
+    raw_ref_duration = _percentile_cue_end_ms(reference) / 1000.0
+
+    target_starts = _cue_starts_ms(target_srt, limit=1)
+    ref_starts = _cue_starts_ms(reference, limit=1)
+    target_start_sec = (target_starts[0] / 1000.0) if target_starts else 0.0
+    ref_start_sec = (ref_starts[0] / 1000.0) if ref_starts else 0.0
+
+    span_target_duration = max(0.0, raw_target_duration - target_start_sec)
+    span_ref_duration = max(0.0, raw_ref_duration - ref_start_sec)
+
+    ref_duration = raw_ref_duration
+    target_duration = raw_target_duration
+
     if ref_duration >= _FILM_RUNTIME_SECONDS:
         tolerance = max(_FILM_GAP_FLOOR_SECONDS, _DURATION_GAP_RATIO * ref_duration)
     else:
@@ -220,7 +263,11 @@ def _timeline_rejection(
                 _RELAXED_GAP_RATIO * max(ref_duration, target_duration),
             ),
         )
-    if abs(target_duration - ref_duration) > tolerance:
+    # Both raw runtime and span duration are tested: if either matches within tolerance,
+    # linear intro shifts or preamble delays do not trigger a false rejection.
+    raw_diff = abs(raw_target_duration - raw_ref_duration)
+    span_diff = abs(span_target_duration - span_ref_duration)
+    if raw_diff > tolerance and span_diff > tolerance:
         return (
             f"duration mismatch detected (target: {target_duration:.1f}s, "
             f"ref: {ref_duration:.1f}s)"
@@ -279,6 +326,9 @@ def sanitize_subtitle(text: str) -> str:
 
         text = convert_sami_to_srt(text)
 
+    from app.utils.cleaners import strip_advertisements
+
+    text = strip_advertisements(text, keep_translator_credits=False)
     text = _INLINE_ASS_TAG_REGEX.sub("", text)
     return normalize_srt_blocks(text)
 
@@ -298,6 +348,10 @@ def normalize_srt_blocks(text: str) -> str:
         match = _TIMESPAN_LINE_REGEX.search(lines[timestamp_index])
         if match is None:
             continue
+        start_ms = _parse_timestamp_ms(match.group("start"))
+        end_ms = _parse_timestamp_ms(match.group("end"))
+        if end_ms <= start_ms:
+            continue
         timespan = (
             f"{_format_timestamp(match.group('start'))} --> "
             f"{_format_timestamp(match.group('end'))}"
@@ -309,6 +363,9 @@ def normalize_srt_blocks(text: str) -> str:
         ]
         if not text_lines:
             continue
+        combined_text = " ".join(text_lines)
+        if _DUMMY_CUE_REGEX.fullmatch(combined_text):
+            continue
         rendered.append(f"{len(rendered) + 1}\n{timespan}\n" + "\n".join(text_lines))
     return "\n\n".join(rendered) + ("\n" if rendered else "")
 
@@ -319,6 +376,55 @@ _TIMEOUT_TIERS: tuple[tuple[int, float], ...] = (
     (50_000, 6.0),  # long episodes / extras
     (0, 4.0),  # 20-45 min TV episodes
 )
+
+
+def _validate_synced_output(target_srt: str, synced_srt: str) -> bool:
+    """Validate that the alass-aligned subtitle is structurally sound and reasonable.
+
+    Checks:
+    - Minimum cue count is preserved.
+    - Dialogue cues did not collapse to 00:00:00,000 (negative timestamp clamping).
+    - Monotonicity (no rampant backwards jumps).
+    - Content span does not collapse or explode.
+    """
+    synced_spans = _cue_spans(synced_srt)
+    if not synced_spans:
+        return bool(synced_srt.strip())
+
+    zero_starts = sum(1 for start, _ in synced_spans if start == 0)
+    if zero_starts > max(3, int(len(synced_spans) * 0.05)):
+        logger.warning(
+            "[sync] post-sync validation failed: %d cues collapsed to 00:00:00,000",
+            zero_starts,
+        )
+        return False
+
+    resets = _backward_jumps(synced_spans)
+    if resets >= _MIN_PACK_RESETS:
+        logger.warning(
+            "[sync] post-sync validation failed: %d backwards timestamp jumps in output",
+            resets,
+        )
+        return False
+
+    # Shift-invariant span check: (last cue end - first cue start)
+    target_spans = _cue_spans(target_srt)
+    if len(target_spans) >= _MIN_VALID_CUES and len(synced_spans) >= _MIN_VALID_CUES:
+        tgt_span = (target_spans[-1][1] - target_spans[0][0]) / 1000.0
+        syn_span = (synced_spans[-1][1] - synced_spans[0][0]) / 1000.0
+        if tgt_span > 60.0 and syn_span > 0:
+            ratio = syn_span / tgt_span
+            if ratio < 0.4 or ratio > 2.5:
+                logger.warning(
+                    "[sync] post-sync validation failed: content span collapsed or expanded wildly "
+                    "(target_span=%.1fs, synced_span=%.1fs, ratio=%.2f)",
+                    tgt_span,
+                    syn_span,
+                    ratio,
+                )
+                return False
+
+    return True
 
 
 class SubtitleSyncService:
@@ -370,11 +476,12 @@ class SubtitleSyncService:
         source_confirmed: bool = False,
         relaxed: bool = False,
         reference_partial: bool = False,
+        split_penalty: float | None = None,
     ) -> str | None:
         """
         Return the synced target SRT, or ``None`` on any failure.
 
-        Runs ``alass <reference> <target> <output> --split-penalty 7.0`` inside
+        Runs ``alass <reference> <target> <output> --split-penalty <penalty>`` inside
         secure temporary files with a strict subprocess timeout.
 
         A zero exit code with a non-empty output is trusted and returned as-is;
@@ -389,7 +496,15 @@ class SubtitleSyncService:
             return None
 
         target_srt = sanitize_subtitle(target_srt)
-        reference = sanitize_subtitle(strip_sdh(reference_srt))
+        # Pre-clean promotional URLs and ads from target so they don't skew speech alignment in alass
+        from app.utils.cleaners import strip_advertisements
+
+        cleaned_target = strip_advertisements(target_srt, keep_translator_credits=True)
+        if _valid_cue_count(cleaned_target) >= _MIN_VALID_CUES:
+            target_srt = cleaned_target
+
+        cleaned_ref = strip_advertisements(strip_sdh(reference_srt), keep_translator_credits=False)
+        reference = sanitize_subtitle(cleaned_ref)
 
         # Pre-alass validation: never spawn the subprocess for degenerate input.
         target_cues = _valid_cue_count(target_srt)
@@ -458,16 +573,29 @@ class SubtitleSyncService:
 
             # alass syntax: alass <REFERENCE_FILE> <TARGET_TO_FIX> <OUTPUT_FILE> [options]
             # argv[1] = trusted reference (English), argv[2] = target (Arabic).
-            command = [
-                self.alass_path,
-                ref_file,
-                tgt_file,
-                out_file,
-                # Upstream alass default for movies: a small penalty fragments
-                # the timeline into unnecessary splits.
-                "--split-penalty",
-                "7.0",
-            ]
+            if reference_partial:
+                command = [
+                    self.alass_path,
+                    ref_file,
+                    tgt_file,
+                    out_file,
+                    "--no-split",
+                    "-g",
+                ]
+            else:
+                chosen_penalty = (
+                    str(split_penalty)
+                    if split_penalty is not None
+                    else ("7.0" if is_series else ("20.0" if source_confirmed else "7.0"))
+                )
+                command = [
+                    self.alass_path,
+                    ref_file,
+                    tgt_file,
+                    out_file,
+                    "--split-penalty",
+                    chosen_penalty,
+                ]
             logger.info("[sync] executing: %s", " ".join(command))
             started = time.monotonic()
             result = subprocess.run(
@@ -501,10 +629,13 @@ class SubtitleSyncService:
             if not synced:
                 logger.warning("[sync] alass output was empty text -> fallback")
                 return None
+
+            if not _validate_synced_output(target_srt, synced):
+                return None
+
             logger.info("[sync] success: produced %d chars of synced subtitle", len(synced))
 
-            # Trust alass: exit code 0 + non-empty output is served as-is. The
-            # shift is logged for observability only, never used to reject.
+            # Sample shifts for observability
             target_starts = _cue_starts_ms(target_srt, limit=target_cues)
             synced_starts = _cue_starts_ms(synced, limit=target_cues)
             shifts = [
@@ -543,12 +674,13 @@ class SubtitleSyncService:
         source_confirmed: bool = False,
         relaxed: bool = False,
         reference_partial: bool = False,
+        split_penalty: float | None = None,
     ) -> str | None:
         """Non-blocking wrapper around :meth:`sync` for use in async routes."""
         async with self._semaphore:
             worker = asyncio.create_task(asyncio.to_thread(
                 self.sync, target_srt, reference_srt, decision_kind,
-                is_series, source_confirmed, relaxed, reference_partial,
+                is_series, source_confirmed, relaxed, reference_partial, split_penalty,
             ))
             try:
                 return await asyncio.shield(worker)

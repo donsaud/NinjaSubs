@@ -770,7 +770,8 @@ def test_configure_page_shows_auto_sync_toggle(client):
     assert 'id="autoSync"' in body
     assert "Auto-Sync Subtitles" in body
     assert "(Experimental)" not in body.split('for="autoSync"')[1].split("</label>")[0]
-    assert '"auto_sync": false' in body
+    assert '"auto_sync": true' in body
+    assert '<input type="checkbox" id="autoSync" class="peer sr-only" checked>' in body
     assert "Automatically syncs subtitle timing to match your video stream perfectly." in body
 
     # Relocated: first option under "Text Formatting & Timing", not the Arabic section.
@@ -779,3 +780,11 @@ def test_configure_page_shows_auto_sync_toggle(client):
     autosync = body.index('id="autoSyncRow"')
     clean_tags = body.index('for="cleanTags"')
     assert arabic < formatting < autosync < clean_tags
+
+
+def test_configure_page_omits_stream_addon_input(client):
+    """The stream addon URL input is omitted from the configure page (external references only)."""
+    body = client.get("/configure").text
+    assert 'id="streamAddonUrl"' not in body
+    assert "Stream Addon URL" not in body
+

@@ -88,12 +88,12 @@ class ReferenceDiskCache:
         """Decision-metadata sidecar paired with a cached reference file."""
         return path.with_suffix(path.suffix + ".json")
 
-    def _read_verdict(self, path: Path, stem: str, text: str) -> tuple[str, bool, str] | None:
-        """Recover ``(kind, bluray_match, candidate)`` for a cache file.
+    def _read_verdict(self, path: Path, stem: str, text: str) -> tuple[str, bool, str, bool] | None:
+        """Recover ``(kind, bluray_match, candidate, partial)`` for a cache file.
 
         The filename kind segment is authoritative; a sidecar written by
         :meth:`set` additionally restores whether both sides were verified
-        BluRay plus the winning release name. Anything missing or
+        BluRay plus the winning release name and partial status. Anything missing or
         inconsistent fails closed.
         """
         kind = self._parse_kind(path.name, stem)
@@ -109,9 +109,15 @@ class ReferenceDiskCache:
             or meta.get("kind") != kind
             or meta.get("content_sha") != hashlib.sha256(text.encode("utf-8")).hexdigest()
             or (getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True) and meta.get("strict") is not True)
+            or int(meta.get("engine_version", 1)) < 5
         ):
             return None
-        return kind, meta.get("bluray_match") is True, str(meta.get("candidate", ""))
+        return (
+            kind,
+            meta.get("bluray_match") is True,
+            str(meta.get("candidate", "")),
+            meta.get("partial") is True,
+        )
 
     def get(self, query: ReferenceQuery) -> ResolvedReference | None:
         """Return the best valid cached reference or ``None`` on a miss.
@@ -142,12 +148,13 @@ class ReferenceDiskCache:
             verdict = self._read_verdict(path, query.cache_stem, text)
             if verdict is None:
                 continue
-            kind, bluray_match, candidate = verdict
+            kind, bluray_match, candidate, partial = verdict
             resolved = ResolvedReference(
                 text=text,
                 kind=kind,
                 bluray_match=bluray_match and kind != "abort",
                 candidate=candidate,
+                partial=partial,
             )
             rank = 0 if kind in EXACT_KINDS else 1
             if best is None or (rank, path.name) < (best[0], best[1]):
@@ -171,6 +178,7 @@ class ReferenceDiskCache:
         *,
         bluray_match: bool = False,
         candidate: str = "",
+        partial: bool = False,
     ) -> None:
         """Atomically persist a resolved reference, dropping stale variants.
 
@@ -198,8 +206,10 @@ class ReferenceDiskCache:
                 "kind": kind,
                 "bluray_match": bool(bluray_match),
                 "candidate": candidate,
+                "partial": bool(partial),
                 "strict": bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True)),
                 "content_sha": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "engine_version": 5,
             }
             self._atomic_write(self._sidecar_path(path), json.dumps(meta))
             logger.info(

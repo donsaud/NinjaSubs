@@ -7,7 +7,25 @@ resolution classification, and scene release-group extraction.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from urllib.parse import unquote_plus
+
+try:
+    from guessit import guessit as _guessit
+except ImportError:  # pragma: no cover
+    _guessit = None
+
+
+@lru_cache(maxsize=2048)
+def guess_metadata(name: str | None) -> dict:
+    """Parse filename using guessit with LRU cache."""
+    if not name or _guessit is None:
+        return {}
+    try:
+        clean = unquote_plus(str(name)).rsplit("/", 1)[-1].strip()
+        return dict(_guessit(clean))
+    except Exception:
+        return {}
 
 # Scene/release tokens that make a filename useful for matching a reference.
 _RELEASE_TOKEN_REGEX = re.compile(
@@ -56,6 +74,17 @@ def _season_number(name: str | None) -> int | None:
     Understands ``S08``, ``Season 8``, ``8x01`` and worded seasons
     (``Season One``, ``Season Eight``).
     """
+    if not name:
+        return None
+    meta = guess_metadata(name)
+    s = meta.get("season")
+    if s is not None:
+        try:
+            val = int(s[0] if isinstance(s, list) and s else s)
+            if 0 < val <= 99:
+                return val
+        except (ValueError, TypeError):
+            pass
     base = (name or "").rsplit("/", 1)[-1]
     for pattern in _SEASON_PATTERNS:
         match = pattern.search(base)
@@ -71,6 +100,11 @@ def _season_number(name: str | None) -> int | None:
     return None
 
 
+# Audio channel tags (e.g. 5.1, 7.1, 2.0, 1.0, 5.1.4, 7.1.2) must never be
+# parsed as episode numbers.
+_AUDIO_CHANNEL_REGEX = re.compile(r"(?<!\d)[1-9]\.[0-2](?:\.[0-4])?(?!\d)")
+
+
 def _member_episode_number(name: str | None) -> int | None:
     """Best-effort episode number parsed from a ZIP member filename."""
     base = (name or "").rsplit("/", 1)[-1]
@@ -78,7 +112,8 @@ def _member_episode_number(name: str | None) -> int | None:
         match = pattern.search(base)
         if match:
             return int(match.group(1))
-    for match in _BARE_EPISODE_REGEX.finditer(base):
+    cleaned = _AUDIO_CHANNEL_REGEX.sub("", base)
+    for match in _BARE_EPISODE_REGEX.finditer(cleaned):
         value = int(match.group(1))
         if value > 0 and str(value) not in _NON_EPISODE_TOKENS:
             return value
@@ -113,6 +148,21 @@ _CODEC_PATTERNS: tuple[tuple[str, str], ...] = (
 
 def _source_kind(name: str | None) -> str | None:
     """Classify a release name's source (bluray / webdl / hdtv / ...)."""
+    if not name:
+        return None
+    meta = guess_metadata(name)
+    other = meta.get("other")
+    if other and ("Remux" in other if isinstance(other, list) else other == "Remux"):
+        return "remux"
+    src = str(meta.get("source") or "").lower()
+    if "blu-ray" in src:
+        return "bluray"
+    if "web" in src:
+        return "webdl"
+    if "hdtv" in src:
+        return "hdtv"
+    if "dvd" in src:
+        return "dvd"
     lowered = (name or "").lower()
     for kind, pattern in _SOURCE_PATTERNS:
         if re.search(pattern, lowered):
@@ -122,6 +172,18 @@ def _source_kind(name: str | None) -> str | None:
 
 def _codec_kind(name: str | None) -> str | None:
     """Classify a release name's video codec family (h264 / h265 / ...)."""
+    if not name:
+        return None
+    meta = guess_metadata(name)
+    codec = str(meta.get("video_codec") or "").lower()
+    if "h.265" in codec or "hevc" in codec:
+        return "h265"
+    if "h.264" in codec or "avc" in codec:
+        return "h264"
+    if "xvid" in codec or "divx" in codec:
+        return "xvid"
+    if "av1" in codec:
+        return "av1"
     lowered = (name or "").lower()
     for kind, pattern in _CODEC_PATTERNS:
         if re.search(pattern, lowered):
@@ -179,6 +241,23 @@ def _edition_tags(name: str | None) -> frozenset[str]:
     return frozenset(tags)
 
 
+# Regional audio and distribution markers (MULTI, FRENCH, GERMAN, etc.) that
+# frequently carry distinct distributor intros or bumper offsets.
+_REGIONAL_TAGS = frozenset(
+    {
+        "multi", "french", "vff", "truefrench", "vfq",
+        "german", "deutsch", "italian", "ita",
+        "castellano", "latino", "spanish", "nordic",
+    }
+)
+
+
+def _regional_tags(name: str | None) -> frozenset[str]:
+    """Regional audio/release markers present in a release name."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", (name or "").lower())
+    return frozenset(token for token in normalized.split() if token in _REGIONAL_TAGS)
+
+
 # Retail-disc source families: a BluRay and its REMUX are the same physical
 # master (same cut/timing), so they are symmetric for recap-allowance purposes.
 _RETAIL_DISC_SOURCES = frozenset({"bluray", "remux"})
@@ -191,6 +270,14 @@ def is_retail_disc_source(kind: str | None) -> bool:
 
 def _resolution(name: str | None) -> str | None:
     """Normalised resolution token (``1080p``) or ``None``."""
+    if not name:
+        return None
+    meta = guess_metadata(name)
+    res = meta.get("screen_size")
+    if res:
+        res_str = str(res).lower()
+        if res_str in ("2160p", "4k", "1080p", "720p", "480p", "576p"):
+            return res_str
     match = _RESOLUTION_REGEX.search(name or "")
     return match.group(1).lower() if match else None
 
@@ -223,6 +310,10 @@ def _release_group(name: str | None) -> str | None:
     """
     if not name:
         return None
+    meta = guess_metadata(name)
+    grp = meta.get("release_group")
+    if grp and isinstance(grp, str) and len(grp) >= 2 and grp.lower() not in _NON_GROUP_TOKENS:
+        return grp
     base = re.sub(r"\.(srt|ass|ssa|sub|vtt|mkv|mp4|avi)$", "", name.rsplit("/", 1)[-1].strip(), flags=re.IGNORECASE)
     tokens: list[str] = []
     bracket = re.search(r"[\[\(]([^\[\]()]+)[\]\)]\s*$", base)
@@ -252,8 +343,22 @@ def _release_group(name: str | None) -> str | None:
 # their subtitle timeline matches the disc master. Micro-rip / custom-repack
 # groups frequently trim bumpers or re-encode intros, shifting the whole
 # timeline; prefer the former when several references pass the edition gates.
-_PREFERRED_REFERENCE_GROUPS = frozenset({"chd", "hdc", "ebp", "fsihd"})
-_DEPRIORITIZED_REFERENCE_GROUPS = frozenset({"tigole", "yify", "yts", "rarbg", "ganool"})
+_PREFERRED_REFERENCE_GROUPS = frozenset(
+    {
+        "chd", "hdc", "ebp", "fsihd", "surcode", "framestor", "don",
+        "ctrlhd", "flux", "sparks", "geck", "tayto", "kogi", "trollhd",
+        "swtyblz", "fgt", "d-z0n", "dz0n", "playweb", "sometv",
+    }
+)
+_DEPRIORITIZED_REFERENCE_GROUPS = frozenset(
+    {
+        "tigole", "yify", "yts", "rarbg", "ganool", "jyk", "ozlem",
+        "mmkv", "blackjesus", "psa", "pahe", "galaxyrg", "sujaid",
+        "axxo", "shaanig", "evo", "qman", "utr", "vxt", "d3g",
+        "afm72", "ano", "rmteam", "chotab", "judas", "nepu",
+        "mkvhub", "bone", "minihd", "bhdstudio", "joy", "klaxxon",
+    }
+)
 
 
 def reference_group_rank(name: str | None) -> int:
@@ -309,6 +414,12 @@ def looks_like_season_pack(name: str | None) -> bool:
     lowered = candidate.lower()
     if not lowered:
         return False
+    meta = guess_metadata(candidate)
+    if meta.get("type") == "episode" and meta.get("season") is not None and meta.get("episode") is None:
+        return True
+    other = meta.get("other")
+    if other and ("Complete" in other if isinstance(other, list) else other == "Complete"):
+        return True
     if "complete" in lowered:
         return True
     if _MULTI_SEASON_RANGE_REGEX.search(lowered):
@@ -328,8 +439,19 @@ def candidate_episode_number(name: str | None) -> int | None:
     from every episode except the first. Packs are therefore reported as
     untagged so they remain sliceable by ``select_zip_member``.
     """
-    if looks_like_season_pack(name):
+    if not name or looks_like_season_pack(name):
         return None
+    meta = guess_metadata(name)
+    if meta.get("type") == "movie":
+        return None
+    ep = meta.get("episode")
+    if ep is not None:
+        if isinstance(ep, list) and ep:
+            return int(ep[0])
+        try:
+            return int(ep)
+        except (ValueError, TypeError):
+            pass
     return _member_episode_number(name)
 
 

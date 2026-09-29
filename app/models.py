@@ -39,7 +39,7 @@ class Manifest(BaseModel):
 
     id: str = "org.ninjasubs.addon"
     name: str = "NinjaSubs"
-    version: str = "1.0.0"
+    version: str = "1.1.0"
     description: str = (
         "A fast pass-through proxy that fetches, extracts, and streams native subtitles directly to Stremio."
     )
@@ -185,8 +185,10 @@ class UserPreferences(BaseModel):
     strip_diacritics: bool = False
     # Convert ASS/SSA subtitles to color-preserved SRT for playback stability
     convert_ass_to_srt: bool = True
-    # Experimental: auto-sync Arabic subtitles against a trusted reference (alass)
-    auto_sync: bool = False
+    # Auto-sync Arabic subtitles against a trusted reference (alass)
+    auto_sync: bool = True
+    # User-configured Stremio stream addon URL (e.g., Torrentio, AIOStreams) for embedded subtitle extraction
+    stream_addon_url: str = ""
     # Subtitle badge components to display (order-independent; canonical order applied):
     #   "score"    -> "[100%]"
     #   "provider" -> "[SubDL]"
