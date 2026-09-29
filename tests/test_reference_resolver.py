@@ -1369,25 +1369,25 @@ async def test_cross_provider_tiering_beats_first_provider(tmp_path):
             )
         ],
     )
-    opensubtitles = _Provider(
-        "opensubtitles",
+    subsource = _Provider(
+        "subsource",
         [
             SubtitleRelease(
                 release_name="Mad.Men.S01E02.Ladies.Room.1080p.AMZN.WEB-DL.DDP5.1.H.264-SLiGNOME.srt",
-                download_url="http://amzn", provider="opensubtitles", lang="eng",
+                download_url="http://amzn", provider="subsource", lang="eng",
             )
         ],
     )
     strategy = ExternalExactStrategy(
         subdl_provider=subdl,
-        subsource_provider=None,
-        opensubtitles_provider=opensubtitles,
+        subsource_provider=subsource,
+        opensubtitles_provider=None,
         cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
         timeout=1.0,
     )
     content = await strategy.resolve(_mad_men_query())
     assert content is not None
-    assert opensubtitles.downloaded == ["http://amzn"]
+    assert subsource.downloaded == ["http://amzn"]
     assert subdl.downloaded == []
 
 

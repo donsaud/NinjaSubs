@@ -838,7 +838,7 @@ def test_stremio_endpoint_hash_short_circuit_e2e(client):
         assert len(items) == 2
 
         # Candidate #1: The verified hash match carries the Exact Hash label
-        assert items[0]["title"] == "[100%] ⚡ Exact Hash"
+        assert items[0]["title"].startswith("[100%] [OpenSubtitles] ")
 
         # Candidate #2: The text-matched release
         assert "[OpenSubtitles]" not in items[1]["title"]

@@ -427,6 +427,24 @@ class ExternalExactStrategy:
             if provider_lbl in exhausted_providers:
                 continue
 
+            # Quota protection: every OpenSubtitles download is metered against
+            # the account's daily allowance, and a speculative reference
+            # evaluation can walk through many candidates before one validates.
+            # Speculating on a metered download burns that allowance for a guess
+            # we have no proof for, so it is only spent when OpenSubtitles has
+            # already proven the file byte-exact via MovieHash. Text and series
+            # reference sourcing relies on the unlimited SubSource/SubDL tier.
+            if (
+                cand_provider is self._opensubtitles
+                and reference_tier(query.target_filename, cand) != TIER_HASH
+            ):
+                logger.info(
+                    "[reference] skipping non-hash OpenSubtitles candidate %r; "
+                    "quota is reserved for MovieHash-exact matches",
+                    getattr(cand, "release_name", "?"),
+                )
+                continue
+
             if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
                 logger.info(
                     "[reference] provider %s circuit breaker is open; skipping candidate %r",

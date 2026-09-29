@@ -1116,8 +1116,12 @@ def test_synced_candidate_still_rises_when_metadata_matches():
     assert ranked[0].release_name == matched_synced.release_name
 
 
-def test_exact_hash_and_synced_player_labels():
-    """Player labels surface ⚡ Exact Hash and ⚡ Synced states."""
+def test_player_labels_use_only_the_standard_badge_format():
+    """Labels are always `[{pct}%] [{provider}] {name}` with no injected tags.
+
+    Hash and synced states are expressed through the match percentage and the
+    release name alone. No override, emoji, or separator may be injected.
+    """
     from app.services.aggregator import format_informative_badge
 
     hashed = SubtitleRelease(
@@ -1127,7 +1131,9 @@ def test_exact_hash_and_synced_player_labels():
         lang="eng",
         matched_by_hash=True,
     )
-    assert format_informative_badge(hashed, 100) == "[100%] ⚡ Exact Hash · FLUX"
+    hashed_label = format_informative_badge(hashed, 100)
+    assert hashed_label == "[100%] [OpenSubtitles] Movie.2024.1080p.BluRay.x264-FLUX"
+    assert "⚡" not in hashed_label
 
     synced = SubtitleRelease(
         release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
@@ -1137,7 +1143,18 @@ def test_exact_hash_and_synced_player_labels():
         match_percentage=100,
         status="synced",
     )
-    assert format_informative_badge(synced, 100) == "[100%] ⚡ Synced · FLUX"
+    synced_label = format_informative_badge(synced, 100)
+    assert synced_label == "[100%] [SubDL] Movie.2024.1080p.BluRay.x264-FLUX"
+    assert "⚡" not in synced_label
+    # A synced artifact is indistinguishable from the same release without the flag.
+    unsynced = SubtitleRelease(
+        release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
+        download_url="http://3",
+        provider="subdl",
+        lang="ara",
+        match_percentage=100,
+    )
+    assert format_informative_badge(unsynced, 100) == synced_label
 
     plain = SubtitleRelease(
         release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
@@ -1279,3 +1296,51 @@ def test_tier_ordering_is_stable_and_input_independent():
     forward = [s.release_name for s in rank_subtitles(target, rels)]
     backward = [s.release_name for s in rank_subtitles(target, list(reversed(rels)))]
     assert forward == backward
+
+
+def test_badge_includes_uploader_only_when_present():
+    """`(by 'uploader')` is appended when known and omitted entirely when not."""
+    from app.services.aggregator import format_informative_badge
+
+    with_uploader = SubtitleRelease(
+        release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
+        download_url="http://1",
+        provider="subdl",
+        lang="eng",
+        match_percentage=95,
+        uploader="subsmaster",
+    )
+    assert (
+        format_informative_badge(with_uploader, 95)
+        == "[95%] [SubDL] Movie.2024.1080p.BluRay.x264-FLUX (by subsmaster)"
+    )
+
+    without = SubtitleRelease(
+        release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
+        download_url="http://2",
+        provider="subdl",
+        lang="eng",
+        match_percentage=95,
+    )
+    label = format_informative_badge(without, 95)
+    assert label == "[95%] [SubDL] Movie.2024.1080p.BluRay.x264-FLUX"
+    assert "by" not in label
+
+
+def test_no_badge_contains_a_lightning_bolt():
+    """No label path may emit the removed status overrides."""
+    from app.services.aggregator import format_informative_badge
+
+    for kwargs in (
+        {"matched_by_hash": True, "provider": "opensubtitles"},
+        {"status": "synced", "provider": "subdl"},
+        {"status": "synced", "matched_by_hash": True, "provider": "opensubtitles"},
+        {"provider": "subsource"},
+    ):
+        rel = SubtitleRelease(
+            release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
+            download_url="http://1",
+            lang="eng",
+            **kwargs,
+        )
+        assert "⚡" not in format_informative_badge(rel, 100)

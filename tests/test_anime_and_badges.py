@@ -166,12 +166,17 @@ def test_badge_verified_hash_match():
     badge_ar = format_informative_badge(
         sub, display_score=100, lang_name="Arabic", source_tag="OpenSubtitles"
     )
-    assert badge_ar == "[100%] ⚡ Exact Hash"
+    assert badge_ar == "[100%] [OpenSubtitles] Arbitrary.Release.Name"
 
     badge_en = format_informative_badge(
         sub, display_score=100, lang_name="English", source_tag="OpenSubtitles"
     )
-    assert badge_en == "[100%] ⚡ Exact Hash"
+    assert badge_en == "[100%] [OpenSubtitles] Arbitrary.Release.Name"
+    # The language name is never injected, and no status override is added.
+    assert "Arabic" not in badge_ar
+    assert "English" not in badge_en
+    assert "⚡" not in badge_ar
+    assert "⚡" not in badge_en
 
 
 def test_badge_high_accuracy_group_and_source():
@@ -385,7 +390,7 @@ async def test_endpoint_verified_hash_and_informative_badge(client):
         assert len(subs) == 2
 
         # Hash match has absolute priority (+500 points) and ranks #1
-        assert subs[0]["title"] == "[100%] ⚡ Exact Hash"
+        assert subs[0]["title"] == "[100%] [OpenSubtitles] Shawshank.1994"
         # Release match ranks #2 with formatted label
         assert subs[1]["title"] == "[100%] [SubDL] Shawshank.1994.1080p.BluRay.x264-FLUX"
 

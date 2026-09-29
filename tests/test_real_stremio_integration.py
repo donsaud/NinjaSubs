@@ -566,7 +566,7 @@ async def test_real_stremio_exact_hash_ranks_first(client):
             assert resp.status_code == 200
             subtitles = resp.json()["subtitles"]
             assert len(subtitles) == 2
-            assert subtitles[0]["title"] == "[100%] ⚡ Exact Hash · Name"
+            assert subtitles[0]["title"] == "[100%] [OpenSubtitles] Arbitrary.Subtitle.Name"
             assert get_release_name(subtitles[0]) == "Arbitrary.Subtitle.Name.srt"
             assert subtitles[1]["title"] == "[74%] [SubDL] Movie.2024.1080p.BluRay.x264"
             assert get_release_name(subtitles[1]) == "Movie.2024.1080p.BluRay.x264.srt"

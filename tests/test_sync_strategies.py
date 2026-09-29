@@ -1120,16 +1120,16 @@ async def test_rejected_reference_falls_through_to_next_candidate(tmp_path):
     )
     usable = SubtitleRelease(
         release_name="Dexter.S08E05.720p.BluRay.x264-NORDiC",
-        download_url="http://ep5", provider="opensubtitles", lang="eng",
+        download_url="http://ep5", provider="subsource", lang="eng",
     )
     target_text = _dialogue(106_950).decode()
 
     subdl = _provider_for([pack, best_scoring], bad_ref)
-    opensubtitles = _provider_for([usable], good_ref)
+    subsource = _provider_for([usable], good_ref)
     strategy = ExternalExactStrategy(
         subdl_provider=subdl,
-        subsource_provider=None,
-        opensubtitles_provider=opensubtitles,
+        subsource_provider=subsource,
+        opensubtitles_provider=None,
         cache=ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100),
         min_bytes=100,
         timeout=1.0,
@@ -1154,7 +1154,7 @@ async def test_rejected_reference_falls_through_to_next_candidate(tmp_path):
     # Episode-specific candidates are tried first; the rejected one falls through
     # to the next, and the demoted season pack is never reached.
     assert subdl.downloaded == ["http://best"]
-    assert opensubtitles.downloaded == ["http://ep5"]
+    assert subsource.downloaded == ["http://ep5"]
     assert resolved.candidate == usable.release_name
 
 
@@ -1174,18 +1174,18 @@ async def test_stale_cached_reference_is_revalidated_and_replaced(tmp_path):
     )
     single = SubtitleRelease(
         release_name="Dexter.S08E05.720p.BluRay.x264-NORDiC",
-        download_url="http://ep5", provider="opensubtitles", lang="eng",
+        download_url="http://ep5", provider="subsource", lang="eng",
     )
     cache = ReferenceDiskCache(root=tmp_path / "refs", ttl=3600.0, min_bytes=100)
     # Seed the cache with a stale reference that fails cue-sanity.
     cache.set(_series_query(), "subdl", bad_ref.decode(), kind="edition", candidate="http://pack")
 
     subdl = _provider_for([pack], bad_ref)
-    opensubtitles = _provider_for([single], good_ref)
+    subsource = _provider_for([single], good_ref)
     strategy = ExternalExactStrategy(
         subdl_provider=subdl,
-        subsource_provider=None,
-        opensubtitles_provider=opensubtitles,
+        subsource_provider=subsource,
+        opensubtitles_provider=None,
         cache=cache,
         min_bytes=100,
         timeout=1.0,
@@ -1208,5 +1208,5 @@ async def test_stale_cached_reference_is_revalidated_and_replaced(tmp_path):
 
     resolved = await strategy.resolve_with_provenance(_series_query(), update_validator=_validator)
     assert resolved.text is not None
-    assert opensubtitles.downloaded == ["http://ep5"]
+    assert subsource.downloaded == ["http://ep5"]
     assert resolved.candidate == single.release_name

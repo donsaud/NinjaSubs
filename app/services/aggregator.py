@@ -8,6 +8,7 @@ import httpx
 
 from app.config import settings
 from app.models import (
+    DEFAULT_BADGE_PARTS,
     SubtitleRelease,
     UserPreferences,
     badge_format_to_parts,
@@ -25,7 +26,6 @@ from app.services.cache import (
     set_cached_subtitles,
 )
 from app.services.subtitle_matcher import rank_subtitles
-from app.services.sync.matching import _release_group, _source_kind
 from app.utils.language import normalize_to_iso639_2
 
 logger = logging.getLogger("uvicorn.error")
@@ -111,7 +111,7 @@ def format_informative_badge(
     display_score: int,
     lang_name: str = "Arabic",
     source_tag: str = "SubDL",
-    badge_format: str = "score_provider",
+    badge_format: str = "",
     badge_parts: list[str] | None = None,
 ) -> str:
     """
@@ -121,17 +121,13 @@ def format_informative_badge(
       - "filename" -> "{clean_filename}"
       - "uploader" -> "(by {uploader})" (only when an uploader is known)
 
-    `badge_parts` takes precedence. When omitted, the legacy `badge_format` preset is
-    mapped to its component list for backward compatibility.
+    The canonical result is
+    ``"[{pct}%] [{provider}] {release_name} (by {uploader})"``, with any
+    segment omitted when its data is missing. No status, hash, or sync override
+    is ever injected: the label reflects ranking data only.
 
-    Specifications:
-    - pct: Calculated integer match percentage (e.g. 100, 95, 61).
-    - source_provider: Canonical provider name (OpenSubtitles, SubDL, SubSource).
-    - clean_filename: Full, natural release name / subtitle filename:
-      * Strip file extension (.srt, .vtt, .ass).
-      * Strip internal hexadecimal hash suffixes (e.g. trailing _6e4b079e36dd0457).
-      * Leave dots, spaces, and hyphens intact without shortening or tokenizing.
-    - No extra prefixes like "[NinjaSubs]" or language words like "Arabic".
+    `badge_parts` takes precedence. When omitted, the canonical default is used;
+    `badge_format` remains accepted for backward compatibility.
     """
     pct = getattr(release, "match_percentage", None)
     if pct is None:
@@ -160,26 +156,20 @@ def format_informative_badge(
         source_provider = "SubDL"
 
     raw_filename = getattr(release, "release_name", "") or ""
-
-    # Special informative tags take precedence over the configurable badge:
-    # a byte-exact MovieHash match, or a previously-synced artifact, is the
-    # most trustworthy entry in the list and must be instantly recognizable.
-    if getattr(release, "matched_by_hash", False) or getattr(release, "is_hash_match", False):
-        tag = _release_group(raw_filename) or _source_kind(raw_filename) or ""
-        label = "[100%] ⚡ Exact Hash" + (f" · {tag}" if tag else "")
-        return clean_final_label(label)
-    if str(getattr(release, "status", "") or "") == "synced":
-        tag = _release_group(raw_filename) or ""
-        label = "[100%] ⚡ Synced" + (f" · {tag}" if tag else "")
-        return clean_final_label(label)
-
     clean_filename = clean_subtitle_display_name(raw_filename)
     clean_name = re.sub(r"_[a-fA-F0-9]{8,32}$", "", clean_filename)
     clean_name = clean_final_label(clean_name)
 
-    parts = normalize_badge_parts(badge_parts) if badge_parts is not None else badge_format_to_parts(
-        badge_format
-    )
+    # `badge_parts` is the current setting and wins outright. The legacy
+    # `badge_format` preset is still honoured when a caller passes one, so stored
+    # user preferences keep rendering as configured. With neither, the canonical
+    # default (score + provider + filename + uploader) applies.
+    if badge_parts is not None:
+        parts = normalize_badge_parts(badge_parts)
+    elif badge_format:
+        parts = badge_format_to_parts(badge_format)
+    else:
+        parts = normalize_badge_parts(DEFAULT_BADGE_PARTS)
     uploader = clean_final_label(str(getattr(release, "uploader", "") or "").strip())
 
     label = ""

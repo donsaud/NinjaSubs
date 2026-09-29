@@ -167,22 +167,26 @@ async def test_external_strategy_multi_candidate_fallback(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_opensubtitles_quota_exhaustion_trips_breaker_and_falls_back(tmp_path):
-    """Verify that when OpenSubtitles hits 406 (quota exhausted), subsequent OS candidates
-    are skipped immediately and the resolver falls back to SubSource."""
-    from app.providers.opensubtitles import OPENSUBTITLES_BREAKER
+async def test_opensubtitles_quota_is_never_spent_on_text_references(tmp_path):
+    """A non-hash OpenSubtitles candidate must not be downloaded at all.
+
+    Speculative reference evaluation walks many candidates, and every
+    OpenSubtitles download is metered against the account's daily allowance.
+    Quota is therefore reserved for MovieHash-exact matches; text and series
+    reference sourcing relies on the unlimited SubSource/SubDL tier.
+    """
     from app.services.sync.cache import ReferenceDiskCache
-    OPENSUBTITLES_BREAKER.reset()
 
     good_srt = ("1\n00:00:01,000 --> 00:00:02,000\n" + ("x" * 6000) + "\n").encode()
 
     class _MockOpenSubtitles:
         name = "opensubtitles"
+
         def __init__(self):
             self.download_calls = 0
 
         def is_breaker_open(self):
-            return OPENSUBTITLES_BREAKER.is_open()
+            return False
 
         async def search_subtitles(self, **kwargs):
             return [
@@ -202,12 +206,11 @@ async def test_opensubtitles_quota_exhaustion_trips_breaker_and_falls_back(tmp_p
 
         async def download_archive(self, url, api_key=None):
             self.download_calls += 1
-            # Trip breaker as if HTTP 406 was encountered
-            OPENSUBTITLES_BREAKER.trip(3600.0, reason="HTTP 406 Quota Exceeded")
-            return None
+            return good_srt
 
     class _MockSubsource:
         name = "subsource"
+
         def __init__(self):
             self.download_calls = 0
 
@@ -248,13 +251,65 @@ async def test_opensubtitles_quota_exhaustion_trips_breaker_and_falls_back(tmp_p
     resolved = await strategy.resolve_with_provenance(query)
 
     assert resolved.text is not None
-    # SubSource candidate was used
+    # The unlimited provider sourced the reference instead.
     assert resolved.candidate == "Dexter.S08E03.720p.BluRay.x264-DEMAND.srt"
-    # OpenSubtitles was called only once before tripping breaker, second OS candidate was skipped!
-    assert os_provider.download_calls == 1
     assert subsource_provider.download_calls == 1
+    # Quota untouched: not one metered download was attempted.
+    assert os_provider.download_calls == 0
 
-    OPENSUBTITLES_BREAKER.reset()
+
+@pytest.mark.asyncio
+async def test_opensubtitles_hash_match_still_uses_quota(tmp_path):
+    """A MovieHash-exact match is proven, so its download is still permitted."""
+    from app.services.sync.cache import ReferenceDiskCache
+
+    good_srt = ("1\n00:00:01,000 --> 00:00:02,000\n" + ("x" * 6000) + "\n").encode()
+
+    class _MockOpenSubtitles:
+        name = "opensubtitles"
+
+        def __init__(self):
+            self.download_calls = 0
+
+        def is_breaker_open(self):
+            return False
+
+        async def search_subtitles(self, **kwargs):
+            return [
+                SubtitleRelease(
+                    release_name="Dexter.S08E03.720p.HDTV.x264-Scene.srt",
+                    download_url="/sub/opensubtitles/hash.srt",
+                    provider=self.name,
+                    lang="eng",
+                    matched_by_hash=True,
+                ),
+            ]
+
+        async def download_archive(self, url, api_key=None):
+            self.download_calls += 1
+            return good_srt
+
+    os_provider = _MockOpenSubtitles()
+    strategy = ExternalExactStrategy(
+        opensubtitles_provider=os_provider,
+        subsource_provider=None,
+        cache=ReferenceDiskCache(root=tmp_path),
+    )
+
+    query = ReferenceQuery(
+        imdb_id="tt0773262",
+        target_filename="Dexter.s8e03.Whatever.1080p.BluRay.x264-PiR8.mkv",
+        season=8,
+        episode=3,
+        media_type="series",
+        video_hash="8e245d9679d31e12",
+    )
+
+    resolved = await strategy.resolve_with_provenance(query)
+
+    assert resolved.text is not None
+    assert resolved.candidate == "Dexter.S08E03.720p.HDTV.x264-Scene.srt"
+    assert os_provider.download_calls == 1
 
 
 def test_candidates_ranked_tie_priority():
