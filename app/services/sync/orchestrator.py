@@ -24,6 +24,7 @@ from app.services.subtitle_matcher import (
     median_cue_offset,
     validate_cue_sanity,
 )
+from app.services.sync.alignment import AlignmentAnalyzer, SubtitleEvaluation, SyncState
 from app.services.sync.matching import is_informative_release_name
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync_cache import SyncCache
@@ -92,6 +93,10 @@ class SyncOrchestrator:
         self._sync_cache = sync_cache
         self._inflight: dict[str, asyncio.Future] = {}
         self._inflight_lock = asyncio.Lock()
+        # Verification layer: measures alass output instead of trusting exit 0.
+        self._analyzer = AlignmentAnalyzer()
+        # Most recent alignment verdict, for diagnostics/debug endpoints.
+        self._last_evaluation: SubtitleEvaluation | None = None
 
     def _strategies(self) -> list[tuple[str, Any]]:
         strats = []
@@ -327,9 +332,20 @@ class SyncOrchestrator:
             # never served when a valid reference exists.
             offset = median_cue_offset(target_text, reference)
             if offset is not None and abs(offset) < ALIGNED_OFFSET_THRESHOLD_S:
+                # No re-timing needed. Classify explicitly so "already aligned"
+                # is a measured claim, not an assumption.
+                evaluation = self._analyzer.analyze(
+                    target_text,
+                    None,
+                    reference,
+                    alass_applied=False,
+                )
+                self._last_evaluation = evaluation
                 logger.info(
-                    "[sync] target already aligned (median offset %+.2fs) -> serving original",
+                    "[sync] target already aligned (median offset %+.2fs) -> serving original "
+                    "[%s]",
                     offset,
+                    evaluation.sync_state.value,
                 )
                 if self._sync_cache is not None:
                     await self._sync_cache.clear_failed(resolution_key)
@@ -355,6 +371,27 @@ class SyncOrchestrator:
             )
 
             if synced:
+                # Independent verification: alass exiting 0 is not proof of
+                # synchronization. Measure what it actually produced and record
+                # an explainable verdict.
+                #
+                # This is deliberately OBSERVATIONAL in this phase. The existing
+                # gates (_validate_synced_output, validate_cue_sanity, the
+                # timeline band) remain authoritative for accept/reject; the
+                # analyzer classifies and explains rather than overruling them.
+                # Otherwise a stricter new metric would silently change which
+                # subtitles are served, which is exactly the coupling to avoid.
+                evaluation = self._analyzer.analyze(
+                    target_text,
+                    synced,
+                    reference,
+                    alass_applied=True,
+                    alass_successful=True,
+                )
+                self._last_evaluation = evaluation
+                log = logger.warning if evaluation.sync_state is SyncState.REJECTED else logger.info
+                log("[sync] alignment %s: %s", evaluation.sync_state.value, evaluation.explain())
+
                 key = build_synced_cache_key(
                     meta, target_id, content_hash=content_hash, decision=decision_kind
                 )
