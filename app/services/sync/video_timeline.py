@@ -230,6 +230,19 @@ class VideoTimelineEvidence(BaseModel):
     # well each half of the timeline agrees with it. A real match or a real
     # global offset keeps the halves consistent; a spliced edit does not.
     best_offset_ms: int = 0
+    #: Whole-timeline and per-region alignment, kept as separate measurements.
+    correlation_peak: float | None = None
+    correlation_second_peak: float | None = None
+    correlation_peak_ratio: float | None = None
+    correlation_clarity: str = "no_signal"
+    region_offsets: list[int] = Field(default_factory=list)
+    region_scores: list[float] = Field(default_factory=list)
+    regional_consistency: str = "unknown"
+    #: Which detector produced the landmarks, and what it derived.
+    audio_detector: str = "fixed"
+    adaptive_threshold_db: float | None = None
+    adaptive_baseline_db: float | None = None
+    landmark_quality: str | None = None
     first_half_similarity: float | None = None
     second_half_similarity: float | None = None
     detail: list[str] = Field(default_factory=list)
@@ -576,7 +589,12 @@ def _similarity(series_a: list[int], series_b: list[int], tolerance_ms: int) -> 
 
 
 def _best_aligned_similarity(
-    series_a: list[int], series_b: list[int], tolerance_ms: int
+    series_a: list[int],
+    series_b: list[int],
+    tolerance_ms: int,
+    *,
+    prefer_offset: int = 0,
+    tie_epsilon: float = 1e-9,
 ) -> tuple[float | None, int]:
     """Best similarity over global offsets, and the offset that achieved it.
 
@@ -588,8 +606,12 @@ def _best_aligned_similarity(
     Candidate offsets come from the actual cross-correlation of the two
     landmark sets, not from an arbitrary grid. A fixed grid silently failed to
     represent a 95s shift on shorter timelines, which would have turned a
-    legitimate offset into a false mismatch. With many landmarks the exact
-    product is too large, so it falls back to a coarse sweep.
+    legitimate offset into a false mismatch.
+
+    Ties are broken toward ``prefer_offset`` rather than toward whichever
+    offset happens to sort first. Without that, a short region can tie at a low
+    score across thousands of offsets and report an arbitrary one, which then
+    reads as regional inconsistency that is not in the audio at all.
     """
     if not series_a or not series_b:
         return None, 0
@@ -603,10 +625,29 @@ def _best_aligned_similarity(
     best_offset = 0
     for offset in sorted(candidates):
         score = _similarity([value + offset for value in series_a], series_b, tolerance_ms)
-        if score is not None and score > best_score:
+        if score is None:
+            continue
+        if score > best_score + tie_epsilon:
             best_score = score
             best_offset = offset
+        elif score >= best_score - tie_epsilon and (
+            abs(offset - prefer_offset) < abs(best_offset - prefer_offset)
+        ):
+            best_score = max(best_score, score)
+            best_offset = offset
     return (best_score if best_score >= 0 else None), best_offset
+
+
+def _correlation_settings() -> tuple[int, float]:
+    """Region count and ambiguity ratio, from the project's settings model."""
+    try:
+        from app.config import settings
+
+        regions = int(getattr(settings, "VIDEO_TIMELINE_REGIONS", 4) or 4)
+        ratio = float(getattr(settings, "VIDEO_TIMELINE_AMBIGUITY_RATIO", 0.85) or 0.85)
+    except Exception:  # pragma: no cover - settings always present in practice
+        regions, ratio = 4, 0.85
+    return max(2, regions), ratio
 
 
 def _splice_signature(
@@ -632,6 +673,121 @@ def _splice_signature(
         _similarity(first, series_b, tolerance_ms),
         _similarity(second, series_b, tolerance_ms),
     )
+
+
+class CorrelationClarity(str, Enum):
+    """Whether one offset can be trusted to explain the timeline."""
+
+    CLEAR = "clear"
+    AMBIGUOUS = "ambiguous"
+    NO_SIGNAL = "no_signal"
+
+
+class RegionalConsistency(str, Enum):
+    """Whether the best shift stays the same across the timeline."""
+
+    CONSISTENT = "consistent"
+    MIXED = "mixed"
+    SCATTERED = "scattered"
+    UNKNOWN = "unknown"
+
+
+class CorrelationAnalysis(BaseModel):
+    """Whole-timeline and per-region alignment, kept separate.
+
+    A global offset and a structural cut both produce a best shift. What
+    separates them is whether that shift holds everywhere, so the regional
+    shifts are recorded rather than averaged into one number.
+    """
+
+    best_offset_ms: int = 0
+    best_score: float | None = None
+    second_score: float | None = None
+    #: How close the runner-up peak is to the winner, relative to the winner.
+    peak_ratio: float | None = None
+    clarity: CorrelationClarity = CorrelationClarity.NO_SIGNAL
+    regions: int = 2
+    region_offsets: list[int] = Field(default_factory=list)
+    region_scores: list[float] = Field(default_factory=list)
+    consistency: RegionalConsistency = RegionalConsistency.UNKNOWN
+
+
+def analyse_correlation(
+    series_a: list[int],
+    series_b: list[int],
+    *,
+    tolerance_ms: int = 1_500,
+    regions: int = 2,
+    ambiguity_ratio: float = 0.85,
+    min_region_points: int = 3,
+) -> CorrelationAnalysis:
+    """Find the best global shift, then check whether it holds everywhere.
+
+    The best peak is not accepted on its own. A timeline that correlates about
+    as well at two different shifts has not been aligned, it has been guessed
+    at, and guessing must not become a verification.
+    """
+    analysis = CorrelationAnalysis(regions=max(2, regions))
+    if len(series_a) < 4 or len(series_b) < 4:
+        analysis.clarity = CorrelationClarity.NO_SIGNAL
+        return analysis
+
+    best_score, best_offset = _best_aligned_similarity(series_a, series_b, tolerance_ms)
+    analysis.best_score = best_score
+    analysis.best_offset_ms = best_offset
+    if best_score is None:
+        analysis.clarity = CorrelationClarity.NO_SIGNAL
+        return analysis
+
+    # The runner-up: the best score achievable at any offset OTHER than the
+    # winner, and at least one region-width away from it, so a near-identical
+    # neighbouring shift is not mistaken for a competing explanation.
+    competitors: list[float] = []
+    span = max(1, series_b[-1] - series_b[0])
+    separation = max(tolerance_ms * 4, span // 20)
+    shift = max(1, tolerance_ms)
+    probe = -span
+    while probe <= span:
+        if abs(probe - best_offset) > separation:
+            score = _similarity(
+                [value + probe for value in series_a], series_b, tolerance_ms
+            )
+            if score is not None:
+                competitors.append(score)
+        probe += shift
+    second = max(competitors) if competitors else None
+    analysis.second_score = second
+    analysis.peak_ratio = round(second / best_score, 4) if second is not None and best_score else None
+    analysis.clarity = (
+        CorrelationClarity.CLEAR
+        if (analysis.peak_ratio is None or analysis.peak_ratio < ambiguity_ratio)
+        else CorrelationClarity.AMBIGUOUS
+    )
+
+    # Regional shifts, for the structural question.
+    count = analysis.regions
+    size = len(series_a) // count
+    if size < min_region_points:
+        analysis.consistency = RegionalConsistency.UNKNOWN
+        return analysis
+    for region in range(count):
+        chunk = series_a[region * size : (region + 1) * size]
+        # Regions are measured relative to the global alignment, so their
+        # offsets are deviations from one answer and are comparable.
+        score, offset = _best_aligned_similarity(
+            chunk, series_b, tolerance_ms, prefer_offset=best_offset
+        )
+        analysis.region_scores.append(round(score, 4) if score is not None else 0.0)
+        analysis.region_offsets.append(offset)
+
+    spread = max(analysis.region_offsets) - min(analysis.region_offsets)
+    if spread <= tolerance_ms:
+        analysis.consistency = RegionalConsistency.CONSISTENT
+    elif spread <= tolerance_ms * 8:
+        analysis.consistency = RegionalConsistency.MIXED
+    else:
+        analysis.consistency = RegionalConsistency.SCATTERED
+    return analysis
 
 
 def validate_timeline_against_reference(
@@ -716,10 +872,54 @@ def validate_timeline_against_reference(
         )
         return evidence
 
-    if require_offset_invariant:
-        audio_score, offset = _best_aligned_similarity(
-            subtitle_landmarks, profile.audio_landmarks, landmark_tolerance_ms
+    regions, ambiguity_ratio = _correlation_settings()
+    correlation = analyse_correlation(
+        subtitle_landmarks,
+        profile.audio_landmarks,
+        tolerance_ms=landmark_tolerance_ms,
+        regions=regions,
+        ambiguity_ratio=ambiguity_ratio,
+    )
+    evidence.correlation_peak = correlation.best_score
+    evidence.correlation_second_peak = correlation.second_score
+    evidence.correlation_peak_ratio = correlation.peak_ratio
+    evidence.correlation_clarity = correlation.clarity.value
+    evidence.region_offsets = list(correlation.region_offsets)
+    evidence.region_scores = list(correlation.region_scores)
+    evidence.regional_consistency = correlation.consistency.value
+
+    # Ambiguity only applies to a STRONG peak that is not unique. A weak best
+    # peak is positive evidence that the timeline does not correspond, so it is
+    # a mismatch rather than a failure to align: refusing to call that
+    # "ambiguous" would let a badly wrong cut pass as merely unclear.
+    strong_enough = (
+        correlation.best_score is not None
+        and correlation.best_score >= audio_match_floor
+    )
+    if correlation.clarity is CorrelationClarity.AMBIGUOUS and strong_enough:
+        # Two shifts explain this about equally well. Nothing has been aligned,
+        # and guessing must not become a verification or a mismatch.
+        evidence.verdict = VideoVerdict.INSUFFICIENT_EVIDENCE
+        evidence.reason = VideoFailureReason.TOO_FEW_LANDMARKS
+        evidence.detail.append(
+            f"ambiguous correlation: peak={correlation.best_score} "
+            f"runner-up={correlation.second_score} ratio={correlation.peak_ratio}"
         )
+        return evidence
+    if correlation.clarity is CorrelationClarity.NO_SIGNAL:
+        evidence.verdict = VideoVerdict.INSUFFICIENT_EVIDENCE
+        evidence.reason = VideoFailureReason.TOO_FEW_LANDMARKS
+        evidence.detail.append("no usable correlation peak")
+        return evidence
+    if correlation.clarity is CorrelationClarity.AMBIGUOUS:
+        evidence.detail.append(
+            "competing peaks exist but the best is weak; treated as disagreement "
+            "rather than as ambiguity"
+        )
+
+    if require_offset_invariant:
+        audio_score = correlation.best_score
+        offset = correlation.best_offset_ms
     else:
         audio_score = _similarity(
             subtitle_landmarks, profile.audio_landmarks, landmark_tolerance_ms
@@ -807,3 +1007,38 @@ def temp_probe_target(path: str | Path) -> str:  # pragma: no cover - test seam
     with tempfile.NamedTemporaryFile(suffix=Path(path).suffix, delete=False) as handle:
         shutil.copyfile(path, handle.name)
         return handle.name
+
+
+def to_audit_dict(evidence: VideoTimelineEvidence) -> dict:
+    """Serialise video evidence for the audit record.
+
+    Measurements and counts only. No audio content, no landmarks list, nothing
+    that could carry programme content.
+    """
+    return {
+        "available": evidence.available,
+        "verdict": evidence.verdict.value,
+        "reason": evidence.reason.value,
+        "profile_version": evidence.profile_version,
+        "profile_digest": evidence.profile_digest,
+        "duration_similarity": evidence.duration_similarity,
+        "audio_activity_similarity": evidence.audio_activity_similarity,
+        "scene_boundary_similarity": evidence.scene_boundary_similarity,
+        "audio_stream_count": evidence.audio_stream_count,
+        "selected_audio_stream": evidence.selected_audio_stream,
+        "audio_stream_selection": evidence.audio_stream_selection,
+        "audio_landmark_count": evidence.audio_landmark_count,
+        "scene_landmark_count": evidence.scene_landmark_count,
+        "best_offset_ms": evidence.best_offset_ms,
+        "first_half_similarity": evidence.first_half_similarity,
+        "second_half_similarity": evidence.second_half_similarity,
+        "correlation_peak": evidence.correlation_peak,
+        "correlation_second_peak": evidence.correlation_second_peak,
+        "correlation_peak_ratio": evidence.correlation_peak_ratio,
+        "correlation_clarity": evidence.correlation_clarity,
+        "regional_consistency": evidence.regional_consistency,
+        "audio_detector": evidence.audio_detector,
+        "adaptive_threshold_db": evidence.adaptive_threshold_db,
+        "adaptive_baseline_db": evidence.adaptive_baseline_db,
+        "landmark_quality": evidence.landmark_quality,
+    }

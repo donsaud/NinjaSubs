@@ -65,6 +65,40 @@ class Settings(BaseSettings):
     # pool is representative.
     REFERENCE_SHADOW_POOL_FETCH_LIMIT: int = 0
     REDIS_URL: str | None = None
+
+    # --- adaptive audio activity detection (measurement only) -------------- #
+    # The fixed `silencedetect` floor recovers boundaries only from audio
+    # containing true digital silence, which real programmes almost never
+    # have. These settings drive the per-file adaptive detector, which derives
+    # its activity threshold from the file's own energy distribution. They are
+    # extraction parameters, NOT synchronization thresholds: nothing here
+    # feeds MIN_CUES_FOR_VERIFIED, a p95, a MAD, a drift bound or a predictor.
+    ADAPTIVE_AUDIO_ENABLED: bool = False
+    ADAPTIVE_AUDIO_WINDOW_MS: int = 50
+    ADAPTIVE_AUDIO_HOP_MS: int = 25
+    ADAPTIVE_AUDIO_SMOOTHING_MS: int = 250
+    #: Margin above the robust baseline. Entering activity needs more evidence
+    #: than staying in it, which is the hysteresis.
+    ADAPTIVE_AUDIO_ENTER_MARGIN_DB: float = 6.0
+    ADAPTIVE_AUDIO_EXIT_MARGIN_DB: float = 3.0
+    #: Safety bounds. An extreme recording must not yield a nonsensical floor.
+    ADAPTIVE_AUDIO_MIN_THRESHOLD_DB: float = -60.0
+    ADAPTIVE_AUDIO_MAX_THRESHOLD_DB: float = 0.0
+    ADAPTIVE_AUDIO_MIN_SILENCE_MS: int = 700
+    ADAPTIVE_AUDIO_MIN_ACTIVITY_MS: int = 400
+    ADAPTIVE_AUDIO_MIN_BOUNDARY_SEPARATION_MS: int = 1_500
+    #: Percentile of the energy distribution treated as the quiet baseline.
+    #: Not chosen to maximise the stress matrix; see
+    #: docs/audio_landmark_pipeline.md.
+    ADAPTIVE_AUDIO_BASELINE_PERCENTILE: float = 20.0
+    #: Pathological-output guards.
+    ADAPTIVE_AUDIO_MIN_LANDMARKS: int = 4
+    ADAPTIVE_AUDIO_MAX_LANDMARKS: int = 400
+    #: Regional correlation, for distinguishing one global offset from an edit.
+    VIDEO_TIMELINE_REGIONS: int = 4
+    #: How much weaker the second correlation peak must be for the peak to
+    #: count as unambiguous. Above this, evidence is ambiguous and abstains.
+    VIDEO_TIMELINE_AMBIGUITY_RATIO: float = 0.85
     # Hard inline budget for sync during a player request. Downloads from the
     # reference providers + alass routinely take ~10s, so the budget is generous;
     # past it we serve the original and let the (still-running) sync warm the

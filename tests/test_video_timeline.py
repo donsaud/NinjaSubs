@@ -30,12 +30,27 @@ MANIFEST = REPO / "tests" / "fixtures" / "golden_sync" / "manifest.json"
 EVALUATOR = REPO / "tools" / "evaluate_golden_sync.py"
 
 
-def _blocks(count: int, *, block: int = 24_000, gap: int = 4_000, start: int = 2_000) -> list[int]:
+def _blocks(
+    count: int,
+    *,
+    block: int = 24_000,
+    gap: int = 4_000,
+    start: int = 2_000,
+    vary: bool = True,
+) -> list[int]:
+    """Dialogue-block onsets separated by silences.
+
+    ``vary`` makes the block lengths non-uniform, which is what real programme
+    structure looks like. Strictly periodic input is a different case with a
+    different correct answer, and it has its own test.
+    """
     out: list[int] = []
     position = start
-    for _ in range(count):
+    for index in range(count):
         out.append(position)
         position += block + gap
+        if vary:
+            position += (index * 7_000) % 11_000
     return out
 
 
@@ -116,8 +131,11 @@ def test_similar_duration_alone_does_not_prove_same_cut():
     correct = validate_timeline_against_reference(profile, video)
     # Same opening, same final timestamp, different internal pacing in the back
     # half. Identical span, so the runtime cannot be what separates them.
-    wrong_tail = [170_000, 190_000, 230_000, 250_000, 290_000, 310_000]
-    wrong = validate_timeline_against_reference(profile, video[:6] + wrong_tail)
+    # A run in the middle is displaced. The first and last landmarks are
+    # untouched, so the span and therefore the runtime are identical.
+    wrong = validate_timeline_against_reference(
+        profile, video[:3] + [v + 60_000 for v in video[3:9]] + video[9:]
+    )
     assert wrong.reference_span_ms == correct.reference_span_ms
 
     assert correct.verdict is VideoVerdict.MATCH
@@ -444,3 +462,85 @@ def test_redacted_sample_manifest_is_valid_and_has_no_media():
     # guard and would only ever encourage a more aggressive validator.
     assert any(case.ground_truth.final.value == "correct" for case in manifest.cases)
     assert any(case.ground_truth.final.value == "incorrect" for case in manifest.cases)
+
+
+# --- §27: the four golden video-validation cases --------------------------- #
+
+
+def test_case_a_global_offset_is_not_withheld():
+    """Same cut, shifted in time. A shift is not a cut."""
+    video = _blocks(14)
+    evidence = validate_timeline_against_reference(
+        _profile(video), [value + 95_000 for value in video]
+    )
+    assert evidence.verdict is VideoVerdict.MATCH
+    assert is_withholding_evidence(evidence) is False
+    assert abs(evidence.best_offset_ms) > 1_000, "the offset was actually found"
+
+
+def test_case_b_structural_cut_is_detected():
+    """A different cut, with a discontinuity no single shift explains."""
+    video = _blocks(14)
+    spliced = video[:7] + [value + 90_000 for value in video[7:]]
+    evidence = validate_timeline_against_reference(_profile(video), spliced)
+    assert evidence.verdict is VideoVerdict.MISMATCH
+    assert is_withholding_evidence(evidence) is True
+    assert evidence.regional_consistency in ("mixed", "scattered")
+
+
+def test_case_c_no_structure_abstains_rather_than_mismatching():
+    """Continuous audio with nothing to compare. Absence, not disagreement."""
+    profile = _profile(_blocks(14))
+    empty = VideoTimelineProfile(
+        duration_ms=profile.duration_ms,
+        audio_stream_count=1,
+        selected_audio_stream=0,
+        audio_stream_ambiguous=False,
+        audio_landmarks=[],
+    )
+    evidence = validate_timeline_against_reference(empty, _blocks(14))
+    assert evidence.verdict is VideoVerdict.INSUFFICIENT_EVIDENCE
+    assert evidence.reason.value == "VIDEO_EVIDENCE_INSUFFICIENT"
+    assert is_withholding_evidence(evidence) is False
+
+
+def test_case_d_ambiguous_dual_peaks_abstain():
+    """Perfectly periodic structure correlates at several shifts equally.
+
+    Nothing has been aligned, and a guess must not become a verification.
+    """
+    periodic = list(range(2_000, 2_000 + 12 * 28_000, 28_000))
+    evidence = validate_timeline_against_reference(_profile(periodic), periodic)
+    assert evidence.correlation_clarity == "ambiguous"
+    assert evidence.verdict is VideoVerdict.INSUFFICIENT_EVIDENCE
+    assert is_withholding_evidence(evidence) is False
+    assert evidence.correlation_second_peak is not None
+    assert evidence.correlation_peak_ratio is not None
+
+
+def test_ambiguity_is_recorded_even_when_the_peak_is_weak():
+    """A weak best peak is disagreement, not ambiguity.
+
+    Otherwise a badly wrong cut could pass as merely unclear.
+    """
+    video = _blocks(14)
+    unrelated = [value * 3 + 913 for value in video]
+    evidence = validate_timeline_against_reference(_profile(video), unrelated)
+    assert evidence.verdict is VideoVerdict.MISMATCH
+
+
+def test_regional_analysis_is_separate_from_the_global_peak():
+    video = _blocks(14)
+    good = validate_timeline_against_reference(_profile(video), video)
+    assert good.regional_consistency == "consistent"
+    assert len(good.region_offsets) >= 2
+    # One shift everywhere.
+    assert max(good.region_offsets) - min(good.region_offsets) <= 1_500
+
+    spliced = validate_timeline_against_reference(
+        _profile(video), video[:7] + [value + 90_000 for value in video[7:]]
+    )
+    assert spliced.regional_consistency in ("mixed", "scattered")
+    # Regional offsets are recorded, not averaged away.
+    assert len(spliced.region_offsets) >= 2
+    assert max(spliced.region_offsets) - min(spliced.region_offsets) > 1_500

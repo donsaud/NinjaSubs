@@ -76,10 +76,18 @@ def test_stress_artifact_shows_the_structure_is_recoverable():
     # And a high floor has its own cost: quiet material stops being found.
     uneven = by_name["uneven_gain"]["floor_sensitivity"]
     assert uneven["-20"] < uneven["-45"]
-    # A music bed needs a markedly higher floor still, which is why no single
-    # floor serves all content.
-    assert by_name["music_bed"]["floor_sensitivity"]["-25"] == 0
-    assert by_name["music_bed"]["floor_sensitivity"]["-20"] == 12
+    # And some floors separate them: a music bed needs a higher floor than room
+    # tone, so no single constant serves both. Stated level-independently,
+    # because the exact bed level is a generator choice and may be retuned.
+    music = by_name["music_bed"]["floor_sensitivity"]
+    separating = [
+        floor
+        for floor, count in ambience.items()
+        if count > 0 and music.get(floor, 0) == 0
+    ]
+    assert separating, "expected at least one floor that finds room tone but not music"
+    # Both are eventually recovered, so neither is unrecoverable information.
+    assert music["-20"] == 12
 
 
 # --- the safe failure mode --------------------------------------------------- #
