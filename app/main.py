@@ -42,6 +42,9 @@ from app.services.aggregator import (
 )
 from app.services.cache import clear_subtitle_cache
 from app.services.subtitle_matcher import extract_metadata
+from app.services.sync.alignment import SubtitleEvaluation
+from app.services.sync.audit import AUDIT_LOG as sync_audit
+from app.services.sync.audit import record_for_evaluation
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.matching import (
     has_video_fingerprint,
@@ -117,6 +120,25 @@ async def lifespan(app: FastAPI):
     )
     _init_sync_orchestrator()
     await _sync_cache.connect()
+
+    # Shadow audit trail. Off by default; when enabled it writes sanitized
+    # decision records for offline analysis and changes nothing about how a
+    # subtitle is ranked, served, or verified.
+    from app.services.sync.audit import configure_audit
+
+    configure_audit(
+        enabled=bool(getattr(settings, "SYNC_AUDIT_ENABLED", False)),
+        path=getattr(settings, "SYNC_AUDIT_PATH", None),
+        max_records=int(getattr(settings, "SYNC_AUDIT_MAX_RECORDS", 2000) or 2000),
+    )
+    if sync_audit.enabled:
+        logger.info(
+            "[audit] shadow audit ENABLED -> %s (records affect nothing)",
+            sync_audit.path or "in-memory only",
+        )
+    else:
+        logger.info("[audit] shadow audit disabled (default)")
+
     try:
         yield
     finally:
@@ -723,9 +745,51 @@ async def _fetch_subtitles_handler(
         rel.sync_confidence = prediction.confidence if prediction.is_actionable else None
         rel.sync_reasons = list(prediction.reasons)
 
+        # Shadow audit: written after the decision, read by nobody on the
+        # request path. A prediction is remembered so a later serve-time
+        # verification can be compared against it.
+        if sync_audit.enabled:
+            sync_audit.record_search(
+                record_for_evaluation(
+                    SubtitleEvaluation(
+                        sync_state=prediction.predicted_state.value,
+                        verification=prediction.availability.value,
+                        reasons=prediction.reasons,
+                    ),
+                    phase="search",
+                    release=rel,
+                    video_id=verdict_fingerprint,
+                    subtitle_id=rel_sub_id,
+                    language=rel_lang,
+                    has_video_fingerprint=has_fingerprint,
+                    request_context=("resolved_stream" if has_fingerprint else "catalogue_request"),
+                    from_cache=False,
+                    prediction_rule=prediction.rule,
+                    prediction_confidence=prediction.confidence,
+                )
+            )
+
     # Ordering: sync evidence first, then the matcher's own order. With no
     # evidence anywhere, every key above is equal and the list is unchanged.
+    original_order = [rel.release_name for rel in ranked_releases]
     ranked_releases = order_candidates(ranked_releases)
+    sync_aware_order = [rel.release_name for rel in ranked_releases]
+    # Record only whether the visible order moved, and why - never re-rank from it.
+    if original_order != sync_aware_order:
+        sync_audit.record_ranking_diff(changed=True)
+        logger.info(
+            "[subtitle-order] sync evidence changed the visible order for %s: %d of %d "
+            "candidates moved; ranking is not adjusted from this metric",
+            parsed.imdb_id,
+            sum(
+                1
+                for a, b in zip(original_order, sync_aware_order, strict=False)
+                if a != b
+            ),
+            len(original_order),
+        )
+    else:
+        sync_audit.record_ranking_diff(changed=False)
 
     logger.info(
         "[sync-evidence] search_sync_cache_hits=%d predictions_generated=%d "

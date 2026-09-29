@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     # the sync pipeline now accepts any season/episode-matched reference).
     SYNC_REQUIRE_EXACT_MATCH: bool = True
 
+    # --- shadow audit trail (observability only) ------------------------ #
+    # Disabled by default: a default install records nothing and writes no
+    # files. When enabled, every synchronization decision is written to a
+    # sanitized JSONL file for offline analysis. Telemetry never influences a
+    # ranking decision, a threshold, or a served payload.
+    SYNC_AUDIT_ENABLED: bool = False
+    SYNC_AUDIT_PATH: str | None = None
+    SYNC_AUDIT_MAX_RECORDS: int = 2000
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

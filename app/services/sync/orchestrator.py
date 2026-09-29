@@ -278,6 +278,48 @@ class SyncOrchestrator:
         )
         return evaluation
 
+    def _audit_serve(
+        self,
+        evaluation: SubtitleEvaluation,
+        meta: dict,
+        target_id: str,
+        *,
+        from_cache: bool,
+    ) -> None:
+        """Shadow-record a serve-time verification. Never affects the result.
+
+        A no-op unless the audit is explicitly enabled, so the default install
+        pays nothing beyond a boolean check.
+        """
+        from app.services.sync.audit import (
+            AUDIT_LOG,
+            record_for_evaluation,
+            stable_id,
+        )
+        from app.services.sync.matching import has_video_fingerprint
+        from app.services.sync_cache import SyncCache
+
+        if not AUDIT_LOG.enabled:
+            return
+        try:
+            fingerprint = SyncCache.video_fingerprint_from_meta(meta)
+            AUDIT_LOG.record_serve(
+                record_for_evaluation(
+                    evaluation,
+                    phase="serve",
+                    video_id=fingerprint,
+                    subtitle_id=stable_id(target_id),
+                    language=str(meta.get("lang") or "und"),
+                    has_video_fingerprint=has_video_fingerprint(meta),
+                    request_context=(
+                        "resolved_stream" if has_video_fingerprint(meta) else "catalogue_request"
+                    ),
+                    from_cache=from_cache,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - telemetry must not break serving
+            logger.debug("[audit] serve record dropped: %s", exc)
+
     @property
     def metrics(self) -> dict[str, int]:
         """Counters for observability (cache hit rate, alass runs per request)."""
@@ -353,6 +395,9 @@ class SyncOrchestrator:
             ):
                 self._metrics["verification_cache_hits"] += 1
                 self._last_evaluation = self._evaluation_from_verdict(remembered)
+                self._audit_serve(
+                    self._last_evaluation, meta, target_id, from_cache=True
+                )
                 logger.info(
                     "[sync] reusing measured verdict for sub=%s: %s (no alass run)",
                     target_id,
@@ -464,6 +509,7 @@ class SyncOrchestrator:
                 await self._store_verdict(
                     verdict_key, evaluation, content_hash, meta, target_id
                 )
+                self._audit_serve(evaluation, meta, target_id, from_cache=False)
                 logger.info(
                     "[sync] target already aligned (median offset %+.2fs) -> serving original "
                     "[%s]",
@@ -527,6 +573,7 @@ class SyncOrchestrator:
                 await self._store_verdict(
                     verdict_key, evaluation, content_hash, meta, target_id
                 )
+                self._audit_serve(evaluation, meta, target_id, from_cache=False)
                 log = logger.warning if evaluation.sync_state is SyncState.REJECTED else logger.info
                 log("[sync] alignment %s: %s", evaluation.sync_state.value, evaluation.explain())
 
