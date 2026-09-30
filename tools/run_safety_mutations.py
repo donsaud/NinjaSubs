@@ -108,6 +108,92 @@ MUTATIONS: tuple[Mutation, ...] = (
         new='        return sorted(self.root.glob("*_*.srt"))  # MUTATION',
         guards="a reference proven for one target must not satisfy another",
     ),
+    Mutation(
+        name="unverified-payload-served-from-cache",
+        file="app/services/sync/orchestrator.py",
+        old="                if is_reusable_verified(stored_state, stored_verification):",
+        new="                if True:  # MUTATION",
+        guards=(
+            "a payload hit is not a verification: an UNVERIFIED/UNKNOWN or "
+            "rejected Alass artifact must never be re-served as a finished "
+            "synchronization, or it gets silently promoted on the next request"
+        ),
+    ),
+    Mutation(
+        name="resync-verdict-served-without-artifact",
+        file="app/services/sync/orchestrator.py",
+        old=(
+            "                and (remembered_state != SyncState.VERIFIED_RESYNCED.value"
+            " or resync_artifact_available)"
+        ),
+        new="                and True  # MUTATION",
+        guards=(
+            "a verified_resynced verdict means alass re-timed the subtitle, so "
+            "its transformed artifact is the answer; without it the branch "
+            "serves the unsynchronized original under a verified-resync label"
+        ),
+    ),
+    Mutation(
+        name="unverified-sync-output-served",
+        file="app/services/sync/orchestrator.py",
+        old="""                serve_synchronized = may_serve_synchronized(
+                    evaluation.sync_state.value, evaluation.verification.value
+                )""",
+        new="                serve_synchronized = True  # MUTATION",
+        guards=(
+            "the analyzer is the authority on synchronization trust: an output "
+            "it marks UNVERIFIED/UNKNOWN or REJECTED must never replace the "
+            "original subtitle, or a mangled alignment reaches the user "
+            "(real Whiplash case: up to +293s displacement, served anyway)"
+        ),
+    ),
+    Mutation(
+        name="compatible-release-fallback-hidden-from-user",
+        file="app/main.py",
+        old="        display_label = _with_fallback_disclosure(display_label, sub_id)",
+        new="        display_label = display_label  # MUTATION",
+        guards=(
+            "when a compatible fallback release is served instead of the "
+            "requested candidate, the listing must disclose it; otherwise the "
+            "user is told release A while release B's bytes are delivered"
+        ),
+    ),
+    Mutation(
+        name="sync-cache-reuse-fallback-disclosure-lost",
+        file="app/main.py",
+        old="""                    served_release_name=str(
+                        (meta_record or {}).get("served_release_name") or ""
+                    ).strip(),""",
+        new='                    served_release_name="",  # MUTATION',
+        guards=(
+            "reusing previously verified fallback bytes must still disclose "
+            "which release they came from, or the listing attributes them to "
+            "the requested candidate after a cache hit"
+        ),
+    ),
+    Mutation(
+        name="metadata-persists-raw-credentials",
+        file="app/cache.py",
+        old="            safe, _ = sanitize_metadata(metadata)",
+        new="            safe = dict(metadata)  # MUTATION",
+        guards=(
+            "provider API keys and bearer tokens must never be written to "
+            "_meta/*.json; the download path re-resolves them per request"
+        ),
+    ),
+    Mutation(
+        name="subs-cache-overwritten-with-sync-artifact",
+        file="app/main.py",
+        old="""            if synced_content and synced_content != cached_content:""",
+        new="""            if synced_content and synced_content != cached_content:
+                await cache_manager.save_subtitle(target_id, synced_content)  # MUTATION""",
+        guards=(
+            "the disk subtitle cache holds provider bytes; writing a "
+            "synchronization artifact back makes the next request re-analyze "
+            "that artifact as the source subtitle against the same reference, "
+            "a circular verification that can promote UNKNOWN to VERIFIED"
+        ),
+    ),
 )
 
 
