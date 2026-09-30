@@ -910,6 +910,16 @@ async def _fetch_subtitles_handler(
             "title": title,
             "year": year,
         }
+        # A search rewrites this candidate's metadata, so carry forward the
+        # fallback provenance recorded when the bytes were actually served.
+        # Without this the disclosure would be erased by the next listing and
+        # the user would be shown the requested release again.
+        try:
+            _prior = cache_manager.get_metadata(sub_id) or {}
+        except Exception:  # pragma: no cover - disclosure must never break a listing
+            _prior = {}
+        if _prior.get("served_release_name") and not meta_dict.get("served_release_name"):
+            meta_dict["served_release_name"] = _prior["served_release_name"]
         cache_manager.store_metadata(sub_id, meta_dict)
 
         # Resolve clean display language name (e.g. 'Arabic', 'English')
@@ -923,6 +933,13 @@ async def _fetch_subtitles_handler(
             source_tag=source_tag,
             badge_parts=prefs.resolved_badge_parts,
         )
+        # Truthful attribution: if this candidate was actually served from a
+        # different, compatible release, say so in the label the user reads.
+        # Both the id and the title of a Stremio subtitle entry are this label,
+        # so this is the only existing field that reaches the user, and it is
+        # what clients such as Nuvio render. The requested release stays in
+        # front; the served release is appended. Selection is unchanged.
+        display_label = _with_fallback_disclosure(display_label, sub_id)
 
         # Standard modern subtitle response:
         # - "id": clean display label (some clients such as Nuvio render the id directly,
@@ -1400,6 +1417,31 @@ async def _reusable_verified_fallback_sync(
     return payload
 
 
+def _with_fallback_disclosure(display_label: str, sub_id: str) -> str:
+    """Append the actually-served release when a compatible fallback was used.
+
+    The subtitle listing names the *requested* candidate, which is correct until
+    the provider cannot supply it and a different, compatible release is served
+    instead. At that point the label would attribute another release's bytes to
+    the requested one, so the served release is disclosed explicitly.
+
+    A no-op unless a differing ``served_release_name`` was recorded for exactly
+    this candidate, which keeps the normal listing byte-for-byte unchanged and
+    prevents the note leaking between candidates.
+    """
+    try:
+        stored = cache_manager.get_metadata(sub_id)
+    except Exception:  # pragma: no cover - disclosure must never break a listing
+        return display_label
+    if not stored:
+        return display_label
+    served = str(stored.get("served_release_name") or "").strip()
+    requested = _canonical_release_name(str(stored.get("release_name") or ""))
+    if not served or _canonical_release_name(served) == requested:
+        return display_label
+    return f"{display_label} [fallback: {served}]"
+
+
 async def _fallback_download_subsource(
     imdb_id: str,
     media_type: str = "series",
@@ -1573,6 +1615,13 @@ async def _fallback_download_subsource(
                 reason=selection_reason,
                 exact_candidates=exact_count,
                 compatible_candidates=compatible_count,
+                # The release actually selected, so the caller can record what
+                # will really be served. Without this the listing keeps naming
+                # the requested release while a different one is downloaded.
+                # Stored verbatim so the disclosure stays readable; comparison
+                # against the requested release is done canonically.
+                served_release_name=str(_candidate_release_name(best_release) or "").strip(),
+                match_tier=match_tier,
             )
 
         # Before spending a download: has this exact candidate already been
@@ -1592,12 +1641,23 @@ async def _fallback_download_subsource(
             video_size=(meta or {}).get("video_size"),
         )
         if reused is not None:
+            meta_record = meta if isinstance(meta, dict) else None
             if outcome is not None:
                 outcome.update(
                     category="SYNC_CACHE_REUSE",
                     downloads_skipped=True,
+                    # Carry the disclosure forward. These bytes were verified
+                    # for a specific release, and that release may not be the
+                    # one the user asked for. Propagating the provenance an
+                    # earlier request already recorded keeps the listing
+                    # truthful on the reuse path too. Nothing is invented
+                    # here: with no recorded provenance the outcome simply has
+                    # no served_release_name, and the label stays unannotated
+                    # rather than claiming a release nobody recorded.
+                    served_release_name=str(
+                        (meta_record or {}).get("served_release_name") or ""
+                    ).strip(),
                 )
-            meta_record = meta if isinstance(meta, dict) else None
             if meta_record is not None:
                 meta_record["provider"] = "subsource"
                 meta_record["fallback_sync_cache_reuse"] = True
@@ -2133,8 +2193,15 @@ async def _serve_subtitle_handler(
                 auto_sync_enabled, convert_ass_enabled,
             )
             if synced_content and synced_content != cached_content:
+                # Served, but deliberately NOT written back to the disk cache.
+                # This cache holds *provider* bytes. Overwriting it with a
+                # synchronization artifact meant the next request read those
+                # transformed bytes back as the source subtitle and re-ran the
+                # analyzer on them against the same reference -- a circular
+                # verification that could promote an UNVERIFIED/UNKNOWN result.
+                # Provenance must not disappear: synchronized artifacts belong
+                # to SyncCache, which only reuses verified-and-measured ones.
                 cached_content = synced_content
-                await cache_manager.save_subtitle(target_id, cached_content)
             return _build_subtitle_response(
                 cached_content,
                 release_name,
@@ -2173,7 +2240,13 @@ async def _serve_subtitle_handler(
     season = meta.get("season")
     episode = meta.get("episode")
 
-    # Determine user-specific API key for this subtitle
+    # Determine user-specific API key for this subtitle.
+    #
+    # Never read a credential back from the on-disk metadata: it is stripped on
+    # write and sanitized on read, so this is always absent by design. The key
+    # is resolved per request from the URL config, then from the environment --
+    # the same precedence ``parse_user_config`` applies. Reading it from cache
+    # would also have let one user's stale key override a later request's own.
     subdl_key = meta.get("subdl_key")
     subsource_key = meta.get("subsource_key")
     opensubtitles_key = meta.get("opensubtitles_key")
@@ -2187,6 +2260,11 @@ async def _serve_subtitle_handler(
             subsource_key = cfg_prefs.subsource_key
         if not opensubtitles_key:
             opensubtitles_key = cfg_prefs.opensubtitles_key
+
+    # Server-wide fallback so the un-configured route still authenticates.
+    subdl_key = subdl_key or settings.SUBDL_API_KEY or ""
+    subsource_key = subsource_key or settings.SUBSOURCE_API_KEY or ""
+    opensubtitles_key = opensubtitles_key or getattr(settings, "OPENSUBTITLES_API_KEY", "") or ""
 
     if not download_url:
         raise HTTPException(status_code=404, detail="Missing download URL for subtitle")
@@ -2265,6 +2343,22 @@ async def _serve_subtitle_handler(
         logger.info(
             "Fallback to Subsource succeeded for #%s (%d bytes)", target_id, len(fallback_bytes)
         )
+        # Record which release was actually served. ``release_name`` stays the
+        # requested candidate: it is part of the sub_id derivation and the
+        # provider's own identity, so it must not be rewritten. This is purely
+        # disclosure provenance, and it is only recorded when the two differ.
+        _served_release = str((fallback_outcome or {}).get("served_release_name") or "").strip()
+        _requested_release = _canonical_release_name(str(meta.get("release_name") or ""))
+        if _served_release and _canonical_release_name(_served_release) != _requested_release:
+            meta["served_release_name"] = _served_release
+            logger.info(
+                "[fallback] #%s served from a different release than requested: "
+                "requested=%s served=%s reason=%s",
+                target_id,
+                _requested_release,
+                _served_release,
+                fallback_outcome.get("reason"),
+            )
         cache_manager.store_metadata(target_id, meta)
         await cache_manager.save_subtitle(target_id, fallback_bytes)
         cache_manager.clear_failed(target_id)
@@ -2355,8 +2449,11 @@ async def _serve_subtitle_handler(
         auto_sync_enabled, convert_ass_enabled,
     )
     if synced_bytes and synced_bytes != srt_bytes:
+        # Served, but not persisted here: the cache must keep the provider
+        # bytes so a later request re-verifies from the true source instead of
+        # re-analyzing an already-synchronized artifact. See the cache-hit path
+        # above for the full reasoning.
         srt_bytes = synced_bytes
-        await cache_manager.save_subtitle(target_id, srt_bytes)
 
     # 6. Serve with appropriate headers preserving native subtitle format
     return _build_subtitle_response(
@@ -2595,7 +2692,11 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             f"OpenSubtitles download_url failed/limit reached for file_id {file_id}. "
             f"Attempting fallback to Subsource for {meta.get('imdb_id')}..."
         )
-        effective_subsource_key = subsource_key or meta.get("subsource_key")
+        # Never sourced from cached metadata (stripped on write, sanitized on
+        # read); config wins, then the environment.
+        effective_subsource_key = (
+            subsource_key or settings.SUBSOURCE_API_KEY or ""
+        )
         fallback_bytes = await _fallback_download_subsource(
             imdb_id=meta["imdb_id"],
             media_type=meta.get("media_type")

@@ -63,6 +63,49 @@ class _FakeSyncService:
         return "1\n00:00:09,000 --> 00:00:10,000\nsynced\n"
 
 
+class _StubAnalyzer:
+    """Controls the synchronization outcome so caching tests test *caching*.
+
+    ``test_sync_strategies.py`` asserts orchestration and cache behaviour, but
+    the fixtures it uses are synthetic and the real analyzer legitimately
+    REJECTS their output (cue loss). Letting the analyzer decide meant these
+    tests were really asserting "a rejected artifact is re-served as a warm
+    cache hit", which is the defect this stub removes. Analyzer arithmetic has
+    its own dedicated tests; the safety direction (a non-positive result is
+    never re-served) is proven against the real analyzer in
+    ``test_unverified_payload_not_reused.py``.
+    """
+
+    def __init__(self, state, verification="verified"):
+        from app.services.sync.alignment import SubtitleEvaluation
+
+        self._evaluation = SubtitleEvaluation(
+            sync_state=state,
+            verification=verification,
+            sync_confidence=0.95,
+            verification_confidence=0.9,
+            median_offset_ms=10.0,
+            mad_offset_ms=5.0,
+            p95_offset_ms=20.0,
+            content_match_score=0.9,
+        )
+
+    def analyze(self, *args, **kwargs):
+        return self._evaluation
+
+
+def _stub_analyzer(orch, state=None, verification="verified"):
+    """Attach a stub analyzer; defaults to a verified, reusable outcome."""
+    from app.services.sync.alignment import SyncState, VerificationAvailability
+
+    if state is None:
+        state = SyncState.VERIFIED_SYNCED
+    if isinstance(verification, str):
+        verification = VerificationAvailability(verification)
+    orch._analyzer = _StubAnalyzer(state, verification)
+    return orch
+
+
 def _arabic_bytes(n=6):
     blocks = []
     for i in range(n):
@@ -111,6 +154,7 @@ async def test_orchestrator_prefers_external_then_caches(monkeypatch):
         external_strategy=_FakeStrategy(reference),
         hash_strategy=_FakeStrategy("should-not-be-used"),
     )
+    _stub_analyzer(orch)
     out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert b"synced" in out
     assert orch._external_strategy.calls == 1
@@ -135,6 +179,10 @@ async def test_orchestrator_uses_external_tier_first(monkeypatch, caplog):
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     orch = _orchestrator(external_strategy=_FakeStrategy(BIG_REF.decode()))
+    # Trusted outcome: this test is about tier ordering, not verification. The
+    # real analyzer rejects the fake service's 1-cue output (cue loss), and an
+    # untrusted result is deliberately not served.
+    _stub_analyzer(orch)
     with caplog.at_level("INFO"):
         out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert b"synced" in out
@@ -156,6 +204,10 @@ async def test_orchestrator_survives_strategy_errors(monkeypatch):
         external_strategy=_FakeStrategy(exc=RuntimeError("boom")),
         hash_strategy=_FakeStrategy(BIG_REF.decode()),
     )
+    # Trusted outcome: this test is about orchestration, not verification.
+    # The real analyzer rejects the fake service's output, and an untrusted
+    # result is deliberately not served.
+    _stub_analyzer(orch)
     out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert b"synced" in out
 
@@ -193,6 +245,8 @@ async def test_orchestrator_falls_back_to_next_strategy_on_sync_failure(monkeypa
         hash_strategy=_FakeStrategy(BIG_REF.decode(), kind="team"),
         sync_service=sync_svc,
     )
+    # Trusted outcome: this test is about strategy fallback, not verification.
+    _stub_analyzer(orch)
 
     with caplog.at_level("WARNING"):
         out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
@@ -233,23 +287,33 @@ async def test_orchestrator_forwards_decision_kind_to_alass(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_trusts_alass_output(monkeypatch):
-    """A zero-exit alass output reaches the client regardless of the shift."""
+async def test_orchestrator_withholds_untrusted_alass_output(monkeypatch):
+    """A zero-exit alass output the verifier distrusts must NOT reach the client.
+
+    Delivery fail-open, proven on a real Whiplash 2160p REMUX request: alass
+    exited 0, the analyzer returned ``unverified``/``unknown`` with the explicit
+    reason "alass output not trustworthy" (residual p95 4200 ms against a
+    2000 ms bound), yet the mangled output was returned -- displacing a
+    serviceable original by up to +293 s.
+
+    The analyzer is the authority on trust. This test uses the REAL analyzer, so
+    the rejection is genuine rather than stubbed.
+    """
     import subprocess
 
     from app.config import settings as app_settings
     from app.services.sync_service import SubtitleSyncService
 
     # Reference dialogue starts 1s after the target's: close enough to pass the
-    # first-dialogue sanity gate yet misaligned, so alass runs and its output
-    # (mocked with a large shift) must be served verbatim.
+    # first-dialogue sanity gate yet misaligned, so alass runs.
     ref = "".join(
         f"{i + 1}\n00:00:{i * 2 + 2:02d},000 --> 00:00:{i * 2 + 3:02d},000\nref {i}\n\n"
         for i in range(6)
     )
 
     def _shifted_run(command, capture_output=True, timeout=None):
-        # alass "succeeds" but with a +69s shift on the first cue.
+        # alass "succeeds" but with a +69s shift on the first cue: structurally
+        # valid (cue count preserved, monotonic) yet wildly untrustworthy.
         drifted = "".join(
             f"{i + 1}\n00:01:{10 + i * 2:02d},000 --> 00:01:{12 + i * 2:02d},000\nsynced {i}\n\n"
             for i in range(6)
@@ -261,13 +325,21 @@ async def test_orchestrator_trusts_alass_output(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _shifted_run)
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
 
+    original = _arabic_bytes()
     for kind in ("edition", "team"):
         orch = _orchestrator(
             external_strategy=_FakeStrategy(ref, kind=kind),
             sync_service=SubtitleSyncService(),
         )
-        out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
-        assert b"synced" in out
+        out = await orch.evaluate_and_sync(original, _meta(), "t", True)
+
+        ev = orch._last_evaluation
+        assert ev is not None
+        assert ev.verification.value != "verified", (
+            "fixture drifted further than expected; the negative control lost its premise"
+        )
+        assert b"synced" not in out, "untrusted alass output was served to the client"
+        assert out == original, "the original provider subtitle must be served instead"
 
 
 @pytest.mark.asyncio
@@ -281,6 +353,7 @@ async def test_aligned_pair_skips_alass_but_caches(monkeypatch):
         for i in range(6)
     )
     orch = _orchestrator(external_strategy=_FakeStrategy(ref, kind="edition"))
+    _stub_analyzer(orch)
     out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert out == _arabic_bytes()
     assert orch._sync_service.calls == 0
@@ -380,6 +453,8 @@ async def test_single_flight_coalesces_identical_requests(monkeypatch):
 
     strategy = _SlowStrategy()
     orch = _orchestrator(external_strategy=strategy)
+    # Trusted outcome: this test is about request coalescing, not verification.
+    _stub_analyzer(orch)
     first = asyncio.ensure_future(orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True))
     await asyncio.sleep(0)
     second = asyncio.ensure_future(orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True))
@@ -398,6 +473,10 @@ async def test_single_flight_isolates_distinct_keys(monkeypatch):
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     orch = _orchestrator(external_strategy=_FakeStrategy(BIG_REF.decode(), kind="team"))
+    # Trusted outcome: this test is about orchestration, not verification.
+    # The real analyzer rejects the fake service's output, and an untrusted
+    # result is deliberately not served.
+    _stub_analyzer(orch)
     await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t1", True)
     await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t2", True)
     assert orch._external_strategy.calls == 2
@@ -445,6 +524,8 @@ async def test_sync_cache_sidecar_records_provenance(monkeypatch):
     orch = _orchestrator(
         hash_strategy=_FakeStrategy(BIG_REF.decode(), kind="hash"), sync_cache=cache
     )
+    # Trusted outcome: this test is about the cache sidecar, not verification.
+    _stub_analyzer(orch)
     out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
     assert b"synced" in out
 
@@ -501,6 +582,8 @@ async def test_app_singleton_orchestrator_coalesces_concurrent_requests(monkeypa
             return ResolvedReference(BIG_REF.decode(), kind="team")
 
     orch._external_strategy = _Slow()
+    # Trusted outcome: this test is about coalescing on the app singleton.
+    _stub_analyzer(orch)
     orch._sync_service = _FakeSyncService()
     monkeypatch.setattr(main, "_get_sync_orchestrator", lambda: orch)
 
@@ -551,6 +634,8 @@ async def test_request_budget_returns_original_and_warms_cache(monkeypatch):
             return ResolvedReference(BIG_REF.decode(), kind="team")
 
     orch._external_strategy = _Slow()
+    # Trusted outcome: this test is about coalescing on the app singleton.
+    _stub_analyzer(orch)
     orch._sync_service = _FakeSyncService()
     monkeypatch.setattr(main, "_get_sync_orchestrator", lambda: orch)
 
@@ -602,6 +687,10 @@ async def test_orchestrator_allows_realistic_cross_source_offset(monkeypatch):
         "2\n00:00:11,700 --> 00:00:13,200\nreference line two\n"
     )
     orch = _orchestrator(external_strategy=_FakeStrategy(ref, kind="edition"))
+    # Trusted outcome: this test is about orchestration, not verification.
+    # The real analyzer rejects the fake service's output, and an untrusted
+    # result is deliberately not served.
+    _stub_analyzer(orch)
     out = await orch.evaluate_and_sync(target, _meta(), "t", True)
     assert b"synced" in out
     assert orch._sync_service.calls == 1
@@ -790,6 +879,7 @@ async def test_orchestrator_logs_sync_cache_hit(monkeypatch, caplog):
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     orch = _orchestrator(external_strategy=_FakeStrategy(BIG_REF.decode()))
+    _stub_analyzer(orch)
     await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "sub123", True)
 
     orch2 = _orchestrator(

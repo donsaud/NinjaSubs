@@ -105,17 +105,49 @@ async def test_cancelling_waiter_keeps_running_flight_registered(enabled_sync):
 
 @pytest.mark.asyncio
 async def test_warm_sync_cache_survives_reference_provider_outage(enabled_sync):
+    from test_sync_strategies import _stub_analyzer
+
     strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(
         return_value=ResolvedReference(_srt([1] * 10), "team")
     ))
     service = SimpleNamespace(sync_async=AsyncMock(return_value=_srt([1] * 10)))
     orch = _orch(strategy, service)
+    # A *verified* warm entry must survive an outage. This fixture only
+    # reaches a verified state with a controlled analyzer: the real analyzer
+    # caps 10 cues at probable_sync (12 required for a verified claim), and
+    # a non-positive entry is deliberately not reusable -- see
+    # test_non_positive_warm_entry_does_not_mask_provider_outage.
+    _stub_analyzer(orch)
     original = _srt().encode()
     synced = await orch.evaluate_and_sync(original, _meta(), "t", True)
     strategy.resolve_with_provenance.return_value = ResolvedReference(None)
     assert await orch.evaluate_and_sync(original, _meta(), "t", True) == synced
     assert synced != original
     assert strategy.resolve_with_provenance.await_count == 1
+
+@pytest.mark.asyncio
+async def test_non_positive_warm_entry_does_not_mask_provider_outage(enabled_sync):
+    """A non-positive warm entry is not served, so the outage is not hidden.
+
+    Real analyzer: 10 cues is below the 12-cue threshold for a verified
+    claim, so the outcome is capped at probable_sync. Under the fail-closed
+    rule that entry cannot be served as a finished synchronization, so the
+    provider outage is handled honestly instead of being papered over by an
+    unconfirmed artifact.
+    """
+    strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(
+        return_value=ResolvedReference(_srt([1] * 10), "team")
+    ))
+    service = SimpleNamespace(sync_async=AsyncMock(return_value=_srt([1] * 10)))
+    orch = _orch(strategy, service)
+    original = _srt().encode()
+    await orch.evaluate_and_sync(original, _meta(), "t", True)
+    assert orch._last_evaluation.sync_state.value != "verified_synced"
+
+    strategy.resolve_with_provenance.return_value = ResolvedReference(None)
+    out = await orch.evaluate_and_sync(original, _meta(), "t", True)
+    assert out == original, "non-positive artifact was served as a finished result"
+
 
 
 @pytest.mark.asyncio

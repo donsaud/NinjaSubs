@@ -18,6 +18,93 @@ logger = logging.getLogger(__name__)
 # broken upstream entry cannot trigger a full provider fan-out on every retry.
 _FAILURE_TTL_SECONDS = 600
 
+#: Metadata fields that hold a provider credential verbatim. These are stripped
+#: before anything is written to ``_meta/*.json`` and again on read, so a
+#: pre-existing file cannot re-expose a secret. The credential is not needed for
+#: cache correctness: the download path resolves it per request from the URL
+#: config, falling back to the environment (see ``parse_user_config``).
+_SECRET_METADATA_FIELDS = ("subdl_key", "subsource_key", "opensubtitles_key")
+
+#: Query parameters that carry a credential inside a URL. The value is dropped
+#: but the URL stays usable: providers re-attach the credential themselves
+#: (``SubdlProvider.download_archive`` sets both the ``x-api-key`` header and the
+#: ``api_key`` parameter from the resolved key).
+_SECRET_URL_PARAMS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "key",
+        "token",
+        "access_token",
+        "accesstoken",
+        "auth",
+        "authorization",
+        "password",
+        "secret",
+        "sig",
+        "signature",
+    }
+)
+
+#: Presence flags written in place of the secret values, so diagnostics keep
+#: showing whether a credential was configured without revealing it.
+_SECRET_PRESENCE_FLAGS = {
+    "subdl_key": "has_subdl_key",
+    "subsource_key": "has_subsource_key",
+    "opensubtitles_key": "has_opensubtitles_key",
+}
+
+
+def _redact_url_secrets(url: Any) -> Any:
+    """Strip credential-bearing query parameters from a URL, keeping it usable."""
+    if not isinstance(url, str) or not url:
+        return url
+    if "?" not in url:
+        return url
+    base, _, query = url.partition("?")
+    kept = []
+    changed = False
+    for part in query.split("&"):
+        if not part:
+            continue
+        name, eq, _ = part.partition("=")
+        if eq and name.strip().lower() in _SECRET_URL_PARAMS:
+            changed = True
+            continue
+        kept.append(part)
+    if not changed:
+        return url
+    # No dangling "?" when the query held nothing but credentials.
+    return f"{base}?{'&'.join(kept)}" if kept else base
+
+
+def sanitize_metadata(metadata: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Return ``(safe_metadata, changed)`` with every credential removed.
+
+    Applied on write *and* on read. The read-side pass is what protects files
+    written before this existed: a legacy ``_meta/*.json`` holding a plaintext
+    key is rewritten in the safe form instead of being handed back to callers.
+    """
+    if not isinstance(metadata, dict):
+        return metadata, False
+    safe = dict(metadata)
+    changed = False
+    for field in _SECRET_METADATA_FIELDS:
+        if field in safe:
+            # A presence flag replaces the value, so diagnostics can still show
+            # that a credential was configured. Metadata that never held a
+            # credential is left completely untouched.
+            value = safe.pop(field)
+            safe[_SECRET_PRESENCE_FLAGS[field]] = bool(value and str(value).strip())
+            changed = True
+    for field in ("download_url", "stream_url"):
+        if field in safe:
+            redacted = _redact_url_secrets(safe[field])
+            if redacted != safe[field]:
+                safe[field] = redacted
+                changed = True
+    return safe, changed
+
 
 class LRUCacheManager:
     """
@@ -123,26 +210,45 @@ class LRUCacheManager:
             return True
 
     def store_metadata(self, sub_id: str, metadata: dict[str, Any]) -> None:
-        """Store download metadata for on-demand retrieval."""
+        """Store download metadata for on-demand retrieval.
+
+        Credentials are stripped first: a provider API key has no business being
+        written to disk, and the download path re-resolves it per request.
+        """
         meta_path = self.get_meta_path(sub_id)
         try:
+            safe, _ = sanitize_metadata(metadata)
             # A fresh/re-mounted cache volume can be missing ``_meta``; recreate
             # it so metadata writes never fail with ENOENT.
             meta_path.parent.mkdir(parents=True, exist_ok=True)
-            meta_path.write_text(json.dumps(metadata), encoding="utf-8")
+            meta_path.write_text(json.dumps(safe), encoding="utf-8")
         except OSError as e:
             logger.warning(f"Failed to store metadata for {sub_id}: {e}")
 
     def get_metadata(self, sub_id: str) -> dict[str, Any] | None:
-        """Retrieve stored download metadata."""
+        """Retrieve stored download metadata.
+
+        Sanitized on read, so a legacy file written before credentials were
+        stripped cannot re-expose one. Such a file is rewritten in the safe form
+        as a side effect; subtitle payload bytes are never touched.
+        """
         meta_path = self.get_meta_path(sub_id)
         if not meta_path.is_file():
             return None
         try:
-            return json.loads(meta_path.read_text(encoding="utf-8"))
+            raw = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception as e:
             logger.warning(f"Failed to read metadata for {sub_id}: {e}")
             return None
+        safe, changed = sanitize_metadata(raw)
+        if changed:
+            # Best-effort in-place repair of the metadata only. A failure here
+            # must not break the request, and the payload is left untouched.
+            try:
+                meta_path.write_text(json.dumps(safe), encoding="utf-8")
+            except OSError as e:
+                logger.warning(f"Failed to sanitize metadata for {sub_id}: {e}")
+        return safe
 
     def clear_metadata(self) -> None:
         """Invalidate and wipe all on-disk metadata cache entries."""

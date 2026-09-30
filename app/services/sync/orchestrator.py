@@ -32,6 +32,8 @@ from app.services.sync.alignment import (
     SubtitleEvaluation,
     SyncState,
     VerificationAvailability,
+    is_reusable_verified,
+    may_serve_synchronized,
 )
 from app.services.sync.matching import is_informative_release_name
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
@@ -425,6 +427,7 @@ class SyncOrchestrator:
         content_hash: str,
         meta: dict | None = None,
         target_id: str | None = None,
+        artifact_key: str | None = None,
     ) -> None:
         """Persist a measured verdict for reuse, if it is safe to key.
 
@@ -432,6 +435,12 @@ class SyncOrchestrator:
         time, and a fingerprint-bound alias keyed by candidate id so the listing
         path can find it before the subtitle bytes exist. Both are bound to the
         video fingerprint, so neither can leak across videos.
+
+        ``artifact_key`` records where the synchronized bytes were stored. A
+        resync verdict claims the subtitle was re-timed, so reusing that claim
+        requires the transformed artifact; without the key the reuse path would
+        have to guess the decision segment of the cache key, and a wrong guess
+        would serve the unsynchronized original under a verified label.
         """
         if not verdict_key or self._sync_cache is None:
             return
@@ -442,8 +451,11 @@ class SyncOrchestrator:
             fingerprint = SyncCache.video_fingerprint_from_meta(meta)
             if fingerprint:
                 alias_key = SyncCache.build_verdict_alias_key(fingerprint, target_id)
+        payload = evaluation.model_dump(mode="json")
+        if artifact_key:
+            payload["artifact_key"] = artifact_key
         await self._sync_cache.set_verdict(
-            verdict_key, evaluation.model_dump(mode="json"), alias_key=alias_key
+            verdict_key, payload, alias_key=alias_key
         )
 
     async def _execute(
@@ -468,35 +480,80 @@ class SyncOrchestrator:
             fingerprint_source = _fingerprint_source(meta, target_id)
             digest = hashlib.sha256(resolution_key.encode()).hexdigest()[:12]
             if cached:
+                # A payload hit is NOT a verification. This fast path returns
+                # the stored bytes with no analyzer call, so an entry written
+                # from a non-positive evaluation would otherwise be re-served as
+                # a finished synchronization -- a real defect observed on a
+                # Whiplash 2160p REMUX request, where an UNVERIFIED/UNKNOWN
+                # Alass output was stored here and later re-presented as a
+                # pre-synced subtitle without re-verification.
+                #
+                # Fail closed: only an entry whose recorded outcome is
+                # verified-and-measured may be served from here. Anything else
+                # is treated as a miss, which falls through to the normal path
+                # and recomputes from the original subtitle. The original bytes
+                # are always available, so a miss is safe; serving an
+                # unverified artifact is not.
+                meta_record = None
+                try:
+                    meta_record = await self._sync_cache.get_meta(resolution_key)
+                except Exception as exc:  # pragma: no cover - cache must not break sync
+                    logger.debug("[sync-cache] meta read failed: %s", exc)
+                stored_state = (meta_record or {}).get("sync_state")
+                stored_verification = (meta_record or {}).get("verification")
+                if is_reusable_verified(stored_state, stored_verification):
+                    logger.info(
+                        "[sync-cache] layer=payload result=hit sub_id=%s process=%s "
+                        "fingerprint_source=%s credential_source=%s content_hash=%s "
+                        "key_digest=%s sync_state=%s verification=%s",
+                        target_id,
+                        _PROCESS_INSTANCE_ID,
+                        fingerprint_source,
+                        credential_source(meta),
+                        content_hash,
+                        digest,
+                        stored_state,
+                        stored_verification,
+                    )
+                    logger.info(
+                        "[sync] cache HIT for sub=%s -> serving pre-synced subtitle immediately",
+                        target_id,
+                    )
+                    self._metrics["verification_cache_hits"] += 1
+                    return cached
                 logger.info(
-                    "[sync-cache] layer=payload result=hit sub_id=%s process=%s "
+                    "[sync-cache] layer=payload result=miss sub_id=%s process=%s "
                     "fingerprint_source=%s credential_source=%s content_hash=%s "
-                    "key_digest=%s",
+                    "key_digest=%s store_layer=%s "
+                    "miss_reason=stored_result_not_reusable sync_state=%s "
+                    "verification=%s",
                     target_id,
                     _PROCESS_INSTANCE_ID,
                     fingerprint_source,
                     credential_source(meta),
                     content_hash,
                     digest,
+                    "in_memory" if self._sync_cache.is_ephemeral else "redis",
+                    stored_state or "absent",
+                    stored_verification or "absent",
                 )
+            # Only a genuine absence is reported as such. An entry that was
+            # present but gated above already reported
+            # miss_reason=stored_result_not_reusable; logging absent_in_store as
+            # well would make diagnostics contradict themselves.
+            if not cached:
                 logger.info(
-                    "[sync] cache HIT for sub=%s -> serving pre-synced subtitle immediately",
+                    "[sync-cache] layer=payload result=miss sub_id=%s process=%s "
+                    "fingerprint_source=%s credential_source=%s content_hash=%s "
+                    "key_digest=%s miss_reason=absent_in_store store_layer=%s",
                     target_id,
+                    _PROCESS_INSTANCE_ID,
+                    fingerprint_source,
+                    credential_source(meta),
+                    content_hash,
+                    digest,
+                    "in_memory" if self._sync_cache.is_ephemeral else "redis",
                 )
-                self._metrics["verification_cache_hits"] += 1
-                return cached
-            logger.info(
-                "[sync-cache] layer=payload result=miss sub_id=%s process=%s "
-                "fingerprint_source=%s credential_source=%s content_hash=%s "
-                "key_digest=%s miss_reason=absent_in_store store_layer=%s",
-                target_id,
-                _PROCESS_INSTANCE_ID,
-                fingerprint_source,
-                credential_source(meta),
-                content_hash,
-                digest,
-                "in_memory" if self._sync_cache.is_ephemeral else "redis",
-            )
 
         if self._sync_cache is not None and await self._sync_cache.is_failed(resolution_key):
             logger.info(
@@ -517,9 +574,25 @@ class SyncOrchestrator:
         verdict_key = self._verdict_key(meta, content_hash)
         if verdict_key:
             remembered = await self._sync_cache.get_verdict(verdict_key) if self._sync_cache else None
-            if remembered and str(remembered.get("sync_state")) in (
-                SyncState.VERIFIED_SYNCED.value,
-                SyncState.VERIFIED_RESYNCED.value,
+            remembered_state = str((remembered or {}).get("sync_state") or "")
+            # VERIFIED_RESYNCED means alass DID re-time this subtitle, so the
+            # correct bytes are the transformed artifact, not the original. This
+            # branch serves `sub_bytes` (the original), so it may only claim a
+            # resync when that artifact is actually present; otherwise it would
+            # serve unsynchronized bytes under a "verified resync" label.
+            resync_artifact = None
+            if remembered_state == SyncState.VERIFIED_RESYNCED.value and self._sync_cache is not None:
+                artifact_key = (remembered or {}).get("artifact_key")
+                if isinstance(artifact_key, str) and artifact_key:
+                    resync_artifact = await self._sync_cache.get(artifact_key)
+            resync_artifact_available = resync_artifact is not None
+            if (
+                remembered
+                and remembered_state in (
+                    SyncState.VERIFIED_SYNCED.value,
+                    SyncState.VERIFIED_RESYNCED.value,
+                )
+                and (remembered_state != SyncState.VERIFIED_RESYNCED.value or resync_artifact_available)
             ):
                 self._metrics["verification_cache_hits"] += 1
                 self._last_evaluation = self._evaluation_from_verdict(remembered)
@@ -534,8 +607,22 @@ class SyncOrchestrator:
                     self._last_evaluation.explain(),
                 )
                 if self._sync_cache is not None:
-                    await self._sync_cache.set(resolution_key, sub_bytes)
-                return sub_bytes
+                    # A resync verdict serves the transformed artifact; a no-op
+                    # verdict has nothing to re-time, so the original is
+                    # already the synchronized subtitle.
+                    reused_bytes = resync_artifact if resync_artifact is not None else sub_bytes
+                    await self._sync_cache.set(resolution_key, reused_bytes)
+                    # The verdict re-checked above is a verified one, so this
+                    # entry is recorded as reusable.
+                    await self._sync_cache.set_meta(
+                        resolution_key,
+                        {
+                            "sync_state": str(remembered.get("sync_state")),
+                            "verification": str(remembered.get("verification") or "cached"),
+                            "sync_confidence": remembered.get("sync_confidence"),
+                        },
+                    )
+                return reused_bytes
 
         if self._sync_service is None:  # pragma: no cover - defensive
             logger.warning("[sync] no sync service configured -> serving original subtitle")
@@ -711,6 +798,14 @@ class SyncOrchestrator:
                 if self._sync_cache is not None:
                     await self._sync_cache.clear_failed(resolution_key)
                     await self._sync_cache.set(resolution_key, sub_bytes)
+                    await self._sync_cache.set_meta(
+                        resolution_key,
+                        {
+                            "sync_state": evaluation.sync_state.value,
+                            "verification": evaluation.verification.value,
+                            "sync_confidence": evaluation.sync_confidence,
+                        },
+                    )
                 return sub_bytes
 
             # "Relaxed" means the target name carries no edition signal, so the
@@ -810,8 +905,14 @@ class SyncOrchestrator:
                 )
                 self._last_evaluation = evaluation
                 self._metrics["candidates_verified"] += 1
+                # Computed before the verdict is stored: a resync verdict records
+                # where its transformed artifact lives, so a later reuse can
+                # serve the synchronized bytes instead of the original.
+                key = build_synced_cache_key(
+                    meta, target_id, content_hash=content_hash, decision=decision_kind
+                )
                 await self._store_verdict(
-                    verdict_key, evaluation, content_hash, meta, target_id
+                    verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key
                 )
                 self._audit_serve(
                     evaluation, meta, target_id, from_cache=False, resolved=resolved
@@ -819,30 +920,57 @@ class SyncOrchestrator:
                 log = logger.warning if evaluation.sync_state is SyncState.REJECTED else logger.info
                 log("[sync] alignment %s: %s", evaluation.sync_state.value, evaluation.explain())
 
-                key = build_synced_cache_key(
-                    meta, target_id, content_hash=content_hash, decision=decision_kind
-                )
                 if self._sync_cache is not None:
                     await self._sync_cache.clear_failed(resolution_key)
                     await self._sync_cache.set(key, synced.encode("utf-8"))
                     await self._sync_cache.set(resolution_key, synced.encode("utf-8"))
-                    await self._sync_cache.set_meta(
-                        key,
-                        {
-                            "status": "synced",
-                            "applied_shift": self._applied_shifts(target_text, synced),
-                            "reference_sha": hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16],
-                            "decision": decision_kind,
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        },
+                    # Record the measured outcome next to BOTH artifacts. The
+                    # read path refuses to serve a payload whose recorded state
+                    # is not verified-and-measured, so the artifact may exist
+                    # without ever being reusable as a verified result.
+                    outcome_meta = {
+                        "sync_state": evaluation.sync_state.value,
+                        "verification": evaluation.verification.value,
+                        "sync_confidence": evaluation.sync_confidence,
+                    }
+                    await self._sync_cache.set_meta(key, {**outcome_meta, **{
+                        "status": "synced",
+                        "applied_shift": self._applied_shifts(target_text, synced),
+                        "reference_sha": hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16],
+                        "decision": decision_kind,
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }})
+                    await self._sync_cache.set_meta(resolution_key, outcome_meta)
+                # Serving contract: the analyzer is the authority on whether
+                # these bytes may replace the original. An attempt it does not
+                # trust is kept for diagnostics/cache but never returned to the
+                # user, who gets the original provider subtitle instead -- the
+                # unsynchronized original is far more usable than a mangled one.
+                serve_synchronized = may_serve_synchronized(
+                    evaluation.sync_state.value, evaluation.verification.value
+                )
+                if serve_synchronized:
+                    served = synced.encode("utf-8")
+                else:
+                    logger.warning(
+                        "[sync] not serving the synchronized output for %s: verifier did not "
+                        "trust it (state=%s, verification=%s) -> serving the original subtitle",
+                        target_id,
+                        evaluation.sync_state.value,
+                        evaluation.verification.value,
                     )
+                    served = sub_bytes
                 logger.info(
-                    "[sync] synchronized subtitle %s (%d bytes, strategy=%s) and cached",
+                    "[sync] %s synchronization result for %s (%d bytes, "
+                    "strategy=%s, state=%s, verification=%s)",
+                    "stored" if serve_synchronized else "rejected",
                     target_id,
                     len(synced),
                     strategy_name,
+                    evaluation.sync_state.value,
+                    evaluation.verification.value,
                 )
-                return synced.encode("utf-8")
+                return served
 
             logger.warning(
                 "[sync] %s strategy reference failed sync/validation -> falling back to next strategy",

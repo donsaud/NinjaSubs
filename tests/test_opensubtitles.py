@@ -486,11 +486,16 @@ async def test_opensubtitles_stremio_endpoint_integration(client):
 
 
 @pytest.mark.asyncio
-async def test_opensubtitles_serve_subtitle_endpoint(client):
+async def test_opensubtitles_serve_subtitle_endpoint(client, monkeypatch):
     """Verify _serve_subtitle_handler properly calls OpenSubtitlesProvider.download_archive and caches result."""
     import uuid
 
+    from app.config import settings as app_settings
+
     sub_id = f"os_{uuid.uuid4().hex[:12]}"
+    # A credential is offered to the cache. It must NOT come back out: the
+    # download resolves the key per request (config, then environment), so a
+    # persisted secret can never be replayed from disk.
     cache_manager.store_metadata(
         sub_id,
         {
@@ -502,6 +507,7 @@ async def test_opensubtitles_serve_subtitle_endpoint(client):
             "lang": "ara",
         },
     )
+    monkeypatch.setattr(app_settings, "OPENSUBTITLES_API_KEY", "env_os_key", raising=False)
 
     fake_srt_bytes = b"1\n00:00:01,000 --> 00:00:03,000\nSubtitle delivered successfully\n"
 
@@ -519,10 +525,19 @@ async def test_opensubtitles_serve_subtitle_endpoint(client):
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("application/x-subrip")
         assert b"Subtitle delivered successfully" in resp.content
+        # Authentication still works, resolved from the environment...
         mock_dl.assert_called_once_with(
             "/sub/opensubtitles/77777.srt",
-            api_key="my_os_key",
+            api_key="env_os_key",
         )
+    # ...and the cached secret is gone from disk, not merely unused.
+    import json as _json
+
+    raw = cache_manager.get_meta_path(sub_id).read_text(encoding="utf-8")
+    assert "my_os_key" not in raw
+    stored = _json.loads(raw)
+    assert "opensubtitles_key" not in stored
+    assert stored["has_opensubtitles_key"] is True
 
 
 @pytest.mark.asyncio

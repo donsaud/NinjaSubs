@@ -423,6 +423,63 @@ def detect_change_points(
     return found
 
 
+def is_reusable_verified(state: str | None, verification: str | None) -> bool:
+    """True only for a verified, measured, reusable synchronization result.
+
+    The single definition of "this artifact may be reused as a verified
+    synchronization". It is deliberately stricter than checking ``state`` alone,
+    because the payload store has no store-side guarantee the way the verdict
+    store does: ``SyncCache.set_verdict`` refuses to persist a ``VERIFIED_*``
+    state backed by an unmeasured result, so a readable verdict implies
+    measurement. A payload entry carries no such implication, so both halves
+    must be checked here.
+
+    Anything not positively verified and measured is not reusable. That
+    includes ``UNVERIFIED``, ``REJECTED``, ``PROBABLE_SYNC``, ``PREDICTED`` and
+    a missing state, which is the fail-closed direction.
+    """
+    return state in (
+        SyncState.VERIFIED_SYNCED.value,
+        SyncState.VERIFIED_RESYNCED.value,
+    ) and verification in (
+        VerificationAvailability.VERIFIED.value,
+        VerificationAvailability.CACHED.value,
+    )
+
+
+def may_serve_synchronized(state: str | None, verification: str | None) -> bool:
+    """True only when the verifier actually measured and accepted the result.
+
+    This is the *delivery* half of the trust decision, and it is deliberately
+    separate from :func:`is_reusable_verified`, which governs *caching*. The two
+    answer different questions:
+
+    * caching asks "may this artifact be recalled later as a finished sync?"
+      That needs a ``VERIFIED_*`` state, so a merely probable result is not
+      reusable.
+    * delivery asks "may these bytes replace the original subtitle in this
+      response?" That only needs the analyzer to have measured the alignment
+      and accepted it, which is what ``VerificationAvailability.VERIFIED``
+      records. ``PROBABLE_SYNC`` with a verified measurement is an accepted
+      result whose *confidence* was capped, so it keeps its current serving
+      semantics.
+
+    The invariant this protects: a synchronization attempt the verifier does not
+    trust must never replace the original subtitle. An ``UNVERIFIED``/``UNKNOWN``
+    outcome means the analyzer had no trustworthy measurement -- a real Whiplash
+    2160p REMUX request produced an alass output the analyzer explicitly called
+    "not trustworthy" (residual p95 4200 ms against a 2000 ms bound) whose
+    timestamps were displaced by up to +293 s, and it was served anyway. A
+    ``REJECTED`` outcome is likewise never served.
+    """
+    if state == SyncState.REJECTED.value:
+        return False
+    return verification in (
+        VerificationAvailability.VERIFIED.value,
+        VerificationAvailability.CACHED.value,
+    )
+
+
 class AlignmentAnalyzer:
     """Measure an alass result and classify the synchronization evidence.
 
