@@ -565,6 +565,28 @@ class SyncOrchestrator:
             return bool(verdict["ok"])
 
         last_resolved = ResolvedReference(None)
+        # Request-scoped alass budget.
+        #
+        # This counter used to live in ``self._metrics``, which is created once
+        # in ``__init__`` on an orchestrator that ``main.py`` deliberately keeps
+        # as a process-wide singleton. Nothing reset it per request, so the
+        # allowance was consumed by whichever requests arrived first and never
+        # replenished: in a long-lived process every later request deferred its
+        # candidates immediately and served the original subtitle unsynchronized.
+        # The code's own comment stated the intended policy -- "per request ...
+        # left for a later request" -- which a process-lifetime counter cannot
+        # deliver. A production trace showed exactly that: the alass limit
+        # reported exhausted with no alass execution in that request at all.
+        #
+        # Kept local, so concurrent requests cannot share or reset each other's
+        # allowance. ``self._metrics["alass_runs"]`` is still incremented, but
+        # purely for process-wide observability; it no longer gates anything.
+        alass_attempted = 0
+        alass_started = 0
+        alass_completed = 0
+        alass_deferred = 0
+        candidates_rejected = 0
+
         for strategy_name, strategy_obj in attempts:
             try:
                 if getattr(strategy_obj, "validates_target", False):
@@ -610,6 +632,21 @@ class SyncOrchestrator:
                 threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
             )
             if not sanity["ok"]:
+                candidates_rejected += 1
+                logger.info(
+                    "[sync-budget] limit=%d attempted=%d alass_started=%d "
+                    "alass_completed=%d rejected_before_alass=%d deferred=%d "
+                    "candidate=%s strategy=%s reason=cue_sanity_rejected "
+                    "counted_toward_limit=false",
+                    self._alass_candidate_limit,
+                    alass_attempted,
+                    alass_started,
+                    alass_completed,
+                    candidates_rejected,
+                    alass_deferred,
+                    hashlib.sha256(str(strategy_name).encode()).hexdigest()[:8],
+                    strategy_name,
+                )
                 logger.warning(
                     "[sync] %s reference failed cue-sanity (%s, penalty %s) -> next strategy",
                     strategy_name,
@@ -684,16 +721,38 @@ class SyncOrchestrator:
             )
             reference_partial = bool(getattr(resolved, "partial", False))
 
-            # Cost control: at most ALASS_CANDIDATE_LIMIT expensive runs per
-            # request. Past that the remaining candidates are left for a later
+            # Cost control: at most ALASS_CANDIDATE_LIMIT expensive alass
+            # executions PER REQUEST. Candidates past that are left for a later
             # request rather than spawning unbounded subprocesses.
-            if self._metrics["alass_runs"] >= self._alass_candidate_limit:
+            #
+            # The check stays after the already-aligned shortcut on purpose: that
+            # path costs no subprocess and still benefits from having a
+            # reference to measure against, so it must not be starved by a
+            # budget that only exists to bound subprocesses.
+            if alass_attempted >= self._alass_candidate_limit:
+                alass_deferred += 1
+                logger.info(
+                    "[sync-budget] limit=%d attempted=%d alass_started=%d "
+                    "alass_completed=%d rejected_before_alass=%d deferred=%d "
+                    "candidate=%s strategy=%s reason=budget_exhausted "
+                    "counted_toward_limit=false",
+                    self._alass_candidate_limit,
+                    alass_attempted,
+                    alass_started,
+                    alass_completed,
+                    candidates_rejected,
+                    alass_deferred,
+                    hashlib.sha256(str(strategy_name).encode()).hexdigest()[:8],
+                    strategy_name,
+                )
                 logger.info(
                     "[sync] alass candidate limit reached (%d) -> deferring remaining candidates",
                     self._alass_candidate_limit,
                 )
                 continue
 
+            alass_attempted += 1
+            alass_started += 1
             self._metrics["alass_runs"] += 1
             synced = await self._sync_service.sync_async(
                 target_text,
@@ -704,6 +763,9 @@ class SyncOrchestrator:
                 relaxed=relaxed,
                 reference_partial=reference_partial,
             )
+            if synced:
+                alass_completed += 1
+
             if synced:
                 # Independent verification: alass exiting 0 is not proof of
                 # synchronization. Measure what it actually produced and record

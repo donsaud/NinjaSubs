@@ -89,6 +89,19 @@ MUTATIONS: tuple[Mutation, ...] = (
         guards="MM:SS,mmm targets must parse, or the verifier sees an empty target",
     ),
     Mutation(
+        name="alass-budget-process-wide-again",
+        file="app/services/sync/orchestrator.py",
+        old="            if alass_attempted >= self._alass_candidate_limit:",
+        new=(
+            '            if self._metrics["alass_runs"] >= self._alass_candidate_limit:'
+            "  # MUTATION"
+        ),
+        guards=(
+            "ALASS_CANDIDATE_LIMIT is a per-request allowance; a process-wide "
+            "counter starves every request after the first few"
+        ),
+    ),
+    Mutation(
         name="reference-cache-target-binding-removed",
         file="app/services/sync/cache.py",
         old='        return sorted(self.root.glob(f"{query.cache_stem}_*.srt"))',
