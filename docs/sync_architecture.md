@@ -4,6 +4,81 @@ The algorithm is frozen as of this document. Nothing below is a proposal. It
 is a record of what the system does, what it is good at, and — stated plainly
 — where it is known to be wrong.
 
+## Path classification
+
+```
+PRODUCTION        request path: matching, reference selection, alass,
+                  verification, caching, serving
+EXPERIMENTAL      adaptive audio activity, shadow reference selection v2
+                  (observation only; never substituted into a response)
+BENCHMARK ONLY    golden corpus, coverage matrix, generated-media timeline
+                  witness, real-media runner, safety mutation matrix
+SHADOW ONLY       audit records; written on the request path, read by nobody
+```
+
+Nothing under EXPERIMENTAL, BENCHMARK ONLY or SHADOW ONLY can change what a user
+receives. The video-derived timeline witness in particular is an offline
+measurement tool: production receives no target video, so it never runs on the
+request path.
+
+## Cache identity and lifecycle
+
+**Target identity is constructed in one place.** `video_fingerprint_from_meta`
+hashes `imdb_id, season, episode, target_filename, video_hash, video_size`.
+Because it hashes whatever it is given, two callers that build the dict
+differently derive different identities for the same target. This was not
+theoretical: the pre-download reuse lookup used a four-field dict while the
+serve path wrote verdicts from the full request meta, so on any request
+carrying a `videosize` -- every normal Stremio request -- the reuse path could
+never find the verdict it was written to reuse. Both paths now share
+`_target_fingerprint_meta`. `tests/test_target_identity_audit.py` pins them
+against each other and asserts every field participates in the hash.
+
+**Fingerprint strength is labelled, never overstated.**
+
+| `fingerprint_source` | meaning |
+|---|---|
+| `video_hash` | a real content hash of the video: true identity |
+| `stream_context` | digest of the stream URL: identifies a stream, not bytes |
+| `target_filename` | a reported release name |
+| `target_id` | the **subtitle** id; not video identity, and named as such |
+
+The weak fallbacks are retained deliberately. Refusing hashless requests would
+reject ordinary playback, which is the common case.
+
+**`SyncCache` is process-local.** With `REDIS_URL` empty, `_local` is a
+`cachetools.TTLCache` inside the process, so a restart is a guaranteed miss for
+a byte-identical key. That is architecture, not a defect, and the
+`[sync-cache]` diagnostic carries `store_layer` plus `process=` so a trace can
+tell "same process, key drifted" from "new process, store empty".
+
+**Payload reuse is target-bound.** `find_synced_for_target` requires the key's
+own fingerprint segment to match. `find_synced_for` is deliberately not used
+here: it matches on the subtitle id alone and will return an artifact
+synchronized against a different video.
+
+**Reference cache identity** is
+`{imdb}_{season}_{episode}_{group}_v2_{digest}_{scope}_{source}_{kind}.srt`,
+with two independent variation axes. `digest` covers media type, target
+filename, video hash, size and languages. `scope` is the target subtitle's
+cue-layout fingerprint, so a different target timing layout is a different
+cache identity **by design**: a reference proven against one layout is not
+reused for another. `stream_url` is excluded from the stem precisely because a
+rotating signed token would otherwise defeat the cache on every request.
+
+**Credentials** are supplied either by the environment or per-request through
+the Stremio manifest/config, and `.env` is legitimately empty in the second
+mode. Precedence is unchanged: `config or environment or ""`. Provenance is
+recorded as `credential_source` where that choice is made, because after the
+values are merged their origin is unrecoverable. Rotating a credential changes
+the cache namespace; that isolation is intentional and `auth_digest` is
+retained for it.
+
+**Fail-closed.** A verdict that is not `VERIFIED_SYNCED` or
+`VERIFIED_RESYNCED` never yields a served artifact, even when a matching
+artifact exists for the same target and subtitle. A verified verdict whose
+artifact is gone is not a payload: it falls through to the normal download.
+
 ## Reference selection is target-bound
 
 The one exception to "frozen", promoted because a production incident proved the
@@ -246,6 +321,79 @@ VAD = DEFERRED
 
 Adding it because it *might* help would be complexity traded for uncertainty,
 and uncertainty is not reduced that way.
+
+## Release gates
+
+One command runs every offline layer without network or provider credentials:
+
+```bash
+python tools/run_sync_benchmarks.py                # pytest + coverage + golden
+python tools/run_sync_benchmarks.py --mutations    # adds the safety mutation matrix
+python tools/run_sync_benchmarks.py --json-out report.json
+```
+
+It fails the gate on a regression, on a new false-verified golden case, on a
+target-binding or negative-serving regression, and on an UNPROTECTED safety
+mutation. It does **not** fail merely because a difficult case abstains
+correctly, because a provider is unavailable offline, or because ground truth
+is unknown. Those are distinct states and are reported as such.
+
+`tools/run_safety_mutations.py` removes each safety guard in turn in a
+temporary copy of the tree and requires the suite to fail. A guard whose
+removal leaves the suite green is reported as UNPROTECTED, which is a release
+blocker. Currently 6/6 mandatory mutations are caught: target-fingerprint
+binding, negative-verdict serving, stale engine version, divergent target
+identity, the strict timestamp grammar, and reference-cache target binding.
+
+## Duplication audit (reliability, not style)
+
+Recorded rather than refactored. Only duplication with *proven* divergence risk
+and full test coverage on both paths is a candidate for consolidation; the rest
+is documented so a future reader knows it was considered.
+
+| Area | Sites | Risk | Decision |
+|---|---|---|---|
+| SRT timestamp parsing | `parse_srt_cues._to_ms`, `sync_service._parse_timestamp_ms`, `query._cue_timestamp_ms` | **real** -- this exact divergence shipped a bug where the sync path counted 584 cues and the verifier saw 0 | **kept separate, invariant tested.** `test_parse_srt_cues_agrees_with_the_sync_path_parser` asserts the two agree on both grammars. |
+| ASS / cleaners / SAMI conversion | `ass_converter`, `cleaners`, `sami_converter` | low: different formats and call paths | left alone |
+| Credential precedence | `config_parser.parse_user_config` is canonical; `subdl`, `subsource`, `opensubtitles`, `aggregator` each repeat `(api_key or settings.X or "")` | **real but currently consistent** -- the expressions are identical, so no divergence is demonstrated | left alone; consolidating would touch six provider files with no proven defect |
+| Credential override detection | `main.py` `prefs.X if prefs.X != settings.X else ""` | none: different intent | not a duplicate, deliberately distinct |
+| Fingerprint construction | `_normalize_fingerprint`, `video_fingerprint_from_meta`, `_target_fingerprint_meta`, `_fingerprint_source` | **was real** -- two callers supplied different field subsets, which made cache reuse unreachable in production | **normalised** through `_target_fingerprint_meta`; pinned by `tests/test_target_identity_audit.py` |
+| Verification gate | one site: `_reusable_verified_fallback_sync` | none | single source of truth, mutation-proven |
+
+## Measured coverage, and what it does not show
+
+`python tools/benchmark_coverage_matrix.py` reports the corpus axes that exist
+and, more usefully, the ones that do not, measured from the corpus labels and
+the fixture bytes rather than from case names. Currently **19 required axis
+values have no coverage**, including every FPS family, 480p/576p/2160p, BDRip,
+DVD, movies, season packs, piecewise drift, and `MM:SS,mmm`.
+
+That last one matters: the `MM:SS,mmm` parser is unit-tested and the mutation
+suite proves the test bites, but **no golden case exercises it**. The corpus
+predates that fix. It is a fixture gap, not a code gap.
+
+## What the evidence does and does not support
+
+Every accuracy number in this repository is synthetic. The golden corpus
+contains 20 cases, the real-media runner reports NOT AVAILABLE, and the
+ffmpeg-dependent layers are unavailable in CI. The honest claim is therefore
+behavioural -- the system accepts correct synchronizations, rejects dangerous
+ones, and abstains when ambiguous -- measured on constructed inputs.
+
+It is **not** a claim of real-world accuracy across a catalogue. `false_verified`
+is tracked separately from aggregate accuracy because a false VERIFIED is far
+more dangerous than a correct UNVERIFIED. The independent video witness blocks
+every false-verified case the golden corpus produces, but that blocking is an
+offline measurement and does not exist on the request path, where production
+receives no target video.
+
+The four false-verified cases are classified, not treated as an algorithm
+defect: two are reference circularity (providers agree and are jointly wrong,
+which no threshold can fix without independent evidence) and two are
+different-cut / different-edit fixtures. The threshold sweep in the evaluator
+shows that refusing everything would drive `false_verified` to zero at the cost
+of all coverage, which is why the evaluator presents a Pareto view and refuses
+to recommend a threshold.
 
 ## The change gate from here on
 

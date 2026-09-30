@@ -129,10 +129,31 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the suites that generate and decode audio",
     )
+    parser.add_argument(
+        "--mutations",
+        action="store_true",
+        help=(
+            "run the safety mutation matrix: each guard is removed in a temp "
+            "copy and the suite must fail. Slow (one full run per mutation)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     python = sys.executable
     suites: list[dict[str, Any]] = []
+
+    # Unit/integration regressions. These are the release gate: a failure here
+    # is a regression, not a measurement.
+    suites.append(
+        _run("regression suite (pytest)", [python, "-m", "pytest", "-q", "--no-header"])
+    )
+
+    suites.append(
+        _run(
+            "corpus coverage matrix",
+            [python, "tools/benchmark_coverage_matrix.py", "--json-out", "reports/coverage.json"],
+        )
+    )
 
     suites.append(
         _run(
@@ -177,6 +198,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         suites.append(suite)
         real_media["report"] = "OK" if suite["status"] == "OK" else suite["status"]
+
+    if args.mutations:
+        suites.append(
+            _run(
+                "safety mutation matrix",
+                [python, "tools/run_safety_mutations.py"],
+            )
+        )
 
     payload = {
         "suites": [
