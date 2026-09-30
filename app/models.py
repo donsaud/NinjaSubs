@@ -178,6 +178,12 @@ class UserPreferences(BaseModel):
     subdl_key: str = ""
     subsource_key: str = ""
     opensubtitles_key: str = ""
+    #: Where the effective provider credentials above came from:
+    #: "manifest" (supplied in this request's config), "environment",
+    #: "mixed", or "default" (none configured). Recorded at the point the
+    #: precedence rule is applied, because after the values are merged their
+    #: origin cannot be recovered. Diagnostic only; never part of any digest.
+    credential_source: str = "default"
     languages: list[str] = Field(default_factory=lambda: ["ara"])
     exclude_hi: bool = False
     nuvio_mode: bool = False  # True: Clean ISO code ("ara") & Nuvio ID; False: Stremio format ("ara | ...", "AR [★ Match] | ...")

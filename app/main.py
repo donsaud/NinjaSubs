@@ -101,12 +101,22 @@ _app_orchestrator_client: httpx.AsyncClient | None = None
 async def lifespan(app: FastAPI):
     """Manage application resources, async HTTP connection pool, and graceful shutdown."""
     global _http_client
-    # Invalidate and clear in-memory TTLCache and metadata cache on container restart / startup
+    # Invalidate IN-MEMORY state on container restart / startup only.
+    #
+    # This deliberately does NOT call cache_manager.clear_metadata(). That call
+    # unlinked every _meta/*.json through the /app/cache bind mount, so each
+    # container start destroyed every persisted metadata entry on the host -
+    # measured at 122 files lost on a single recreate. The mount is meant to be
+    # persistent, so wiping it on boot defeated the volume and was the reason
+    # cached artifacts kept disappearing between deploys.
+    #
+    # ensure_dirs() stays: a fresh or differently-mounted volume legitimately
+    # has no directories, and creating them is idempotent.
     clear_subtitle_cache()
-    cache_manager.clear_metadata()
     cache_manager.clear_failures()
     cache_manager.ensure_dirs()
-    logger.info("Cleared in-memory subtitle TTLCache and metadata cache on application startup/restart.")
+    logger.info("Cleared in-memory subtitle TTLCache and failure markers on startup; "
+                "on-disk cache and metadata preserved.")
 
     logger.info("Initializing connection pool httpx.AsyncClient (<100MB footprint)...")
     _http_client = httpx.AsyncClient(
@@ -887,6 +897,10 @@ async def _fetch_subtitles_handler(
             "subdl_key": prefs.subdl_key,
             "subsource_key": prefs.subsource_key,
             "opensubtitles_key": prefs.opensubtitles_key,
+            # Provenance of the credentials above, recorded by the config
+            # parser where the precedence rule is applied. It is diagnostic
+            # only: no digest or cache key reads it.
+            "credential_source": prefs.credential_source,
             "lang": rel_lang,
             "uploader": getattr(rel, "uploader", "") or "",
             "hearing_impaired": bool(getattr(rel, "hearing_impaired", False)),
@@ -1242,6 +1256,31 @@ def _fallback_candidate_ref(
     return hashlib.sha256(rel_key.encode("utf-8")).hexdigest()[:16]
 
 
+def _target_fingerprint_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    """Canonical target-identity inputs, shared by every fingerprint caller.
+
+    ``SyncCache.video_fingerprint_from_meta`` hashes whatever it is handed, so
+    two call sites that build the dict differently derive different identities
+    for the same target. That is not theoretical: the pre-download reuse lookup
+    used a four-field dict (no video_hash, no video_size) while the serve path
+    wrote verdicts from the full request meta. Stremio always sends
+    ``videosize``, so the two could never agree and the reuse path could never
+    find the verdict it was written to reuse.
+
+    Extracting only the fields the hash actually consumes keeps the two paths
+    identical without changing the hash itself, so existing cache entries and
+    every prior identity rule are preserved.
+    """
+    return {
+        "imdb_id": meta.get("imdb_id"),
+        "season": meta.get("season"),
+        "episode": meta.get("episode"),
+        "target_filename": meta.get("target_filename"),
+        "video_hash": meta.get("video_hash"),
+        "video_size": meta.get("video_size"),
+    }
+
+
 async def _reusable_verified_fallback_sync(
     *,
     release: Any,
@@ -1250,6 +1289,8 @@ async def _reusable_verified_fallback_sync(
     episode: int | None,
     lang: str,
     target_filename: str | None,
+    video_hash: str | None = None,
+    video_size: Any = None,
 ) -> bytes | None:
     """Reuse an already-verified synchronization for this exact candidate.
 
@@ -1271,12 +1312,16 @@ async def _reusable_verified_fallback_sync(
     """
     from app.services.sync.alignment import SyncState
 
-    fingerprint_meta = {
-        "imdb_id": imdb_id,
-        "season": season,
-        "episode": episode,
-        "target_filename": target_filename,
-    }
+    fingerprint_meta = _target_fingerprint_meta(
+        {
+            "imdb_id": imdb_id,
+            "season": season,
+            "episode": episode,
+            "target_filename": target_filename,
+            "video_hash": video_hash,
+            "video_size": video_size,
+        }
+    )
     from app.services.sync.matching import has_video_fingerprint
 
     if not has_video_fingerprint(fingerprint_meta):
@@ -1540,6 +1585,11 @@ async def _fallback_download_subsource(
             episode=episode,
             lang=lang,
             target_filename=target_filename,
+            # Must match the identity the serve path keyed the verdict with.
+            # Omitting these made the lookup unreachable on any request that
+            # carries a video size, which is every normal Stremio request.
+            video_hash=(meta or {}).get("video_hash"),
+            video_size=(meta or {}).get("video_size"),
         )
         if reused is not None:
             if outcome is not None:

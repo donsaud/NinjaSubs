@@ -460,6 +460,30 @@ def parse_user_config(
         user_opensubtitles or getattr(settings, "OPENSUBTITLES_API_KEY", "") or ""
     ).strip()
 
+    # Provenance of the EFFECTIVE credentials, recorded here because this is
+    # the only point where the choice between the manifest value and the
+    # environment value still exists. Downstream, the resolved value lands in
+    # `meta` and the origin is unrecoverable, so a diagnostic that tries to
+    # re-derive it afterwards can only guess and will guess wrong whenever a
+    # user supplies a key per request while the environment is also configured.
+    #
+    # This is a label only. It never participates in the credential digest, so
+    # recording it cannot change cache identity or hit rates.
+    _manifest = bool(user_subdl or user_subsource or user_opensubtitles)
+    _env = bool(
+        settings.SUBDL_API_KEY or settings.SUBSOURCE_API_KEY
+        or getattr(settings, "OPENSUBTITLES_API_KEY", "")
+    )
+    _any = bool(effective_subdl or effective_subsource or effective_opensubtitles)
+    if not _any:
+        credential_source_label = "default"
+    elif _manifest and _env:
+        credential_source_label = "mixed"
+    elif _manifest:
+        credential_source_label = "manifest"
+    else:
+        credential_source_label = "environment"
+
     if not languages:
         languages = ["ara"]
 
@@ -474,6 +498,7 @@ def parse_user_config(
         subdl_key=effective_subdl,
         subsource_key=effective_subsource,
         opensubtitles_key=effective_opensubtitles,
+        credential_source=credential_source_label,
         languages=languages,
         exclude_hi=exclude_hi,
         nuvio_mode=nuvio_mode,

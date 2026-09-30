@@ -94,6 +94,19 @@ class SyncCache:
             logger.warning("[sync-cache] Redis unavailable (%s); using in-process TTL", exc)
             self._redis = None
 
+    @property
+    def is_ephemeral(self) -> bool:
+        """True when payloads live only in this process's memory.
+
+        With no Redis configured, ``_local`` is a ``TTLCache`` held in the
+        process. A container or worker restart therefore discards every
+        ``final_sub:`` payload, and an identical request afterwards is a
+        guaranteed miss. This is a lifecycle property worth logging, because a
+        hit and a miss for the same key are otherwise indistinguishable from a
+        key that simply never existed.
+        """
+        return self._redis is None
+
     async def get(self, key: str) -> bytes | None:
         if self._redis is not None:
             try:

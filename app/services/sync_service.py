@@ -635,6 +635,12 @@ class SubtitleSyncService:
                     "--split-penalty",
                     chosen_penalty,
                 ]
+            logger.info(
+                "[sync] invoking alass: target=%d chars, reference=%d chars, timeout=%.1fs",
+                len(target_srt),
+                len(reference),
+                effective_timeout,
+            )
             logger.info("[sync] executing: %s", " ".join(command))
             started = time.monotonic()
             result = subprocess.run(

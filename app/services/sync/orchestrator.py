@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import re
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -74,6 +75,79 @@ def build_synced_cache_key(
             target_id
         )
     return SyncCache.build_key(imdb_id, season_ep, fingerprint, target_id, decision, content_hash)
+
+
+#: Identifies this OS process, for cache diagnostics only.
+#:
+#: The payload store is process-local when Redis is absent, so a cache miss
+#: after a restart is expected architecture rather than a defect. A production
+#: trace cannot tell "same process, key drifted" from "new process, store
+#: empty" unless the log says which. This makes that distinction readable
+#: without exposing anything sensitive: it is a random value generated at
+#: import, not derived from configuration.
+_PROCESS_INSTANCE_ID = uuid.uuid4().hex[:12]
+
+
+def _fingerprint_source(meta: dict, target_id: str) -> str:
+    """Which input actually identified the TARGET VIDEO for cache scoping.
+
+    Recorded because the strength of the binding differs sharply between these
+    cases, and a log line that cannot distinguish them hides a real risk. The
+    order below is the full fallback chain, strongest first:
+
+        video_hash       a real content hash of the video: true identity
+        stream_context   sha256 of the stream URL: identifies the stream, not
+                         the bytes, and a signed URL may rotate
+        target_filename  the release name a user reported: identifies a release
+                         at best, and a re-mux of the same release is identical
+        target_id        the SUBTITLE id. This is not video identity at all and
+                         is named explicitly so it is never mistaken for a
+                         cryptographic fingerprint.
+
+    The weaker sources are retained deliberately: refusing every request that
+    arrives without a video hash would reject most real playback. They are
+    labelled, not hidden.
+    """
+    if str(meta.get("video_hash") or "").strip():
+        return "video_hash"
+    if meta.get("stream_url"):
+        return "stream_context"
+    if str(meta.get("target_filename") or "").strip():
+        return "target_filename"
+    return "target_id"
+
+
+def credential_source(meta: dict) -> str:
+    """Where the request's EFFECTIVE provider credentials came from.
+
+    The precedence rule already exists and is applied in
+    ``config_parser.parse_user_config``::
+
+        effective = (user_config_value or settings.ENV_VALUE or "").strip()
+
+    The manifest/config value wins, but an empty one falls through to the
+    environment, and both may legitimately be empty for a deployment that
+    receives keys per-request through the Stremio config URL.
+
+    Provenance is READ, not re-derived. Once the resolved values land in
+    ``meta`` the origin is gone, so a helper that tried to infer it from the
+    values would report "manifest" for an environment-supplied key whenever a
+    user also supplied one. ``UserPreferences.credential_source`` captures the
+    real answer at the moment the choice is made.
+
+    This function only labels. It never changes precedence and never feeds the
+    credential digest, so it cannot alter cache identity.
+    """
+    recorded = meta.get("credential_source")
+    if isinstance(recorded, str) and recorded:
+        return recorded
+    # No recorded provenance (older cached metadata, or a caller that did not
+    # supply preferences). Fall back to presence only, and say so rather than
+    # guessing an origin that is genuinely unknowable at this point.
+    return "present_unlabelled" if any(
+        str(meta.get(field) or "").strip()
+        for field in ("subdl_key", "subsource_key", "opensubtitles_key")
+    ) else "default"
 
 
 def _parse_year(value: Any) -> int | None:
@@ -381,13 +455,48 @@ class SyncOrchestrator:
         resolution_key = self._flight_key(meta, target_id, sub_bytes)
         if self._sync_cache is not None:
             cached = await self._sync_cache.get(resolution_key)
+            # Structured lookup trace. A production trace showed a cache HIT at
+            # 14:08 and a MISS three minutes later for the same sub_id and the
+            # same target, with nothing in the log able to say why. The key is
+            # a composite of several independently-varying inputs, so which one
+            # moved is only knowable if the inputs are recorded.
+            #
+            # `result` distinguishes the states that were previously
+            # indistinguishable: hit, miss, negative_hit. Nothing sensitive is
+            # recorded here: sub_id is already logged on this path, and the
+            # fingerprint is reported as a presence flag plus a digest.
+            fingerprint_source = _fingerprint_source(meta, target_id)
+            digest = hashlib.sha256(resolution_key.encode()).hexdigest()[:12]
             if cached:
+                logger.info(
+                    "[sync-cache] layer=payload result=hit sub_id=%s process=%s "
+                    "fingerprint_source=%s credential_source=%s content_hash=%s "
+                    "key_digest=%s",
+                    target_id,
+                    _PROCESS_INSTANCE_ID,
+                    fingerprint_source,
+                    credential_source(meta),
+                    content_hash,
+                    digest,
+                )
                 logger.info(
                     "[sync] cache HIT for sub=%s -> serving pre-synced subtitle immediately",
                     target_id,
                 )
                 self._metrics["verification_cache_hits"] += 1
                 return cached
+            logger.info(
+                "[sync-cache] layer=payload result=miss sub_id=%s process=%s "
+                "fingerprint_source=%s credential_source=%s content_hash=%s "
+                "key_digest=%s miss_reason=absent_in_store store_layer=%s",
+                target_id,
+                _PROCESS_INSTANCE_ID,
+                fingerprint_source,
+                credential_source(meta),
+                content_hash,
+                digest,
+                "in_memory" if self._sync_cache.is_ephemeral else "redis",
+            )
 
         if self._sync_cache is not None and await self._sync_cache.is_failed(resolution_key):
             logger.info(
@@ -474,8 +583,14 @@ class SyncOrchestrator:
             last_resolved = resolved
             reference = resolved.text
             decision_kind = resolved.kind
+            # This only means a reference is now IN HAND. Alass may still not
+            # run: the already-aligned shortcut below returns the original
+            # subtitle before any subprocess is spawned. Claiming "invoking
+            # alass" here made live traces read as though Alass had executed
+            # when it had not. The exec site logs it truthfully instead.
             logger.info(
-                "[sync] %s strategy provided a reference (decision=%s, %d bytes) -> invoking alass",
+                "[sync] %s strategy provided a reference (decision=%s, %d bytes); "
+                "evaluating whether alass is needed",
                 strategy_name,
                 decision_kind,
                 len(reference.encode("utf-8")),
@@ -589,7 +704,6 @@ class SyncOrchestrator:
                 relaxed=relaxed,
                 reference_partial=reference_partial,
             )
-
             if synced:
                 # Independent verification: alass exiting 0 is not proof of
                 # synchronization. Measure what it actually produced and record
