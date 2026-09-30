@@ -23,6 +23,7 @@ A lightweight, self-hosted [Stremio](https://stremio.com) subtitle addon built w
 
 - **Multi-provider aggregation** — SubDL, SubSource, OpenSubtitles, YIFYSubtitles and SubtitleCat queried in parallel (`asyncio.gather`) with per-provider timeouts and resilient fallback.
 - **Arabic Subtitle Optimization** — context-aware RTL alignment, reversal repair, optional Tashkeel (diacritics) removal, Eastern-Arabic numerals and in-dialogue HI cleanup.
+- **AutoSync Subtitles** — Automatic subtitle synchronization with Alass, verification, and safe fallback handling.
 - **Stateless, per-user configuration** — every preference and API key is serialized into a URL-safe Base64 token embedded in the manifest URL; nothing is stored server-side.
 - **Informative match badges** — compose the subtitle label from match score, provider, release filename and uploader.
 - **Low footprint** — in-memory ZIP extraction (Zip Slip protected), LRU disk cache, and strict memory limits.
@@ -110,20 +111,25 @@ All Arabic processing is applied at **serve time** (per user) and is fully toggl
 - **Fix Display Timing**: Clamps micro-overlaps (< 500ms) between consecutive cues to stop player flickering (e.g. `00:00:01,000 --> 00:00:03,000` & `00:00:02,800 --> 00:00:05,000` → clamped to `00:00:02,800`).
 - **Convert ASS/SSA subtitles to SRT**: Enhances playback stability on Android TV (ExoPlayer) by converting ASS/SSA to SRT while retaining primary text colors and fixing Arabic RTL alignment.
 
-### Auto-Sync Subtitles
+### AutoSync Subtitles
 
-Auto-sync is an optional, best-effort timing correction for Arabic subtitles.
-Set `ENABLE_SUBTITLE_SYNC=true` in `.env`, restart the service, then enable
-**Auto-Sync Subtitles** in your addon configuration. Docker includes `alass`,
-`ffmpeg`, and `ffprobe`; a local Python installation needs those executables
-available on `PATH` or configured through `.env`.
+AutoSync is an optional, best-effort timing correction system for subtitle tracks.
 
-The addon looks for an English reference using a video hash, an embedded track
-when the client supplies a stream URL, or a matching external release. If no
-usable reference is available, alignment fails, or the request exceeds its
-7.5-second sync budget, it serves the original subtitle. A timed-out sync can
-finish in the background for the next request. Native ASS/SSA is preserved
-without alignment when **Convert ASS/SSA subtitles to SRT** is disabled.
+Enable AutoSync by setting `ENABLE_SUBTITLE_SYNC=true` in `.env`, restarting the service, and then enabling **AutoSync Subtitles** in the addon configuration. Docker images include `alass`, `ffmpeg`, and `ffprobe`; for local Python installations, these executables must be available on `PATH` or configured through `.env`.
+
+When AutoSync is enabled, the addon attempts to synchronize a subtitle to the **target video release** rather than blindly applying a fixed time offset. Reference timing may come from compatible subtitle tracks associated with the target release, including an embedded track when the client provides a usable stream URL, or from a matching external release.
+
+The synchronization pipeline is intentionally conservative:
+
+* The addon first uses the available video and release metadata to identify the target and select compatible reference material.
+* `alass` performs the actual timing alignment.
+* The resulting subtitle is evaluated before it can be considered synchronized.
+* Unreliable, rejected, incomplete, or otherwise unverified alignment results are **not served as successful sync results**; the original subtitle is used instead.
+* Verified synchronization results may be reused for the same target video through the sync cache, avoiding unnecessary re-alignment.
+
+If no usable reference is available, alignment cannot be completed, verification does not pass, or the request reaches the sync time budget, AutoSync safely falls back to the original subtitle. A synchronization attempt that times out may still complete in the background so that a verified result can become available for a later request.
+
+AutoSync changes **timing only**. It does not translate subtitles or rewrite their dialogue content. When **Convert ASS/SSA subtitles to SRT** is disabled, native ASS/SSA subtitles are preserved instead of being aligned through the SRT-based synchronization path.
 
 See [the autosync audit](docs/internal-reports/AUTOSYNC_AUDIT.md) for fixes,
 verification, and remaining limitations.
@@ -287,6 +293,33 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 <img src="docs/screenshots/keep-translator-credits.png" alt="Keep translator credits" width="100%" />
 </details>
 
+#### المزامنة التلقائية للترجمات
+
+تُعد خاصية المزامنة التلقائية (AutoSync) نظامًا اختياريًا لتصحيح تواقيت مسارات الترجمة بأفضل جهد ممكن (Best-effort).
+
+لتفعيل المزامنة التلقائية، اضبط ENABLE_SUBTITLE_SYNC=true في ملف .env، ثم أعد تشغيل الخدمة، وفعّل خيار AutoSync Subtitles من واجهة إعدادات الإضافة. تأتي صور Docker محملة مسبقاً بأدوات alass وffmpeg وffprobe؛ أما عند التثبيت المحلي عبر Python، فيجب أن تكون هذه الحزم متوفرة في مسار النظام PATH أو مُعرّفة بدقة عبر ملف .env.
+
+عند تفعيل الخاصية، تحاول الإضافة مزامنة الترجمة لتطابق إصدار الفيديو المستهدف (Target video release) بدلاً من تطبيق إزاحة زمنية ثابتة بشكل عشوائي. يُستمد التوقيت المرجعي إما من مسارات ترجمة متوافقة تابعة للنسخة المستهدفة (بما في ذلك المسارات المدمجة داخل الفيديو عندما يوفّر المشغّل رابط بث صالح)، أو من إصدار خارجي مطابق.
+
+صُمم مسار المزامنة البرمجي ليكون محافظاً وصارماً في قراراته:
+
+تبدأ الإضافة بقراءة بيانات الفيديو والنسخة المتاحة لتحديد الهدف بدقة وانتقاء المرجع الزمني المتوافق.
+
+تتولى أداة alass مهمة المحاذاة الزمنية الفعلية.
+
+يخضع ملف الترجمة الناتج لعملية فحص وتقييم شاملة قبل اعتماده كملف متزامن.
+
+النتائج غير الموثوقة، أو المرفوضة، أو غير المكتملة، أو التي تفشل في اجتياز بوابات الفحص لا تُقدَّم إطلاقًا كترجمات متزامنة ناجحة؛ بل يتم تقديم ملف الترجمة الأصلي فورًا كخيار آمن.
+
+يمكن إعادة استخدام نتائج المزامنة المعتمدة لنفس الفيديو المستهدف لاحقاً عبر ذاكرة التخزين المؤقت للمزامنة (Sync cache)، مما يمنع تكرار عمليات المعالجة غير الضرورية.
+
+في حال عدم توفر مرجع صالح، أو تعذر إتمام المحاذاة، أو فشل الترجمة في اجتياز الفحص، أو استهلاك المهلة الزمنية المحددة للطلب (Sync time budget)، تعود الإضافة بأمان إلى تقديم الترجمة الأصلية دون تعديل. كما أن محاولات المزامنة التي تنتهي مهلتها قد تستمر في الخلفية لتكتمل وتصبح نتيجتها المعتمدة جاهزة للطلبات المستقبلية.
+
+تقتصر مهمة AutoSync على تعديل التوقيت الزمني فقط؛ فهي لا تترجم النصوص ولا تُعيد صياغة محتوى الحوارات. وعند تعطيل خيار تحويل ترجمات ASS/SSA إلى SRT، يتم الاحتفاظ بملفات ASS/SSA الأصلية كما هي دون إدخالها في مسار المزامنة المعتمد على صيغة SRT.
+
+للاطلاع على الإصلاحات الهندسية، واختبارات التحقق، والقيود الحالية، راجع تقرير تدقيق المزامنة التلقائية.
+
+
 #### تنسيق النص والتوقيت
 
 - **تنظيف الوسوم**: موازنة وإغلاق وسوم التنسيق غير المغلقة (`<i>`/`<b>`) وإزالة الأغلفة غير المدعومة (مثال `<i>- Hello! <custom>world</custom>` ← `<i>- Hello! world</i>`).
@@ -385,7 +418,7 @@ mypy app                           # types
 
 <div align="center">
 
-**Made with ❤️ by donsaud · Free & Open Source for the community · v1.0.0**
+**Made with ❤️ by donsaud · Free & Open Source for the community · v1.1.0**
 
 [github.com/donsaud/NinjaSubs](https://github.com/donsaud/NinjaSubs)
 

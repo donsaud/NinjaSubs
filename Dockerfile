@@ -1,4 +1,4 @@
-﻿# Multi-stage lightweight Dockerfile for Stremio Arabic Subtitles Addon
+﻿# Multi-stage lightweight Dockerfile for NinjaSubs Stremio Addon
 FROM python:3.11-slim as base
 
 # Prevent Python from writing .pyc files and enable unbuffered logging
