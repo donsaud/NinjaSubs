@@ -38,6 +38,7 @@ from app.services.subtitle_matcher import (
     parse_srt_cues,
     validate_cue_sanity,
 )
+from app.services.sync.movement_seed import measure_movement_seed
 from app.services.sync.structural import (
     CutVerdict,
     StructuralSimilarity,
@@ -211,6 +212,11 @@ class SubtitleEvaluation(BaseModel):
     # Structural comparison against the reference (see structural.py).
     structural_similarity: float | None = None
     cut_verdict: str | None = None
+    # Pairing coverage for the movement and residual passes. Diagnosis only:
+    # an unmatched cue is "no counterpart inside the tolerance", never a
+    # zero-error measurement, and no acceptance rule reads these fields.
+    movement_pairing: PairingCoverage | None = None
+    residual_pairing: PairingCoverage | None = None
     # What the reference we aligned against was worth. Measurement context only.
     reference_trust: str | None = None
     reference_consensus: float | None = None
@@ -316,6 +322,10 @@ class SubtitleEvaluation(BaseModel):
             parts.append(f"p95={self.p95_offset_ms:.0f}ms")
         if self.drift_ms_per_minute is not None:
             parts.append(f"drift={self.drift_ms_per_minute:+.1f}ms/min")
+        if self.movement_pairing is not None:
+            parts.append(f"mv_pairs={self.movement_pairing.summary()}")
+        if self.residual_pairing is not None:
+            parts.append(f"res_pairs={self.residual_pairing.summary()}")
         if self.structural_similarity is not None:
             parts.append(f"struct={self.structural_similarity:.2f}")
         if self.reference_trust is not None:
@@ -344,25 +354,115 @@ def _median(values: list[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
-def pair_cue_starts(
+class CueMatch(BaseModel):
+    """One accepted cue correspondence."""
+
+    before_index: int
+    after_index: int
+    #: Start time of the matched ``before`` cue, in ms.
+    position_ms: int
+    #: ``after`` start minus ``before`` start, in ms.
+    delta_ms: float
+
+
+class CuePairing(BaseModel):
+    """Explicit result of pairing one cue sequence against another.
+
+    The critical property is that a cue with no counterpart inside
+    ``tolerance_ms`` is *reported* rather than discarded. It appears in
+    ``unmatched_before`` / ``unmatched_after`` and contributes to no residual.
+
+    An unmatched cue means only "no counterpart was found within the current
+    pairing tolerance". It is never a zero-error measurement, and it is never
+    folded into a delta at the tolerance boundary -- which is what previously
+    let a truncated residual distribution pile up just inside the cut and read
+    as timing error that was not there.
+    """
+
+    tolerance_ms: int
+    before_total: int
+    after_total: int
+    matches: list[CueMatch] = Field(default_factory=list)
+    unmatched_before: list[int] = Field(default_factory=list)
+    unmatched_after: list[int] = Field(default_factory=list)
+
+    @property
+    def pairs(self) -> list[tuple[int, float]]:
+        """``(position_ms, delta_ms)`` pairs, in ``before`` start order.
+
+        Identical to what :func:`pair_cue_starts` has always returned, so every
+        existing statistic keeps seeing exactly the same numbers.
+        """
+        return [(match.position_ms, match.delta_ms) for match in self.matches]
+
+    @property
+    def matched(self) -> int:
+        return len(self.matches)
+
+    def coverage(self) -> PairingCoverage:
+        return PairingCoverage(
+            tolerance_ms=self.tolerance_ms,
+            before_total=self.before_total,
+            after_total=self.after_total,
+            matched=self.matched,
+            unmatched_before=len(self.unmatched_before),
+            unmatched_after=len(self.unmatched_after),
+        )
+
+
+class PairingCoverage(BaseModel):
+    """How much of each side found a counterpart within the tolerance.
+
+    Recorded for diagnosis only. No acceptance decision reads it: an unmatched
+    cue cannot make a result look better or worse than the existing thresholds
+    already judge it.
+    """
+
+    tolerance_ms: int
+    before_total: int
+    after_total: int
+    matched: int
+    unmatched_before: int
+    unmatched_after: int
+
+    def summary(self) -> str:
+        return (
+            f"{self.matched}/{self.before_total} matched "
+            f"(unmatched {self.unmatched_before} before / "
+            f"{self.unmatched_after} after, tol={self.tolerance_ms}ms)"
+        )
+
+
+def pair_cues(
     before: list[Cue],
     after: list[Cue],
     *,
     tolerance_ms: int = 5_000,
-) -> list[tuple[int, float]]:
-    """Pair pre/post cue starts, returning ``(position_ms, delta_ms)`` pairs.
+) -> CuePairing:
+    """Pair two cue sequences, reporting every cue that found no counterpart.
 
-    Cues are matched by nearest start within ``tolerance_ms`` so a uniform shift
-    pairs one-to-one instead of collapsing onto a single neighbour. An unmatched
-    cue in either side is dropped rather than guessed at, which keeps the
-    statistics honest when alass merges or splits cues.
+    Cues are matched one-to-one by nearest start within ``tolerance_ms``, so a
+    uniform shift pairs one-to-one instead of collapsing onto a single
+    neighbour, and a reference cue is never reused. Greedy and deterministic:
+    ``before`` is visited in start order and each cue takes the nearest unused
+    counterpart. A cue with nothing inside the tolerance is recorded as
+    unmatched instead of being dropped, so callers can tell "no counterpart"
+    apart from "a small timing error".
     """
     if not before or not after:
-        return []
+        return CuePairing(
+            tolerance_ms=tolerance_ms,
+            before_total=len(before),
+            after_total=len(after),
+            unmatched_before=list(range(len(before))),
+            unmatched_after=list(range(len(after))),
+        )
     after_starts = [start for start, _, _ in after]
-    pairs: list[tuple[int, float]] = []
+    matches: list[CueMatch] = []
+    unmatched_before: list[int] = []
     used: set[int] = set()
-    for start, _, _ in sorted(before, key=lambda c: c[0]):
+    for index in sorted(range(len(before)), key=lambda k: before[k][0]):
+        start = before[index][0]
         best_index = -1
         best_distance = tolerance_ms + 1
         for offset in range(len(after_starts)):
@@ -372,8 +472,39 @@ def pair_cue_starts(
                 best_index = offset
         if best_index >= 0 and best_distance <= tolerance_ms:
             used.add(best_index)
-            pairs.append((start, float(after_starts[best_index] - start)))
-    return pairs
+            matches.append(
+                CueMatch(
+                    before_index=index,
+                    after_index=best_index,
+                    position_ms=start,
+                    delta_ms=float(after_starts[best_index] - start),
+                )
+            )
+        else:
+            unmatched_before.append(index)
+    return CuePairing(
+        tolerance_ms=tolerance_ms,
+        before_total=len(before),
+        after_total=len(after),
+        matches=matches,
+        unmatched_before=unmatched_before,
+        unmatched_after=[index for index in range(len(after)) if index not in used],
+    )
+
+
+def pair_cue_starts(
+    before: list[Cue],
+    after: list[Cue],
+    *,
+    tolerance_ms: int = 5_000,
+) -> list[tuple[int, float]]:
+    """Pair pre/post cue starts, returning ``(position_ms, delta_ms)`` pairs.
+
+    Retained for callers that only need the residuals. Unmatched cues are
+    discarded *here* for backward compatibility; use :func:`pair_cues` when
+    that information matters, which is what the verifier now does.
+    """
+    return pair_cues(before, after, tolerance_ms=tolerance_ms).pairs
 
 
 def analyze_drift(pairs: list[tuple[int, float]]) -> float | None:
@@ -515,8 +646,17 @@ class AlignmentAnalyzer:
         reference_consensus: float | None = None,
         reference_independent_sources: int | None = None,
         reference_failure: str | None = None,
+        max_plausible_offset_ms: int = MAX_PLAUSIBLE_OFFSET_MS,
     ) -> SubtitleEvaluation:
-        """Compare pre/post cues and classify the result conservatively."""
+        """Compare pre/post cues and classify the result conservatively.
+
+        ``max_plausible_offset_ms`` is the largest *magnitude* of offset that
+        can still be called a sync. It defaults to the normal 20s window, so
+        every existing caller is unaffected. The Large Offset Evidence Gate
+        raises it for a single reference it has already vetted; that widens
+        the magnitude ceiling only, and every quality gate below (residual
+        p95, MAD, drift, coverage, cue retention) still applies unchanged.
+        """
         target_cues = self._as_cues(target)
         synced_cues = self._as_cues(synced)
         evaluation = SubtitleEvaluation(
@@ -555,7 +695,13 @@ class AlignmentAnalyzer:
             # subtitle was *already* close to the reference.
             return self._cap_by_evidence(
                 self._classify_without_alignment(
-                    evaluation, target_cues, reference, target_fps, reference_fps, structural
+                    evaluation,
+                    target_cues,
+                    reference,
+                    target_fps,
+                    reference_fps,
+                    structural,
+                    max_plausible_offset_ms,
                 ),
                 len(target_cues),
                 reference_trust,
@@ -580,7 +726,12 @@ class AlignmentAnalyzer:
 
         return self._cap_by_evidence(
             self._classify_alignment(
-                evaluation, target_cues, synced_cues, reference, structural
+                evaluation,
+                target_cues,
+                synced_cues,
+                reference,
+                structural,
+                max_plausible_offset_ms,
             ),
             len(target_cues),
             reference_trust,
@@ -656,6 +807,7 @@ class AlignmentAnalyzer:
         synced_cues: list[Cue],
         reference: str | list[Cue] | None,
         structural: StructuralSimilarity | None = None,
+        max_plausible_offset_ms: int = MAX_PLAUSIBLE_OFFSET_MS,
     ) -> SubtitleEvaluation:
         """Classify an alignment that alass actually produced.
 
@@ -672,9 +824,72 @@ class AlignmentAnalyzer:
         with the movement's stability (MAD, drift, change points) as the
         supporting evidence.
         """
-        movement_pairs = pair_cue_starts(
-            target_cues, synced_cues, tolerance_ms=MOVEMENT_TOLERANCE_MS
+        # Movement pairing compares the target against the output, at the
+        # unchanged 30s local radius.
+        #
+        # When the correction is larger than that radius the nearest-neighbour
+        # search pairs the wrong cue or none at all, and the resulting MAD
+        # (6-10s on mathematically perfect input) rejects a correct result. So
+        # the target is first aligned by a *measured* global displacement, and
+        # the existing radius is then reused as the local pairing radius around
+        # it.
+        #
+        # The displacement is measured from the two cue arrays by
+        # `measure_movement_seed` -- never from the Large Offset Evidence Gate,
+        # a first-dialogue delta, or any configured offset. An earlier attempt
+        # seeded from the gate's scalar estimate and was reverted: the gate
+        # measures the *opening* disagreement between target and reference,
+        # which is not the cue-by-cue correction alass applied. On the two real
+        # Dexter S08E04 cases that pre-shift mispaired nearly every cue and
+        # inflated MAD from 0ms to ~10.4s, manufacturing the change points that
+        # produced a "piecewise" verdict.
+        #
+        # The seed is a search centre only. If it cannot be measured confidently
+        # it is absent, pairing proceeds exactly as before, and the existing
+        # insufficient-pairs branch refuses the result as UNVERIFIED. A wrong or
+        # missing seed can therefore only reduce the number of correspondences
+        # -- it cannot improve any measured statistic.
+        seed = measure_movement_seed(
+            target_cues,
+            synced_cues,
+            max_lag_ms=max_plausible_offset_ms,
+            local_radius_ms=MOVEMENT_TOLERANCE_MS,
         )
+        if seed is not None:
+            evaluation.reasons.append(seed.explain())
+            seeded_target = [
+                (start - int(seed.offset_ms), end - int(seed.offset_ms), text)
+                for start, end, text in target_cues
+            ]
+            movement = pair_cues(
+                seeded_target, synced_cues, tolerance_ms=MOVEMENT_TOLERANCE_MS
+            )
+            # Report movement in real time: undo the seed on the positions and
+            # deltas so downstream statistics describe the actual correction.
+            movement = CuePairing(
+                tolerance_ms=movement.tolerance_ms,
+                before_total=movement.before_total,
+                after_total=movement.after_total,
+                matches=[
+                    match.model_copy(
+                        update={
+                            "position_ms": match.position_ms + int(seed.offset_ms),
+                            "delta_ms": match.delta_ms - seed.offset_ms,
+                        }
+                    )
+                    for match in movement.matches
+                ],
+                unmatched_before=movement.unmatched_before,
+                unmatched_after=movement.unmatched_after,
+            )
+        else:
+            movement = pair_cues(
+                target_cues, synced_cues, tolerance_ms=MOVEMENT_TOLERANCE_MS
+            )
+        # Unmatched cues are recorded, never folded into a delta. The residual
+        # statistics below see exactly the same numbers as before.
+        evaluation.movement_pairing = movement.coverage()
+        movement_pairs = movement.pairs
         if movement_pairs:
             deltas = [delta for _, delta in movement_pairs]
             evaluation.median_offset_ms = round(_median(deltas), 1)
@@ -698,9 +913,11 @@ class AlignmentAnalyzer:
         residual_p95: float | None
         if reference_cues:
             # Residual against the reference is the authoritative signal.
-            residual_pairs = pair_cue_starts(
+            residual = pair_cues(
                 synced_cues, reference_cues, tolerance_ms=RESIDUAL_TOLERANCE_MS
             )
+            evaluation.residual_pairing = residual.coverage()
+            residual_pairs = residual.pairs
             if len(residual_pairs) < MIN_CUES_FOR_PERCENTILES:
                 evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
                 evaluation.rejection_reason = RejectionReason.INSUFFICIENT_EVIDENCE
@@ -738,7 +955,7 @@ class AlignmentAnalyzer:
             drift_ms_per_minute=drift,
             change_points=evaluation.change_points,
             structural=structural,
-            max_plausible_offset_ms=MAX_PLAUSIBLE_OFFSET_MS,
+            max_plausible_offset_ms=max_plausible_offset_ms,
             max_p95_ms=MAX_P95_MS_FOR_STABLE,
             max_drift_ms_per_minute=MAX_DRIFT_MS_PER_MINUTE,
         )
@@ -825,6 +1042,7 @@ class AlignmentAnalyzer:
         target_fps: float | None,
         reference_fps: float | None,
         structural: StructuralSimilarity | None = None,
+        max_plausible_offset_ms: int = MAX_PLAUSIBLE_OFFSET_MS,
     ) -> SubtitleEvaluation:
         """Classify a subtitle that was never re-timed.
 
@@ -840,7 +1058,7 @@ class AlignmentAnalyzer:
                 drift_ms_per_minute=evaluation.drift_ms_per_minute,
                 change_points=evaluation.change_points,
                 structural=structural,
-                max_plausible_offset_ms=MAX_PLAUSIBLE_OFFSET_MS,
+                max_plausible_offset_ms=max_plausible_offset_ms,
                 max_p95_ms=MAX_P95_MS_FOR_STABLE,
             max_drift_ms_per_minute=MAX_DRIFT_MS_PER_MINUTE,
             )
@@ -852,7 +1070,9 @@ class AlignmentAnalyzer:
             evaluation.reasons.append("no reference available; sync state cannot be established")
             return evaluation
 
-        pairs = pair_cue_starts(target_cues, reference_cues)
+        never_aligned = pair_cues(target_cues, reference_cues)
+        evaluation.movement_pairing = never_aligned.coverage()
+        pairs = never_aligned.pairs
         self._measure(evaluation, pairs)
         if len(pairs) < MIN_CUES_FOR_PERCENTILES:
             # Too few cues paired to measure. That is usually because the two
@@ -886,7 +1106,7 @@ class AlignmentAnalyzer:
             )
             return evaluation
 
-        if abs(evaluation.median_offset_ms or 0.0) > MAX_PLAUSIBLE_OFFSET_MS:
+        if abs(evaluation.median_offset_ms or 0.0) > max_plausible_offset_ms:
             # Beyond the +/-20s window this is a different cut, not a sync
             # offset. The gate is deliberately NOT softened by structure: a
             # matching shape cannot prove a 97s displacement is re-timable, and

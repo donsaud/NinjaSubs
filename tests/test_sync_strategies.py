@@ -747,7 +747,11 @@ async def test_failed_reference_short_circuits_repeat_request(monkeypatch, tmp_p
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     target = _dialogue(10_160, marker="reference line target", cues=30)
-    wrong_cut = _dialogue(106_950, marker="reference line wrong cut", cues=30)
+    # 400s out, past LARGE_OFFSET_MAX_SECONDS: the Large Offset Evidence Gate
+    # refuses it outright, so this stays a genuine *pre-alass* rejection that
+    # the reference-family cache can remember. A merely large-but-plausible
+    # offset would instead be granted an alass trial and judged afterwards.
+    wrong_cut = _dialogue(410_160, marker="reference line wrong cut", cues=30)
     release = SubtitleRelease(
         release_name="Dexter.S08E05.720p.BluRay.x264-NORDiC.srt",
         download_url="http://wrong-cut",

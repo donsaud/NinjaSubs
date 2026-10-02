@@ -1,0 +1,91 @@
+{
+  "dataset_version": "v1",
+  "schema_version": 1,
+  "engine_version": 1,
+  "description": "Dexter S08E04 real-media regression corpus. Identity hashes, Alass artifact hashes and offline PGS witness scores are recorded here so results stay comparable across machines. The media and the real subtitle dialogue are NOT committed and are not redistributable; the public test corpus under tests/fixtures/large_offset/ is synthetic and preserves every measured timing. Point NINJASUBS_REAL_MEDIA_ROOT (or test-media/) at your own copy to run the media-gated tests, which skip when it is absent.",
+  "protocol": "docs/golden_sync_annotation.md",
+  "cases": [
+    {
+      "case_id": "dexter_s08e04_evol",
+      "category": "large_offset_piecewise",
+      "release_class": "bluray",
+      "video": {
+        "path": "Dexter.s8e04.Scar.tissue.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv",
+        "sha256": "size:5414925805:sha256:c929b5f64845b1554de2580c4f91e44a6e70ab4eeca71449c4df97c404197e0f",
+        "duration_ms": 0
+      },
+      "reference": {
+        "path": "tt0773262_8_4_PiR8_v2_f80bfa730f1a046f_t6349da3c0192e384_subsource_edition.srt",
+        "sha256": "b45cd44aa82a771a1477b88b30afbc6b6223e1878aefe04967c69ce700bca25a",
+        "duration_ms": 0
+      },
+      "candidate": {
+        "path": "74a34c232d159f8b.srt",
+        "sha256": "e82586e4cbacf6d394c7d34edafdc15747cebd7364ed5dcaba13b8a10788580c",
+        "duration_ms": 0
+      },
+      "ground_truth": {
+        "cut": "same_cut",
+        "sync": "resyncable",
+        "final": "correct",
+        "content": "same_content_different_release",
+        "review_status": "manual+objective",
+        "reviewer_count": 1,
+        "review_notes": "Alass output inspected against the real PiR8 video across all four quarters. Offline PGS witness: output 97.0% vs original 67.0% of cues within 1.5s.",
+        "established_by": "objective"
+      },
+      "notes": "Real S08E04 Arabic subtitle; ~96s opening discrepancy, not a uniform global offset. Alass output manually confirmed synchronized against the real PiR8 video throughout."
+    },
+    {
+      "case_id": "dexter_s08e04_asap",
+      "category": "large_offset_piecewise",
+      "release_class": "bluray",
+      "video": {
+        "path": "Dexter.s8e04.Scar.tissue.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv",
+        "sha256": "size:5414925805:sha256:c929b5f64845b1554de2580c4f91e44a6e70ab4eeca71449c4df97c404197e0f",
+        "duration_ms": 0
+      },
+      "reference": {
+        "path": "tt0773262_8_4_PiR8_v2_f80bfa730f1a046f_t6349da3c0192e384_subsource_edition.srt",
+        "sha256": "b45cd44aa82a771a1477b88b30afbc6b6223e1878aefe04967c69ce700bca25a",
+        "duration_ms": 0
+      },
+      "candidate": {
+        "path": "96c0442cc4656685.srt",
+        "sha256": "30246e82e06d3ee2a0e14ebbffe4d29e0559f52762afff10f8214b117d564ac2",
+        "duration_ms": 0
+      },
+      "ground_truth": {
+        "cut": "same_cut",
+        "sync": "resyncable",
+        "final": "correct",
+        "content": "same_content_different_release",
+        "review_status": "manual+objective",
+        "reviewer_count": 1,
+        "review_notes": "Alass output inspected against the real PiR8 video across all four quarters. Offline PGS witness: output 99.9% vs original 71.3% of cues within 1.5s.",
+        "established_by": "objective"
+      },
+      "notes": "Real S08E04 Arabic subtitle; same opening discrepancy shape as EVOLV. Alass output manually confirmed synchronized against the real PiR8 video throughout."
+    }
+  ],
+  "_derived": {
+    "video_fingerprint": "size:5414925805:sha256:c929b5f64845b1554de2580c4f91e44a6e70ab4eeca71449c4df97c404197e0f",
+    "video_size": 5414925805,
+    "reference_sha256": "b45cd44aa82a771a1477b88b30afbc6b6223e1878aefe04967c69ce700bca25a",
+    "alass_artifact_sha256": {
+      "74a34c232d159f8b": "2c95ea92cfb9d83431b16d7e3f82301ae0d4d3686b5c5523f8cd651589edad9b",
+      "96c0442cc4656685": "63556bdb9a409cbc0b94d2ac2cfa20fca236847c42059dc59d20f4cb98c5d930"
+    },
+    "pgs_witness_agreement": {
+      "dexter_s08e04_evol": 0.97,
+      "dexter_s08e04_asap": 0.999
+    },
+    "pgs_witness_agreement_original": {
+      "dexter_s08e04_evol": 0.67,
+      "dexter_s08e04_asap": 0.713
+    },
+    "pgs_tolerance_s": 1.5,
+    "expected_delivery_category": "TRANSFORMED_SERVED",
+    "notes": "expected_delivery_category is the Large Offset delivery: the reference-first investigation establishes same-episode identity, alass output passes validation, the measured movement is a constant shift within MAX_MAD_MS_FOR_STABLE and structural agreement clears its floor, so the corrected artifact is served. The general verifier still records its own unchanged verdict (residual p95 exceeds its 2000ms limit); that verdict is what keeps these artifacts out of the reusable cache. Serving them is the intended behaviour, not a regression."
+  }
+}

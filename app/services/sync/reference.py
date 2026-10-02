@@ -179,11 +179,23 @@ def _is_dialogue(text: str) -> bool:
     return sum(1 for ch in cleaned if ch.isalpha()) >= 3
 
 
-def analyze_reference_health(reference: str | None) -> ReferenceHealth:
+def analyze_reference_health(
+    reference: str | None, *, require_dialogue_coverage: bool = True
+) -> ReferenceHealth:
     """Measure a reference's structural health from its cues.
 
     Uses :func:`parse_srt_cues` rather than adding a parser. A reference that
     cannot be parsed is reported as unhealthy rather than silently accepted.
+
+    ``require_dialogue_coverage`` controls only the runtime-coverage floor. It
+    exists because that floor answers a *selection* question -- "is this dense
+    enough to be worth trying" -- rather than a structural one, and the estimate
+    (:data:`MIN_DIALOGUE_COVERAGE` applied to ``len(dialogue) * 2_000 / span``)
+    is calibrated against a 2s mean cue. A full-length episode subtitle whose
+    cues average well under 2s cannot clear it however correct its structure,
+    so callers judging structural usability pass ``False`` and read
+    :attr:`ReferenceHealth.dialogue_coverage` for themselves. Default ``True``
+    keeps every existing caller's behaviour unchanged.
     """
     health = ReferenceHealth()
     if not reference:
@@ -249,7 +261,8 @@ def analyze_reference_health(reference: str | None) -> ReferenceHealth:
     if health.long_cue_fraction > 0.10:
         problems.append(f"{health.long_cue_fraction:.1%} of cues are implausibly long")
     if (
-        health.dialogue_coverage is not None
+        require_dialogue_coverage
+        and health.dialogue_coverage is not None
         and health.dialogue_coverage < MIN_DIALOGUE_COVERAGE
     ):
         problems.append(f"dialogue covers only {health.dialogue_coverage:.0%} of the runtime")

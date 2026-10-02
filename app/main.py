@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.autosync_test_override import forced_transformed_bytes
 from app.cache import cache_manager
 from app.config import settings
 from app.extractor import (
@@ -29,6 +30,7 @@ from app.extractor import (
     transcode_to_utf8,
 )
 from app.models import Manifest, SubtitleItem, SubtitlesResponse, UserPreferences
+from app.playback_witness import build_witness_router, witness_enabled
 from app.providers import (
     CinemetaClient,
     OpenSubtitlesProvider,
@@ -172,6 +174,18 @@ app = FastAPI(
 static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+# STREMIO_PLAYBACK_WITNESS -- development/test only, mounted only when explicitly
+# enabled. Off by default, so in a normal deployment these routes do not exist at
+# all. This is the only production-file change required by the witness, and it is
+# the only place the module is referenced.
+if witness_enabled():
+    app.include_router(build_witness_router())
+    logger.warning(
+        "[witness] /stremio-playback-witness ENABLED -- isolated dev-only endpoints "
+        "mounted. Do not enable in production."
+    )
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -1865,12 +1879,50 @@ async def _sync_subtitle_for_response(
     payload: bytes, meta: dict | None, context: dict | None, target_id: str,
     prefs: UserPreferences | None, auto_sync: bool, convert_ass: bool,
 ) -> bytes:
-    if not convert_ass and is_ass_subtitle(payload):
-        # alass emits SRT; keep the user's native ASS styling preference.
-        return payload
-    return await _maybe_sync_subtitle(
+    """Sync a subtitle, routing by CONTENT rather than by file extension.
+
+    The verifier's parser is SRT-only, so an ASS/SSA payload handed to it yields
+    no cues at all: the evaluation reports zero target cues and refuses the
+    result. ``SubtitleSyncService.sanitize_subtitle`` does convert ASS before
+    alass, which is why alass itself never sees the raw file -- but the
+    orchestrator decodes the raw bytes for its own target cues, so the verifier
+    judges a string the user would never receive.
+
+    That is not a hypothetical. A real request for ``ab461b8781aafd89`` logged
+    ``target_cue_count=562`` before alass and ``target_parsed_cue_count=0``
+    after it, because the two numbers described two different byte strings --
+    the converted SRT, then the original ASS. See
+    ``docs/zero_cue_root_cause.md``.
+
+    Two cases, decided by content (never by extension, since ASS is frequently
+    stored under an ``.srt`` name):
+
+    * the user preserves native ASS -> return it untouched. It must NOT be
+      converted just to satisfy the sync path, or ``{\\pos}`` and styling are
+      destroyed for no benefit.
+    * the user opted into ASS->SRT conversion -> convert here, *before* sync,
+      so the pipeline receives something it can read.
+    """
+    if is_ass_subtitle(payload):
+        if not convert_ass:
+            # alass emits SRT; keep the user's native ASS styling preference.
+            return payload
+        payload = convert_ass_to_srt_bytes(payload, apply_rtl=False)
+    synced = await _maybe_sync_subtitle(
         payload, _sync_meta_for_user(meta, context, prefs), target_id, auto_sync
     )
+    # ENABLE_AUTOSYNC_TEST_OVERRIDE -- development/test only, off by default.
+    #
+    # Substitutes an already-validated Alass artifact for an allowlisted subtitle
+    # so it can travel the ordinary serve-time pipeline. This is a delivery
+    # experiment, not an acceptance change: the verdict above is untouched, no
+    # threshold is consulted, and no cache is read or written. The returned bytes
+    # then pass through the normal _build_subtitle_response transformations, which
+    # is the whole point -- the question is whether those preserve timing.
+    forced = forced_transformed_bytes(
+        str((meta or {}).get("sub_id") or target_id or "")
+    )
+    return forced if forced is not None else synced
 
 
 def _build_sync_orchestrator() -> SyncOrchestrator | None:

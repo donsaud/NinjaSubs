@@ -25,6 +25,7 @@ from app.services.sync.alignment import (
     detect_change_points,
     evaluate_sync_state,
     pair_cue_starts,
+    pair_cues,
 )
 
 
@@ -408,6 +409,125 @@ def test_pair_cue_starts_matches_nearest_within_tolerance():
     # Beyond tolerance nothing pairs, rather than pairing a wrong neighbour.
     far = parse_cue_starts(srt(10, start_ms=97_000))
     assert pair_cue_starts(before, far, tolerance_ms=5_000) == []
+
+
+def test_cue_outside_tolerance_is_reported_as_unmatched() -> None:
+    """A cue with no counterpart is reported, not silently dropped."""
+    before = parse_cue_starts(srt(6))
+    after = parse_cue_starts(srt(6, start_ms=2_000))
+
+    result = pair_cues(before, after, tolerance_ms=5_000)
+
+    assert result.before_total == 6
+    assert result.after_total == 6
+    assert result.matched == 6
+    assert result.unmatched_before == []
+    assert result.unmatched_after == []
+
+
+def test_unmatched_cue_never_becomes_a_timing_residual() -> None:
+    """The semantic rule: unmatched means "no counterpart", not "zero error".
+
+    One cue is far beyond the tolerance. It must appear in ``unmatched_before``
+    and must not contribute a delta -- in particular not a delta sitting at the
+    tolerance boundary, which is how a truncation artefact reads as timing.
+    """
+    before = parse_cue_starts(srt(4)) + [(500_000, 501_000, "far away cue")]
+    after = parse_cue_starts(srt(4, start_ms=2_000))
+
+    result = pair_cues(before, after, tolerance_ms=5_000)
+
+    assert result.unmatched_before == [4], "the distant cue must be reported"
+    assert result.matched == 4
+    deltas = [delta for _, delta in result.pairs]
+    assert len(deltas) == 4, "an unmatched cue must not appear as a residual"
+    assert all(abs(delta - 2_000) < 1 for delta in deltas)
+    # Nothing may be manufactured at the tolerance edge.
+    assert not any(abs(abs(delta) - 5_000) < 1 for delta in deltas)
+    assert max(abs(delta) for delta in deltas) < 5_000
+
+
+def test_matched_residuals_are_identical_to_the_legacy_helper() -> None:
+    """Backward compatibility: the numbers existing callers see do not move."""
+    before = parse_cue_starts(srt(20))
+    for shift in (0, 700, -1_500, 3_000):
+        after = parse_cue_starts(srt(20, start_ms=10_000 + shift))
+        assert pair_cues(before, after).pairs == pair_cue_starts(before, after)
+
+
+def test_pairing_reports_both_sides_when_counts_differ() -> None:
+    """More cues than counterparts: the surplus is reported on the before side."""
+    before = parse_cue_starts(srt(20, step_ms=1_000))
+    after = parse_cue_starts(srt(8, start_ms=10_000, step_ms=1_000))
+
+    result = pair_cues(before, after, tolerance_ms=5_000)
+
+    assert result.matched == 8
+    assert result.before_total == 20
+    assert len(result.unmatched_before) == 12
+    assert result.unmatched_after == []
+    assert len(result.pairs) == 8
+
+
+def test_empty_side_reports_everything_unmatched() -> None:
+    before = parse_cue_starts(srt(3))
+    result = pair_cues(before, [], tolerance_ms=5_000)
+    assert result.matched == 0
+    assert result.unmatched_before == [0, 1, 2]
+    assert result.pairs == []
+
+
+def test_pairing_coverage_is_recorded_and_is_not_an_acceptance_input() -> None:
+    """Coverage is observable on the evaluation, and changes no verdict."""
+    reference = [(10_000 + 2_000 * i, 10_900 + 2_000 * i, f"line {i}") for i in range(30)]
+    target = [(10_000 + 2_000 * i, 10_900 + 2_000 * i, f"line {i}") for i in range(30)]
+    synced = [(9_000 + 2_000 * i, 9_900 + 2_000 * i, f"line {i}") for i in range(30)]
+
+    evaluation = AlignmentAnalyzer().analyze(
+        target, synced, reference, alass_applied=True, alass_successful=True
+    )
+
+    assert evaluation.movement_pairing is not None
+    assert evaluation.movement_pairing.matched == 30
+    assert evaluation.movement_pairing.unmatched_before == 0
+    assert evaluation.residual_pairing is not None
+    assert evaluation.residual_pairing.matched == 30
+    # Coverage appears in the operator-facing summary, for diagnosis.
+    assert "mv_pairs=" in evaluation.explain()
+    assert "res_pairs=" in evaluation.explain()
+
+
+def test_unmatched_cues_cannot_rescue_a_bad_alignment() -> None:
+    """Excluding unmatched cues must not turn a poor result into VERIFIED.
+
+    Isolates the "too few pairs" guard: 30 cues reach the verifier, movement
+    pairs perfectly, but only 4 find a counterpart against the reference, and
+    those 4 agree well. Nothing but the count guard can refuse this, so if the
+    guard were removed the result would be free to verify on four agreeable
+    pairs while 26 cues were never compared at all.
+    """
+    reference = [(10_000 + 2_000 * i, 10_900 + 2_000 * i, f"line {i}") for i in range(30)]
+    aligned = [(10_000 + 2_000 * i, 10_900 + 2_000 * i, f"line {i}") for i in range(4)]
+    stray = [(400_000 + 20_000 * i, 400_900 + 20_000 * i, f"stray {i}") for i in range(26)]
+    target = aligned + stray
+    synced = list(target)
+
+    evaluation = AlignmentAnalyzer().analyze(
+        target, synced, reference, alass_applied=True, alass_successful=True
+    )
+
+    # The unmatched are reported rather than hidden.
+    assert evaluation.movement_pairing is not None
+    assert evaluation.movement_pairing.matched == 30
+    assert evaluation.residual_pairing is not None
+    assert evaluation.residual_pairing.matched == 4
+    assert evaluation.residual_pairing.unmatched_before == 26
+
+    # And the count guard, not luck, is what refuses it.
+    assert evaluation.sync_state is not SyncState.VERIFIED_SYNCED
+    assert evaluation.sync_state is not SyncState.VERIFIED_RESYNCED
+    assert evaluation.rejection_reason is RejectionReason.INSUFFICIENT_EVIDENCE
+    assert any("too few cues" in reason for reason in evaluation.reasons)
 
 
 def parse_cue_starts(text: str):

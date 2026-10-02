@@ -131,6 +131,16 @@ If no usable reference is available, alignment cannot be completed, verification
 
 AutoSync changes **timing only**. It does not translate subtitles or rewrite their dialogue content. When **Convert ASS/SSA subtitles to SRT** is disabled, native ASS/SSA subtitles are preserved instead of being aligned through the SRT-based synchronization path.
 
+#### Known limitation
+
+Subtitles that are segmented differently from the reference — for example a
+release that splits or merges the same dialogue into a different number of cues —
+are currently treated as less reliable than they are. The conservative checks
+measure agreement with the reference's own cue boundaries, so a subtitle that is
+well synchronized but segmented differently may fail verification and fall back to
+the original. This affects the fallback, not correctness: the original subtitle is
+always safe to serve.
+
 See [the autosync audit](docs/internal-reports/AUTOSYNC_AUDIT.md) for fixes,
 verification, and remaining limitations.
 

@@ -1,4 +1,4 @@
-﻿# Environment variables and secrets
+# Environment variables and secrets
 .env
 .env.local
 .env.*.local
@@ -9,6 +9,17 @@ subs_cache/
 *.vtt
 *.ass
 *.ssa
+# Test fixtures for the large-offset gate ARE subtitle payloads and must be
+# committed, otherwise the regressions they guard cannot run on a fresh clone.
+# Scoped to that one directory on purpose: the golden-corpus subtitles under
+# tests/fixtures/golden_sync/ are generated artifacts and stay ignored.
+!tests/fixtures/large_offset/*.srt
+# The real alass outputs those tests assert against, and the fx/ input bundle
+# that regenerates them (alass_out/run.sh). Same rationale as above:
+# test_real_alass_outputs_are_routed_as_measured reads out_*.srt directly and
+# fails on a fresh clone if the global *.srt rule swallows them.
+!tests/fixtures/large_offset/alass_out/*.srt
+!tests/fixtures/large_offset/alass_out/fx/*.srt
 
 # Python bytecode and compiler caches
 __pycache__/
@@ -49,3 +60,19 @@ Thumbs.db
 .idea/
 *.log
 Score
+
+# Local, never-committed real-media material: the 5.4 GB source video and any
+# real subtitle files kept for the owner's private production validation. The
+# public corpus under tests/fixtures/large_offset/ is synthetic, so the suite
+# runs without any of this; media-gated tests skip when it is absent.
+# Configure with NINJASUBS_REAL_MEDIA_ROOT (see .env.example).
+test-media/
+
+# Docker auto-creates a missing bind-mount source as an empty directory;
+# never let that placeholder become a committed path.
+autosync-diagnostics/
+
+# Reports emitted by the tooling (safety-mutation runs, signal calibration,
+# production-path proof). Regenerated on demand by the tool that writes them,
+# so they are output rather than source.
+reports/

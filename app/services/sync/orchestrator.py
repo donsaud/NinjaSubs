@@ -28,6 +28,7 @@ from app.services.subtitle_matcher import (
     validate_cue_sanity,
 )
 from app.services.sync.alignment import (
+    MAX_PLAUSIBLE_OFFSET_MS,
     AlignmentAnalyzer,
     SubtitleEvaluation,
     SyncState,
@@ -35,12 +36,36 @@ from app.services.sync.alignment import (
     is_reusable_verified,
     may_serve_synchronized,
 )
+from app.services.sync.large_offset import (
+    LARGE_OFFSET_MAX_MS,
+    REASON_MAX_OFFSET_EXCEEDED,
+    LargeOffsetAssessment,
+    assess_large_offset,
+    classify_large_offset_candidate,
+)
+from app.services.sync.large_offset_investigation import (
+    LargeOffsetInvestigation,
+    LargeOffsetServingState,
+    decide_large_offset_serving,
+    investigate_large_offset,
+    validate_alass_output,
+)
 from app.services.sync.matching import is_informative_release_name
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync_cache import SyncCache
 from app.utils.cleaners import strip_intro_credits
 
 logger = logging.getLogger(__name__)
+
+
+def _content_digest(data: bytes) -> str:
+    """Short SHA-256 of a payload, for delivery logging.
+
+    Digests only. Subtitle text and credentials must never reach a log line, and
+    a digest is enough to answer the question a delivery log exists for: was the
+    artifact served the provider's own bytes, or a transformed one?
+    """
+    return hashlib.sha256(data or b"").hexdigest()[:16]
 
 
 def _normalize_fingerprint(value: Any) -> str:
@@ -644,12 +669,59 @@ class SyncOrchestrator:
                 reference_text,
                 threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
             )
-            if not verdict["ok"]:
-                logger.warning(
-                    "[sync] candidate reference rejected by cue-sanity (%s); trying next candidate",
-                    verdict["reason"],
+            if verdict["ok"]:
+                return True
+            # Beyond the normal window the reference is not rejected
+            # outright any more: it becomes a Large Offset Candidate and
+            # has to earn an alass attempt from the evidence gate. Reusing
+            # the same helper as the main loop keeps the two entry points
+            # from disagreeing about what counts as alignable.
+            assessment = _large_offset_assessment(reference_text)
+            if assessment is not None and assessment.accepted:
+                logger.info(
+                    "[sync] candidate reference is a large-offset candidate; "
+                    "evidence accepted (%s)",
+                    assessment.summary(),
                 )
-            return bool(verdict["ok"])
+                return True
+            logger.warning(
+                "[sync] candidate reference rejected by cue-sanity (%s); "
+                "trying next candidate",
+                verdict["reason"],
+            )
+            return False
+
+        def _large_offset_assessment(
+            reference_text: str,
+        ) -> LargeOffsetAssessment | None:
+            """Run the Large Offset Evidence Gate for one reference.
+
+            ``None`` means "not a large-offset candidate at all" --
+            either the offset already fits the normal window, or there was
+            no measurable opening dialogue to reason from. Identity counts
+            as supported because the caller only ever offers references the
+            selector already bound to this exact target; the gate treats
+            that as a precondition, never as proof.
+            """
+            seed = classify_large_offset_candidate(
+                target_text,
+                reference_text,
+                threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+            )
+            if seed is None:
+                return None
+            logger.info(
+                "[sync] large-offset candidate detected (seed=%+.2fs, "
+                "normal window %.0fs)",
+                seed / 1000.0,
+                FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS / 1000.0,
+            )
+            return assess_large_offset(
+                target_text,
+                reference_text,
+                seed_offset_ms=seed,
+                identity_supported=True,
+            )
 
         last_resolved = ResolvedReference(None)
         # Request-scoped alass budget.
@@ -718,29 +790,80 @@ class SyncOrchestrator:
                 reference,
                 threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
             )
+            # A reference only earns a larger offset *magnitude* ceiling
+            # after the gate accepted it. Reset per candidate so one
+            # vetted reference cannot widen the window for the next one.
+            offset_ceiling_ms = MAX_PLAUSIBLE_OFFSET_MS
+            # Set only when this reference arrived through the large-offset
+            # path; None on the normal path.
+            large_offset: LargeOffsetAssessment | None = None
+            # The reference-first investigation that accompanies an accepted
+            # large-offset candidate. Built only from the exact target text
+            # alass is about to receive, and consulted only after alass has
+            # produced something to judge. None on the normal path, which keeps
+            # the ordinary serving decision untouched.
+            large_offset_inv: LargeOffsetInvestigation | None = None
             if not sanity["ok"]:
-                candidates_rejected += 1
-                logger.info(
-                    "[sync-budget] limit=%d attempted=%d alass_started=%d "
-                    "alass_completed=%d rejected_before_alass=%d deferred=%d "
-                    "candidate=%s strategy=%s reason=cue_sanity_rejected "
-                    "counted_toward_limit=false",
-                    self._alass_candidate_limit,
-                    alass_attempted,
-                    alass_started,
-                    alass_completed,
-                    candidates_rejected,
-                    alass_deferred,
-                    hashlib.sha256(str(strategy_name).encode()).hexdigest()[:8],
-                    strategy_name,
-                )
-                logger.warning(
-                    "[sync] %s reference failed cue-sanity (%s, penalty %s) -> next strategy",
-                    strategy_name,
-                    sanity["reason"],
-                    sanity["penalty"],
-                )
-                continue
+                large_offset = _large_offset_assessment(reference)
+                if large_offset is not None and large_offset.accepted:
+                    offset_ceiling_ms = LARGE_OFFSET_MAX_MS
+                    logger.info(
+                        "[sync] large-offset evidence accepted for %s "
+                        "(ceiling %.0fs); %s",
+                        strategy_name,
+                        LARGE_OFFSET_MAX_MS / 1000.0,
+                        large_offset.summary(),
+                    )
+                else:
+                    candidates_rejected += 1
+                    # ``None`` means the offset never looked like a
+                    # large-offset candidate at all, so the plain
+                    # cue-sanity path owns this rejection.
+                    if large_offset is None:
+                        logger.info(
+                            "[sync] normal cue-sanity rejection (offset "
+                            "within the %.0fs window, or no measurable "
+                            "dialogue to compare)",
+                            FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS / 1000.0,
+                        )
+                    elif REASON_MAX_OFFSET_EXCEEDED in large_offset.reason_codes:
+                        logger.info(
+                            "[sync] large-offset rejected because max offset "
+                            "exceeded (%.2fs > %.0fs); no alass attempt",
+                            (large_offset.offset_seed_ms or 0) / 1000.0,
+                            LARGE_OFFSET_MAX_MS / 1000.0,
+                        )
+                    else:
+                        logger.info(
+                            "[sync] large-offset evidence rejected: %s",
+                            large_offset.summary(),
+                        )
+                    logger.info(
+                        "[sync-budget] limit=%d attempted=%d alass_started=%d "
+                        "alass_completed=%d rejected_before_alass=%d deferred=%d "
+                        "candidate=%s strategy=%s reason=%s "
+                        "counted_toward_limit=false",
+                        self._alass_candidate_limit,
+                        alass_attempted,
+                        alass_started,
+                        alass_completed,
+                        candidates_rejected,
+                        alass_deferred,
+                        hashlib.sha256(str(strategy_name).encode()).hexdigest()[:8],
+                        strategy_name,
+                        (
+                            "large_offset_evidence_rejected"
+                            if large_offset is not None
+                            else "cue_sanity_rejected"
+                        ),
+                    )
+                    logger.warning(
+                        "[sync] %s reference failed cue-sanity (%s, penalty %s) -> next strategy",
+                        strategy_name,
+                        sanity["reason"],
+                        sanity["penalty"],
+                    )
+                    continue
 
             # Strip pre-speech intro branding/cards so alass never anchors a
             # translator credit at 00:00:02 to an audio speech cue at 00:00:49.
@@ -755,6 +878,17 @@ class SyncOrchestrator:
             # alass must run. A raw passthrough with an observable offset is
             # never served when a valid reference exists.
             offset = median_cue_offset(target_text, reference)
+            # ``median_cue_offset`` takes each target cue's *nearest* reference
+            # cue, so in a densely cued subtitle it collapses towards zero no
+            # matter how far apart the two timelines really are. When the
+            # evidence gate has just measured a real displacement across
+            # several regions, believing that near-zero median would both skip
+            # the alignment that is needed and hand the verifier a false
+            # "already aligned" claim for a subtitle that is seconds out. The
+            # gate's regional consensus is the better measurement, so the
+            # shortcut is only available when no large offset was established.
+            if large_offset is not None and large_offset.accepted:
+                offset = None
             if offset is not None and abs(offset) < ALIGNED_OFFSET_THRESHOLD_S:
                 # No re-timing needed. Classify explicitly so "already aligned"
                 # is a measured claim, not an assumption.
@@ -780,6 +914,7 @@ class SyncOrchestrator:
                         resolved, "reference_independent_sources", None
                     ) or None,
                     reference_failure=getattr(resolved, "reference_failure", None),
+                    max_plausible_offset_ms=offset_ceiling_ms,
                 )
                 self._last_evaluation = evaluation
                 self._metrics["candidates_verified"] += 1
@@ -846,6 +981,44 @@ class SyncOrchestrator:
                 )
                 continue
 
+            # Reference-first identity check for the large-offset path. Runs
+            # here, on the exact ``target_text`` alass receives (post-stripping),
+            # so the evidence the serving decision is built on describes the
+            # same two documents the correction is built from.
+            #
+            # ``identity_supported`` mirrors the gate above (orchestrator passes
+            # True at its exec site): the investigation re-evaluates the same
+            # gate with the same inputs, so a disagreement here would mean the
+            # two disagree about the same evidence rather than about different
+            # evidence. Season/episode metadata is not available on
+            # ``ResolvedReference``, so no episode claim is invented -- the
+            # temporal signals are what establish identity.
+            if large_offset is not None and large_offset.accepted:
+                large_offset_inv = investigate_large_offset(
+                    target_text,
+                    reference,
+                    identity_supported=True,
+                    reference_trust=getattr(resolved, "reference_trust", None),
+                    reference_failure=getattr(resolved, "reference_failure", None),
+                    reference_reasons=list(
+                        getattr(resolved, "reference_reasons", None) or []
+                    ),
+                    independent_reference_count=max(
+                        1,
+                        int(getattr(resolved, "reference_independent_sources", 0) or 0),
+                    ),
+                )
+                logger.info(
+                    "[sync] large_offset.investigation entered=%s decision=%s "
+                    "same_episode=%s eligible=%s seed=%+.2fs reasons=%s",
+                    large_offset_inv.entered,
+                    large_offset_inv.decision.value,
+                    large_offset_inv.same_episode.value,
+                    large_offset_inv.eligible_for_alass,
+                    (large_offset_inv.seed_offset_ms or 0) / 1000.0,
+                    ",".join(large_offset_inv.reason_codes) or "none",
+                )
+
             alass_attempted += 1
             alass_started += 1
             self._metrics["alass_runs"] += 1
@@ -902,8 +1075,34 @@ class SyncOrchestrator:
                         resolved, "reference_independent_sources", None
                     ) or None,
                     reference_failure=getattr(resolved, "reference_failure", None),
+                    max_plausible_offset_ms=offset_ceiling_ms,
                 )
                 self._last_evaluation = evaluation
+                # Large-offset path only: decide whether the corrected bytes may
+                # replace the original in this response. The analyzer's own
+                # verdict above stays authoritative for ``sync_state`` and for
+                # cache reuse -- this decision only gates delivery of the bytes.
+                serving_state = LargeOffsetServingState.ORIGINAL
+                if large_offset_inv is not None:
+                    alass_validation = validate_alass_output(
+                        target_text, synced, reference
+                    )
+                    serving_state = decide_large_offset_serving(
+                        large_offset_inv, alass_validation, evaluation
+                    )
+                    logger.info(
+                        "[sync] large_offset.decision serving_state=%s "
+                        "reasons=%s eligible=%s alass_valid=%s mad_ms=%s "
+                        "structural_similarity=%s sync_state=%s verification=%s",
+                        serving_state.value,
+                        ",".join(large_offset_inv.serving_reason_codes) or "none",
+                        large_offset_inv.eligible_for_alass,
+                        alass_validation.ok,
+                        evaluation.mad_offset_ms,
+                        evaluation.structural_similarity,
+                        evaluation.sync_state.value,
+                        evaluation.verification.value,
+                    )
                 self._metrics["candidates_verified"] += 1
                 # Computed before the verdict is stored: a resync verdict records
                 # where its transformed artifact lives, so a later reuse can
@@ -932,6 +1131,10 @@ class SyncOrchestrator:
                         "sync_state": evaluation.sync_state.value,
                         "verification": evaluation.verification.value,
                         "sync_confidence": evaluation.sync_confidence,
+                        # Distinct from ``sync_state`` on purpose: this records
+                        # which Large Offset decision delivered the bytes and
+                        # never asserts a verification the analyzer refused.
+                        "serving_state": serving_state.value,
                     }
                     await self._sync_cache.set_meta(key, {**outcome_meta, **{
                         "status": "synced",
@@ -949,17 +1152,74 @@ class SyncOrchestrator:
                 serve_synchronized = may_serve_synchronized(
                     evaluation.sync_state.value, evaluation.verification.value
                 )
+                # Scoped exception to "an attempt the verifier does not trust
+                # must never replace the original".
+                #
+                # The general verifier refuses these cases on residual p95 alone
+                # (segmentation differs between releases); that is the one
+                # measurement the Large Offset investigation is allowed to
+                # exempt, and it is exempt ONLY after same-episode identity was
+                # established reference-first, alass output was validated, the
+                # measured movement was one constant shift within
+                # MAX_MAD_MS_FOR_STABLE, and structural agreement cleared its
+                # floor. Every other refusal is untouched: a content or
+                # structural rejection, an unmeasured movement, a failed
+                # investigation or an invalid output all leave ``serving_state``
+                # at ORIGINAL and this branch behaves exactly as before.
+                #
+                # The analyzer's verdict is never rewritten to make this pass:
+                # ``sync_state`` and ``verification`` below are the values the
+                # analyzer recorded, so the artifact stays non-reusable
+                # (is_reusable_verified) and this state never becomes a
+                # VERIFIED_* claim.
+                if (
+                    serving_state
+                    is LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET
+                ):
+                    if not serve_synchronized:
+                        logger.info(
+                            "[sync] large_offset corrected serving allowed for %s "
+                            "(state=%s, verification=%s) -> serving the corrected "
+                            "subtitle",
+                            target_id,
+                            evaluation.sync_state.value,
+                            evaluation.verification.value,
+                        )
+                    serve_synchronized = True
                 if serve_synchronized:
                     served = synced.encode("utf-8")
                 else:
                     logger.warning(
                         "[sync] not serving the synchronized output for %s: verifier did not "
-                        "trust it (state=%s, verification=%s) -> serving the original subtitle",
+                        "trust it (state=%s, verification=%s, serving_state=%s) -> serving "
+                        "the original subtitle",
                         target_id,
                         evaluation.sync_state.value,
                         evaluation.verification.value,
+                        serving_state.value,
                     )
                     served = sub_bytes
+                # One line that answers "which bytes went out?" without ever
+                # logging subtitle text. Digests only, so this is safe to keep in
+                # logs at INFO while remaining specific enough to prove which
+                # artifact a request received.
+                logger.info(
+                    "[sync] delivery sub=%s decision=%s state=%s verification=%s "
+                    "serving_state=%s large_offset_decision=%s "
+                    "original_sha256=%s transformed_sha256=%s served_sha256=%s "
+                    "served_is_transformed=%s bytes=%d",
+                    target_id,
+                    "TRANSFORMED" if serve_synchronized else "ORIGINAL",
+                    evaluation.sync_state.value,
+                    evaluation.verification.value,
+                    serving_state.value,
+                    large_offset_inv.decision.value if large_offset_inv else "n/a",
+                    _content_digest(sub_bytes),
+                    _content_digest(synced.encode("utf-8")),
+                    _content_digest(served),
+                    serve_synchronized,
+                    len(served),
+                )
                 logger.info(
                     "[sync] %s synchronization result for %s (%d bytes, "
                     "strategy=%s, state=%s, verification=%s)",

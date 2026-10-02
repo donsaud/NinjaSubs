@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # Diagnostic / Observability
     NINJASUBS_DEBUG_RANKING: bool = False
 
+    # STREMIO_PLAYBACK_WITNESS -- development/test only, OFF by default.
+    # Mounts an isolated endpoint that serves one pre-validated Alass output
+    # byte-for-byte with no provider, alass, sync, verifier, or cache in the
+    # path. See app/playback_witness.py. Never enable in production.
+    ENABLE_STREMIO_PLAYBACK_WITNESS: bool = False
+
     # Subtitle auto-synchronization (alass) & result cache
     ENABLE_SUBTITLE_SYNC: bool = True
     ALASS_PATH: str = "alass"

@@ -408,3 +408,68 @@ future change requires all five:
 
 Synthetic tests may reproduce and prevent regressions. They may not
 independently justify a new production heuristic.
+
+## Large Offset Evidence Gate
+
+The 20s first-dialogue window is unchanged and still the normal fast path. What
+changed is what happens when a reference misses it.
+
+### The real-media case
+
+`Dexter.s8e04.Scar.tissue.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv` opens its first
+dialogue at 107.5s; a compatible BluRay reference opens at 10.7s. That ~96.6s
+displacement was read as "different cut" and refused before alass ever ran.
+Manual inspection confirmed the dialogue and recap content is the same episode
+and the target simply sits later in time. Measured on the real pair: 560 target
+cues against 562 reference cues, and five independent regions across the episode
+recovering +96.56s / +96.12s / +95.72s / +96.26s / +97.28s — a constant
+displacement, not a mismatch.
+
+### What the gate does
+
+A reference beyond the 20s window becomes a **Large Offset Candidate** and has
+to earn an alass attempt from `app/services/sync/large_offset.py`. Required
+evidence:
+
+| signal | requirement |
+| --- | --- |
+| identity | supported by the existing selector (precondition, never proof) |
+| anchors | ≥ 4 of 5 equal-duration regions agree, each cue pairing within 2500ms |
+| dispersion | MAD across regional medians ≤ 1200ms |
+| drift | \|slope\| ≤ 120 ms/min, reused from `analyze_drift` |
+| structure | cosine similarity of cue-event profiles, target vs reference shifted by the estimated offset, ≥ 0.55 |
+| ceiling | `LARGE_OFFSET_MAX_SECONDS = 180` |
+
+`LARGE_OFFSET_MAX_SECONDS` is a starting point, not a proven value.
+`tools/run_sync_benchmarks.py` reports observed offsets so it can be retuned
+against evidence. All signals read *timings only* — no text, no language
+assumption, no ffmpeg, no audio fingerprinting — so the path is equally valid
+for an Arabic target against an English reference.
+
+### What it deliberately does not do
+
+The gate grants permission to attempt alignment. It never marks anything
+verified, and it has no field that could. The verdict remains the post-alass
+analyzer's.
+
+There is a measured limit worth stating plainly: **subtitle timing alone cannot
+reliably tell a same-episode constant shift from a different episode.** Measured
+on the real S08E04 target against a real S08E05 reference, the 30s-bin density
+cosine is 0.853 for the *wrong* episode versus 0.842 for the correct one; gap
+sequence correlation is 0.805 versus 0.870. Dialogue rhythm is statistically
+generic across episodes. The gate therefore narrows — it refuses over-ceiling
+offsets, offsets with no dialogue seed, offsets with too few corroborating
+regions, and offsets whose regions visibly disagree — but a wrong-episode
+reference that looks structurally plausible may still receive an alass trial.
+The information that settles it is in the audio, which is what alass aligns, so
+the accept/reject decision stays post-alass where the residual, p95, MAD, drift
+and coverage gates all still apply.
+
+That is why the magnitude ceiling is widened only for a reference the gate has
+vetted (`max_plausible_offset_ms`, default still `MAX_PLAUSIBLE_OFFSET_MS`
+= 20s) and why the coarse offset is handed to the verifier
+(`movement_offset_ms`, default 0) so a 96s correction can be paired and measured
+at all — widening the *pairing radius* instead would make greedy
+nearest-neighbour pair each cue with its temporally adjacent neighbour and
+manufacture a wildly varying "movement".
+

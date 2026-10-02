@@ -14,6 +14,20 @@ services:
       - ./subs_cache:/app/cache
       # Read-only access to local media streams (disabled for isolated stream addon URL testing)
       # - /mnt/aiostreams:/mnt/aiostreams:ro
+      # AUTOSYNC_TEST_OVERRIDE -- development/test only.
+      #
+      # Read-only mount of the pre-validated Alass outputs, used solely by the
+      # forced-transformed delivery experiment in app/autosync_test_override.py.
+      # It is inert unless ENABLE_AUTOSYNC_TEST_OVERRIDE is explicitly true, and
+      # the override only ever reads the two digest-pinned allowlisted files.
+      # Set NINJASUBS_TEST_OVERRIDE_FIXTURE_DIR in .env to the real folder.
+      #
+      # Distinct from the witness mount: /witness goes to the witness service
+      # only, /test-fixtures here, and neither is the provider cache.
+      - type: bind
+        source: ${NINJASUBS_TEST_OVERRIDE_FIXTURE_DIR:-./autosync-diagnostics}
+        target: /test-fixtures
+        read_only: true
     environment:
       - LOCAL_MEDIA_DIRS=
       - SUBDL_API_KEY=${SUBDL_API_KEY:-}
@@ -33,12 +47,77 @@ services:
       - ALASS_MAX_CONCURRENT_SYNCS=${ALASS_MAX_CONCURRENT_SYNCS:-1}
       - SYNC_TOTAL_REQUEST_BUDGET=${SYNC_TOTAL_REQUEST_BUDGET:-15.0}
       - SYNC_REQUIRE_EXACT_MATCH=${SYNC_REQUIRE_EXACT_MATCH:-true}
+      # AUTOSYNC_TEST_OVERRIDE -- development/test only. Defaults to false, and
+      # the source default is also false; there is no route, query parameter, or
+      # user setting that turns it on. See app/autosync_test_override.py.
+      - ENABLE_AUTOSYNC_TEST_OVERRIDE=${ENABLE_AUTOSYNC_TEST_OVERRIDE:-false}
+      - NINJASUBS_TEST_OVERRIDE_FIXTURE_DIR=/test-fixtures
       - REFERENCE_CACHE_DIR=${REFERENCE_CACHE_DIR:-/app/cache/references}
       - REFERENCE_CACHE_TTL_SECONDS=${REFERENCE_CACHE_TTL_SECONDS:-2592000}
       # LRU Cache bounds (Max 1GB / 500 files)
       - CACHE_DIR=/app/cache
       - CACHE_MAX_BYTES=1073741824
       - CACHE_MAX_FILES=500
+
+  # STREMIO_PLAYBACK_WITNESS -- development/test only.
+  #
+  # A second, fully isolated service that serves ONE pre-validated Alass output
+  # byte-for-byte, so Stremio's rendering can be tested without the production
+  # pipeline in the path. It shares no cache, no volume, and no network route
+  # with the production service above.
+  #
+  # It is NOT started by `docker compose up`. Start it explicitly:
+  #
+  #     docker compose --profile witness up -d --build witness
+  #
+  # Set WITNESS_FIXTURE_DIR in .env to the folder holding
+  # 02_EVOLV_alass_output.srt / 04_ASAP_alass_output.srt.
+  #
+  # Stop and remove it when finished:
+  #
+  #     docker compose --profile witness down
+  #
+  # It reads the fixture directory read-only and mounts no cache.
+  witness:
+    profiles: ["witness"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ninjasubs-witness
+    restart: "no"
+    ports:
+      - "${WITNESS_PORT:-7100}:7000"
+    volumes:
+      # The pre-validated Alass outputs, mounted read-only into the witness only.
+      #
+      # Long syntax (`type`/`source`/`target`) rather than the short
+      # "src:dst:ro" form on purpose: a Windows source such as
+      # C:\Media\autosync-diagnostics contains a colon, which the
+      # short form has to disambiguate from its own separators. The long form
+      # takes the path verbatim, so there is nothing to misparse.
+      #
+      # WITNESS_FIXTURE_DIR is a development/test value and must be set in .env
+      # to the folder that actually holds 02_EVOLV_alass_output.srt and
+      # 04_ASAP_alass_output.srt. It intentionally has NO working default:
+      # Docker silently creates a missing bind-mount source, so a wrong value
+      # would mount an empty directory and the witness would serve nothing
+      # without saying why. Run tools/check_witness_mount.py to verify it
+      # resolves to the real fixtures before using it.
+      - type: bind
+        source: ${WITNESS_FIXTURE_DIR:-./autosync-diagnostics}
+        target: /witness
+        read_only: true
+    environment:
+      - ENABLE_STREMIO_PLAYBACK_WITNESS=true
+      - NINJASUBS_WITNESS_FIXTURE_DIR=/witness
+      - ENABLE_SUBTITLE_SYNC=false
+      - CACHE_DIR=/tmp/witness-no-cache
+      - SUBDL_API_KEY=
+      - SUBSOURCE_API_KEY=
+      - OPENSUBTITLES_API_KEY=
+      - BASE_URL=${WITNESS_BASE_URL:-}
+      - LAN_IP=${LAN_IP:-}
+      - HOST_IP=${HOST_IP:-}
     # Strict resource bounds: runs smoothly under 100MB RAM. CPU raised to give
     # `alass` headroom for full-length film alignment matrices.
     deploy:

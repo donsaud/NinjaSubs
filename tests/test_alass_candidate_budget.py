@@ -57,7 +57,7 @@ for _i in range(29):
 
 #: Shifts chosen from measured behaviour (see module docstring).
 SHIFT_ELIGIBLE = 6000      # sanity ok, median 0.5s -> NOT already aligned
-SHIFT_WRONG_CUT = 30000    # cue-sanity TIMING_MISMATCH, rejected before alass
+SHIFT_WRONG_CUT = 200_000  # beyond the large-offset ceiling: refused before alass
 SHIFT_ALIGNED = 0          # already-aligned shortcut, no subprocess
 
 LIMIT = 3
@@ -188,16 +188,44 @@ def test_fixture_reaches_the_alass_boundary():
 
 
 def test_fixture_wrong_cut_is_rejected_before_alass():
+    """A displacement past the large-offset ceiling never reaches alass.
+
+    Note the fixture is *not* a subtle wrong cut: it is the target shifted by a
+    constant 200s, which is far beyond ``LARGE_OFFSET_MAX_SECONDS``. Offsets
+    between the normal 20s window and that ceiling are now Large Offset
+    Candidates and must earn an alass attempt from the evidence gate first (see
+    ``tests/test_large_offset_gate.py``); this test pins the case the gate can
+    still refuse on its own, before any subprocess is spawned.
+    """
+    from app.services.sync.large_offset import (
+        LARGE_OFFSET_MAX_MS,
+        REASON_MAX_OFFSET_EXCEEDED,
+        assess_large_offset,
+        classify_large_offset_candidate,
+    )
     from app.services.subtitle_matcher import (
         FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
         validate_cue_sanity,
     )
 
+    reference = _srt(SHIFT_WRONG_CUT)
     verdict = validate_cue_sanity(
-        TARGET, _srt(SHIFT_WRONG_CUT),
+        TARGET, reference,
         threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
     )
-    assert not verdict["ok"], "the wrong-cut reference must be refused"
+    assert not verdict["ok"], "the over-ceiling reference must be refused"
+
+    seed = classify_large_offset_candidate(
+        TARGET, reference,
+        threshold_ms=FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+    )
+    assert seed is not None, "it must be classified as a large-offset candidate"
+    assert abs(seed) > LARGE_OFFSET_MAX_MS
+    assessment = assess_large_offset(
+        TARGET, reference, seed_offset_ms=seed, identity_supported=True
+    )
+    assert not assessment.accepted
+    assert REASON_MAX_OFFSET_EXCEEDED in assessment.reason_codes
 
 
 # --- Test A/B: budget scope ------------------------------------------------
@@ -331,8 +359,13 @@ async def test_f_budget_diagnostic_is_accurate(caplog):
     assert "deferred=1" in final
     assert "candidate=" in final
 
-    rejections = [m for m in budget if "reason=cue_sanity_rejected" in m]
-    assert rejections, "a cue-sanity rejection must be reported separately"
+    rejections = [
+        m
+        for m in budget
+        if "reason=cue_sanity_rejected" in m
+        or "reason=large_offset_evidence_rejected" in m
+    ]
+    assert rejections, "a pre-alass rejection must be reported separately"
     assert "counted_toward_limit=false" in rejections[0], (
         "a pre-alass rejection must be recorded as not consuming the budget"
     )
