@@ -158,14 +158,27 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
             numeric_id = clean_imdb.replace("tt", "").lstrip("0") or "0"
 
         # Languages mapped from ISO-639-2 to ISO-639-1 (e.g. "ara" -> "ar")
-        target_langs = languages or ["ara"]
-        mapped_langs = list(dict.fromkeys([get_opensubtitles_lang_code(lang) for lang in target_langs]))
+        #
+        # ``languages=[]`` explicitly requests NO language filter. The MovieHash
+        # reference path uses that: the hash already identifies the exact file,
+        # so which language the reference happens to be in is irrelevant to it
+        # and filtering would only discard usable references. ``None`` keeps the
+        # historical Arabic default the normal provider path relies on.
+        if languages is not None and len(languages) == 0:
+            mapped_langs: list[str] = []
+        elif languages:
+            mapped_langs = list(
+                dict.fromkeys([get_opensubtitles_lang_code(lang) for lang in languages])
+            )
+        else:
+            mapped_langs = ["ara"]
 
         params: dict[str, Any] = {
             "imdb_id": numeric_id,
-            "languages": ",".join(mapped_langs) if mapped_langs else "ar",
             "type": "episode" if is_series else "movie",
         }
+        if mapped_langs:
+            params["languages"] = ",".join(mapped_langs)
 
         if is_series:
             if season is not None:

@@ -201,11 +201,13 @@ class SyncOrchestrator:
         self,
         *,
         hash_strategy: Any | None = None,
+        hash_reference_strategy: Any | None = None,
         external_strategy: Any | None = None,
         sync_service: Any | None = None,
         sync_cache: Any | None = None,
     ) -> None:
         self._hash_strategy = hash_strategy
+        self._hash_reference_strategy = hash_reference_strategy
         self._external_strategy = external_strategy
         self._sync_service = sync_service
         self._sync_cache = sync_cache
@@ -235,6 +237,13 @@ class SyncOrchestrator:
 
     def _strategies(self) -> list[tuple[str, Any]]:
         strats = []
+        # A byte-exact MovieHash reference outranks everything the tiered search
+        # can offer, so it is consulted first. It is independent of the normal
+        # OpenSubtitles provider toggle: that governs Stremio listings, while
+        # this governs whether auto-sync may borrow a proven-exact reference.
+        # Returning no text simply falls through to the next strategy.
+        if self._hash_reference_strategy is not None:
+            strats.append(("opensubtitles moviehash", self._hash_reference_strategy))
         if self._external_strategy is not None:
             strats.append(("external exact-match", self._external_strategy))
         if self._hash_strategy is not None:

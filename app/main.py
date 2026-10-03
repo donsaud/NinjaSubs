@@ -49,6 +49,7 @@ from app.services.sync.alignment import SubtitleEvaluation
 from app.services.sync.audit import AUDIT_LOG as sync_audit
 from app.services.sync.audit import record_for_evaluation
 from app.services.sync.external_strategy import ExternalExactStrategy
+from app.services.sync.hash_reference import OpenSubtitlesHashReferenceStrategy
 from app.services.sync.matching import (
     has_video_fingerprint,
     is_informative_release_name,
@@ -2007,6 +2008,14 @@ def _build_sync_orchestrator() -> SyncOrchestrator | None:
     if _http_client is None:
         return None
     return SyncOrchestrator(
+        # Byte-exact MovieHash references come from a dedicated strategy, not
+        # from the aggregator/ranking path. It is wired in unconditionally so
+        # that `enable_opensubtitles=false` -- which only governs whether
+        # OpenSubtitles results are listed in Stremio -- does not silently
+        # disable auto-sync's ability to borrow a proven-exact reference.
+        hash_reference_strategy=OpenSubtitlesHashReferenceStrategy(
+            OpenSubtitlesProvider(_http_client)
+        ),
         external_strategy=ExternalExactStrategy(
             subdl_provider=SubdlProvider(_http_client),
             subsource_provider=SubsourceProvider(_http_client),
