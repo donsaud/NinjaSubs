@@ -33,6 +33,12 @@ services:
       - SUBDL_API_KEY=${SUBDL_API_KEY:-}
       - SUBSOURCE_API_KEY=${SUBSOURCE_API_KEY:-}
       - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:-}
+      # /download requires Api-Key *and* a Bearer token, and the token only exists
+      # after POST /login with an account. Without these two the container silently
+      # falls back to the anonymous per-IP quota (5 downloads / 24h) instead of the
+      # account's, so authenticated downloads fail or run dry.
+      - OPENSUBTITLES_USERNAME=${OPENSUBTITLES_USERNAME:-}
+      - OPENSUBTITLES_PASSWORD=${OPENSUBTITLES_PASSWORD:-}
       - ENABLE_YIFYSUBTITLES=${ENABLE_YIFYSUBTITLES:-true}
       - ENABLE_SUBTITLECAT=${ENABLE_SUBTITLECAT:-true}
       - BASE_URL=${BASE_URL:-}
