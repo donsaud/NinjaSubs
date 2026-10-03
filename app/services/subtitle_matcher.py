@@ -1311,7 +1311,12 @@ def is_anime_content(
         if n not in (2160, 1080, 720, 576, 480, 264, 265) and not (1900 <= n <= 2099):
             return True
 
-    for m in re.finditer(r"(?<!\d)(\d{3,4})(?!\d)", combined_text):
+    # A bare number is only an episode number if it is not part of a codec
+    # token. ``x254``/``x264``/``x266`` are codec names, and reading them as
+    # episodes classified ordinary Hollywood features as anime purely because of
+    # the encoder in their release name -- which sent them down the anime scoring
+    # path and demoted a UHD BluRay release below a 1080p micro-rip.
+    for m in re.finditer(r"(?<![\dxX])(\d{3,4})(?!\d)", combined_text):
         n = int(m.group(1))
         if n not in (2160, 1080, 720, 576, 480, 264, 265) and not (1900 <= n <= 2099):
             return True
@@ -1506,6 +1511,53 @@ def _is_different_work(
     return episode_match is not True and season_match is not True
 
 
+# Release groups whose output is a re-encode/mirror of someone else's release
+# rather than its own capture. Used only to *demote* a candidate one tier (see
+# ``determine_match_tier``); never to reject one, and never by itself. Derived
+# from the existing KNOWN_GROUPS vocabulary so no group name is duplicated here.
+_MICRO_RIP_GROUPS = frozenset({"YIFY", "YTS", "YTS.MX", "RARBG"})
+
+
+def _is_micro_rip_group(group: str | None) -> bool:
+    """True for a known re-encode/mirror release group."""
+    if not group:
+        return False
+    normalized = re.sub(r"[^A-Z0-9.]", "", group.strip().upper())
+    return normalized in _MICRO_RIP_GROUPS
+
+
+def _micro_rip_release(release_group: str | None, raw_name: str | None) -> bool:
+    """Micro-rip detection over both parsers.
+
+    ``extract_metadata`` only records a group when it is dash-delimited, so a
+    trailing ``...x264.YIFY`` arrives here as ``None``. The shared
+    ``ranking.parse_release_metadata`` does resolve it, so it is consulted rather
+    than adding a second regex for the same vocabulary.
+    """
+    if _is_micro_rip_group(release_group):
+        return True
+    if not raw_name:
+        return False
+    try:
+        from app.services.ranking import parse_release_metadata
+
+        return _is_micro_rip_group(parse_release_metadata(raw_name).get("group"))
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def _is_high_tier_target(resolution: str | None, source: str | None) -> bool:
+    """True when the playback file is a UHD/REMUX-class source.
+
+    Evidence-based and narrow: 2160p/4K/UHD, or an explicit REMUX. A 1080p
+    WEB-DL target is deliberately *not* high tier, so ordinary streaming
+    releases are unaffected by the micro-rip demotion below.
+    """
+    res = (resolution or "").strip().lower()
+    src = (source or "").strip().lower()
+    return res in {"2160p", "4k", "uhd"} or src == "remux"
+
+
 def determine_match_tier(
     is_hash_match: bool,
     accepted: bool,
@@ -1519,6 +1571,11 @@ def determine_match_tier(
     has_year_mismatch: bool = False,
     is_unshared_fansub: bool = False,
     title_ratio: float = 1.0,
+    target_resolution: str | None = None,
+    target_source: str | None = None,
+    candidate_resolution: str | None = None,
+    candidate_group: str | None = None,
+    candidate_release_name: str | None = None,
 ) -> MatchTier:
     """Classify a candidate into the deterministic MatchTier hierarchy.
 
@@ -1573,6 +1630,23 @@ def determine_match_tier(
     # remaining signals. A hash match is exempt because it is byte-exact truth.
     if has_year_mismatch:
         return MatchTier.FALLBACK
+
+    # Release-compatibility precedence: a micro-rip rendition of a source the
+    # target does not share cannot be the most compatible release for it. This
+    # is a *demotion of one tier*, not a block and not a rejection -- the
+    # candidate stays in the result set and is still returned when nothing more
+    # compatible exists, which is exactly what a lone YIFY release must do.
+    #
+    # It only applies when the target is UHD/REMUX-class, so a 1080p WEB-DL
+    # target keeps today's ordering untouched.
+    if base == MatchTier.SOURCE_FAMILY and _micro_rip_release(
+        candidate_group, candidate_release_name
+    ):
+        if _is_high_tier_target(target_resolution, target_source):
+            t_res = (target_resolution or "").strip().lower()
+            s_res = (candidate_resolution or "").strip().lower()
+            if s_res and t_res and s_res != t_res:
+                return MatchTier.CLOSE
     return base
 
 
@@ -2085,6 +2159,11 @@ def calculate_compatibility(
         has_year_mismatch=has_year_mismatch,
         is_unshared_fansub=is_unshared_fansub,
         title_ratio=title_ratio,
+        target_resolution=v_meta.get("resolution"),
+        target_source=v_meta.get("source"),
+        candidate_resolution=s_meta.get("resolution"),
+        candidate_group=s_meta.get("group"),
+        candidate_release_name=s_meta.get("raw_filename"),
     )
 
     # Deterministic tier floor: an exact hash or exact release-group match is a

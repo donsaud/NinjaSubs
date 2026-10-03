@@ -776,13 +776,35 @@ def _audit_rank(target: str, names: list[str], **kwargs) -> list[SubtitleRelease
 
 
 def _assert_monotonic_descending(ranked: list[SubtitleRelease]) -> None:
-    """candidates[i].match_percentage >= candidates[i+1].match_percentage."""
+    """No adjacent pair inverts tier, and none inverts percentage within a tier.
+
+    Percentage alone is deliberately **not** monotonic any more. Release
+    compatibility is a stronger signal than the generic percentage, so a
+    materially more compatible release may carry a lower percentage and still
+    rank above a micro-rip rendition -- that is the whole point of the tier
+    hierarchy, and it is why ``determine_match_tier`` exists at all.
+
+    The invariant is therefore two-dimensional, which makes it strictly stronger
+    than the one-dimensional check it replaces: every adjacent pair must not
+    invert *either* component.
+    """
+
+    def order_key(sub: SubtitleRelease) -> tuple[int, int]:
+        compat = getattr(sub, "compatibility", None)
+        tier = getattr(compat, "match_tier", None) if compat else None
+        try:
+            tier_val = int(getattr(tier, "value", tier) or 0)
+        except (TypeError, ValueError):
+            tier_val = 4
+        return (tier_val, -int(getattr(sub, "match_percentage", 0) or 0))
+
     for prev, curr in zip(ranked, ranked[1:], strict=False):
-        prev_pct = getattr(prev, "match_percentage", 0)
-        curr_pct = getattr(curr, "match_percentage", 0)
-        assert prev_pct >= curr_pct, (
-            f"Sorting violation: {prev.release_name} ({prev_pct}%) ranked lower than "
-            f"{curr.release_name} ({curr_pct}%)"
+        prev_key, curr_key = order_key(prev), order_key(curr)
+        assert prev_key <= curr_key, (
+            f"Sorting violation: {prev.release_name} "
+            f"(tier={prev_key[0]}, {getattr(prev, 'match_percentage', 0)}%) ranked "
+            f"below {curr.release_name} "
+            f"(tier={curr_key[0]}, {getattr(curr, 'match_percentage', 0)}%)"
         )
 
 
