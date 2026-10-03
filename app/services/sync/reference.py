@@ -179,6 +179,17 @@ def _is_dialogue(text: str) -> bool:
     return sum(1 for ch in cleaned if ch.isalpha()) >= 3
 
 
+def is_dialogue_cue(text: str) -> bool:
+    """Public form of the non-speech rule.
+
+    Credits, translator intros, site tags, music cues and SDH brackets are not
+    speech and must not be treated as timing evidence. Exposed so the alignment
+    gate can filter on exactly the same definition the reference health check
+    uses, instead of keeping a second copy of the pattern.
+    """
+    return _is_dialogue(text)
+
+
 def analyze_reference_health(
     reference: str | None, *, require_dialogue_coverage: bool = True
 ) -> ReferenceHealth:

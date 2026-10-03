@@ -27,6 +27,7 @@ import bisect
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -2798,6 +2799,197 @@ def median_cue_offset(
     if len(diffs) % 2:
         return diffs[mid]
     return (diffs[mid - 1] + diffs[mid]) / 2.0
+
+
+# --------------------------------------------------------------------------- #
+# "Is this subtitle already aligned?"                                           #
+# --------------------------------------------------------------------------- #
+# A nearest-neighbour median cannot answer this. In a densely cued subtitle every
+# target cue has *some* reference cue within a second or two, so the median
+# collapses towards zero no matter how far apart the two timelines really are.
+# Production proved it: three real releases measured +0.06s / +0.14s / +0.06s and
+# were served as "already aligned", while their residual p95 against the same
+# reference was 4401ms / 4588ms / 4401ms -- over twice the tolerance.
+#
+# So the claim is only made when three independent things hold: the cues
+# actually correspond, the disagreement is small, and it is small in more than
+# one place. Any of them failing hands the subtitle to alass instead.
+
+#: Sections the timeline is split into. One median over a whole film can hide a
+#: subtitle that starts aligned and diverges later, so agreement has to be shown
+#: in several independent places.
+ALIGNED_SECTION_COUNT = 5
+#: A section only counts as evidence when at least this share of its cues found a
+#: counterpart inside the residual tolerance.
+ALIGNED_SECTION_MIN_COVERAGE = 0.5
+#: How many sections must corroborate before an alignment claim is allowed at all.
+#: Unanimity among those sections is then required; see ``measure_alignment_consistency``.
+ALIGNED_MIN_SECTIONS = 3
+#: Absolute floor on matched dialogue cues for making any alignment claim. Kept
+#: low on purpose: the protection against the production bug was section
+#: unanimity plus residual spread, not raw cue count, and a high floor here
+#: would cost short-but-genuinely-aligned subtitles their alass shortcut. It
+#: only needs to reject a one- or two-cue coincidence.
+ALIGNED_MIN_MATCHED_CUES = 5
+
+
+@dataclass
+class AlignmentConsistency:
+    """Whether one near-zero offset explains a target against its reference."""
+
+    median_offset_s: float | None = None
+    p95_ms: float | None = None
+    coverage: float = 0.0
+    sections_measured: int = 0
+    sections_agreeing: int = 0
+    #: ``(position_ms, target_text, reference_text)`` for the first matches, so a
+    #: log line can show what the comparison actually looked at.
+    samples: list[tuple[int, str, str]] = field(default_factory=list)
+    reason: str = ""
+
+    @property
+    def aligned(self) -> bool:
+        return self.reason == ""
+
+
+def measure_alignment_consistency(
+    target: str | list[tuple[int, int, str]],
+    reference: str | list[tuple[int, int, str]],
+    *,
+    is_dialogue: Callable[[str], bool] | None = None,
+) -> AlignmentConsistency | None:
+    """Measure whether a subtitle genuinely needs no re-timing.
+
+    Pairs cues with the same one-to-one, tolerance-bounded matcher the verifier
+    uses, drops non-speech cues first, then splits the timeline into
+    :data:`ALIGNED_SECTION_COUNT` sections and measures each one separately. The
+    result is only ``aligned`` when the overall median is inside
+    :data:`ALIGNED_OFFSET_THRESHOLD_S`, the residual spread is inside the
+    verifier's own :data:`~app.services.sync.alignment.MAX_P95_MS_FOR_STABLE`
+    bound, and at least :data:`ALIGNED_MIN_SECTIONS` sections independently agree.
+
+    Known boundary: the evidence here is purely temporal. A segment that has
+    been displaced by roughly a whole number of cue intervals can still find
+    distinct reference cues at a near-zero offset, and timing alone cannot tell
+    that apart from a genuine match. Catching that case needs content
+    comparison, which belongs to the verifier -- the gate's job is to stop the
+    far more common failure, where a real offset is reported as zero because
+    every cue had *some* neighbour nearby.
+    """
+    from app.services.sync.alignment import (
+        MAX_P95_MS_FOR_STABLE,
+        RESIDUAL_TOLERANCE_MS,
+        pair_cues,
+    )
+
+    t = parse_srt_cues(target) if isinstance(target, str) else sorted(target, key=lambda c: c[0])
+    r = parse_srt_cues(reference) if isinstance(reference, str) else sorted(reference, key=lambda c: c[0])
+    if is_dialogue is not None:
+        # Credits, intros and site tags are not speech and must not be allowed
+        # to stand in for timing evidence.
+        t = [c for c in t if is_dialogue(c[2])]
+        r = [c for c in r if is_dialogue(c[2])]
+    if len(t) < 2 or len(r) < 2:
+        return None
+
+    pairing = pair_cues(t, r, tolerance_ms=RESIDUAL_TOLERANCE_MS)
+    pairs = pairing.pairs
+    if not pairs:
+        return AlignmentConsistency(reason="no cue correspondence within tolerance")
+    if len(pairs) < ALIGNED_MIN_MATCHED_CUES:
+        # An absolute floor, deliberately not scaled down for short inputs. A
+        # handful of cues is trivial to match -- any offset lands within
+        # tolerance of something -- so agreeing on a few of them says nothing
+        # about a film-length subtitle. Refusing to claim alignment here is the
+        # safe direction: the subtitle simply goes to alass.
+        return None
+
+    deltas = [delta for _, delta in pairs]
+    magnitude = [abs(d) for d in deltas]
+    ordered = sorted(magnitude)
+    p95 = ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))]
+    values = sorted(deltas)
+    mid = len(values) // 2
+    median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2.0
+
+    lo = min(c[0] for c in t)
+    hi = max(c[1] for c in t)
+    width = max(1, hi - lo) / ALIGNED_SECTION_COUNT
+
+    # Section membership comes from each match's real target-cue index. Pair
+    # ordinals would put a late cue's delta in an early section and hide a tail
+    # that drifted away entirely.
+    matched_by_section: list[list[float]] = [[] for _ in range(ALIGNED_SECTION_COUNT)]
+    cues_by_section: list[int] = [0] * ALIGNED_SECTION_COUNT
+    for cue in t:
+        position = cue[0]
+        slot = min(ALIGNED_SECTION_COUNT - 1, max(0, int((position - lo) / width)))
+        cues_by_section[slot] += 1
+    for match in pairing.matches:
+        position = t[match.before_index][0]
+        slot = min(ALIGNED_SECTION_COUNT - 1, max(0, int((position - lo) / width)))
+        matched_by_section[slot].append(match.delta_ms)
+
+    # Every section that actually contains dialogue is a claim about part of the
+    # film, so each one is either corroborated or it counts against the verdict.
+    # A section whose cues find no counterpart is NOT skipped: skipping it let a
+    # subtitle that lines up for the first half and drifts away for the second
+    # pass on the strength of the half that happened to match.
+    measured = sum(1 for count in cues_by_section if count)
+    agreeing = 0
+    for index in range(ALIGNED_SECTION_COUNT):
+        section_cues = cues_by_section[index]
+        if not section_cues:
+            continue
+        if len(matched_by_section[index]) / section_cues < ALIGNED_SECTION_MIN_COVERAGE:
+            continue
+        section_values = sorted(matched_by_section[index])
+        m = len(section_values) // 2
+        section_median = (
+            section_values[m]
+            if len(section_values) % 2
+            else (section_values[m - 1] + section_values[m]) / 2.0
+        )
+        if abs(section_median) < ALIGNED_OFFSET_THRESHOLD_S * 1000.0:
+            agreeing += 1
+
+    result = AlignmentConsistency(
+        median_offset_s=median / 1000.0,
+        p95_ms=p95,
+        coverage=len(pairs) / len(t),
+        sections_measured=measured,
+        sections_agreeing=agreeing,
+    )
+    # Show what the comparison actually looked at, so a suspicious "already
+    # aligned" line can be checked by eye instead of taken on trust.
+    for match in sorted(pairing.matches, key=lambda mch: mch.position_ms)[:2]:
+        result.samples.append(
+            (match.position_ms, t[match.before_index][2][:40], r[match.after_index][2][:40])
+        )
+
+    if abs(median) >= ALIGNED_OFFSET_THRESHOLD_S * 1000.0:
+        result.reason = f"median offset {median / 1000.0:+.2f}s is not negligible"
+    elif p95 > MAX_P95_MS_FOR_STABLE:
+        result.reason = (
+            f"residual p95 {p95:.0f}ms exceeds the {MAX_P95_MS_FOR_STABLE:.0f}ms "
+            "tolerance; the timelines disagree well past the median"
+        )
+    elif measured < ALIGNED_MIN_SECTIONS:
+        result.reason = (
+            f"only {measured} section(s) of the timeline carry enough dialogue to "
+            "corroborate anything"
+        )
+    elif agreeing < measured:
+        # Unanimity, not a majority. "Already aligned" asserts the subtitle needs
+        # no re-timing across its whole duration, so one section that cannot be
+        # corroborated -- because its cues drifted, jumped, or have no counterpart
+        # within tolerance -- is already a reason to hand the subtitle to alass.
+        disagreeing = measured - agreeing
+        result.reason = (
+            f"{disagreeing} of {measured} dialogue sections disagree or cannot be "
+            "corroborated; alignment is not consistent across the whole timeline"
+        )
+    return result
 
 
 def first_dialogue_threshold_ms(same_family: bool | None) -> int:

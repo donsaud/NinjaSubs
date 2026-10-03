@@ -21,9 +21,8 @@ from typing import Any
 from app.config import settings
 from app.logging_context import reset_request_id, set_request_id, stable_request_id
 from app.services.subtitle_matcher import (
-    ALIGNED_OFFSET_THRESHOLD_S,
     FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
-    median_cue_offset,
+    measure_alignment_consistency,
     parse_srt_cues,
     validate_cue_sanity,
 )
@@ -52,6 +51,7 @@ from app.services.sync.large_offset_investigation import (
 )
 from app.services.sync.matching import is_informative_release_name
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
+from app.services.sync.reference import is_dialogue_cue
 from app.services.sync_cache import SyncCache
 from app.utils.cleaners import strip_intro_credits
 
@@ -873,23 +873,31 @@ class SyncOrchestrator:
                     logger.info("[sync] stripped intro non-speech cue(s) before alass")
                     target_text = stripped
 
-            # Deterministic serving gate: an already-aligned subtitle (median
-            # offset below threshold) is served as-is and cached; otherwise
-            # alass must run. A raw passthrough with an observable offset is
-            # never served when a valid reference exists.
-            offset = median_cue_offset(target_text, reference)
-            # ``median_cue_offset`` takes each target cue's *nearest* reference
-            # cue, so in a densely cued subtitle it collapses towards zero no
-            # matter how far apart the two timelines really are. When the
-            # evidence gate has just measured a real displacement across
-            # several regions, believing that near-zero median would both skip
-            # the alignment that is needed and hand the verifier a false
-            # "already aligned" claim for a subtitle that is seconds out. The
-            # gate's regional consensus is the better measurement, so the
-            # shortcut is only available when no large offset was established.
+            # Deterministic serving gate: a subtitle that genuinely needs no
+            # re-timing is served as-is and cached; otherwise alass must run. A
+            # raw passthrough with an observable offset is never served when a
+            # valid reference exists.
+            #
+            # This must be a *measured* claim. A nearest-neighbour median cannot
+            # support it: in a densely cued subtitle every cue has some
+            # reference cue within a second or two, so the median collapses
+            # towards zero however far apart the timelines are. Production hit
+            # exactly that -- three real releases measured +0.06s / +0.14s /
+            # +0.06s and were served as "already aligned" while their residual
+            # p95 was 4401 / 4588 / 4401ms and no section of the film agreed.
+            # So the claim additionally requires real cue correspondence, a
+            # residual spread inside the verifier's own tolerance, and agreement
+            # across several sections of the timeline. Any failure hands the
+            # subtitle to alass instead of serving it as-is.
+            consistency = measure_alignment_consistency(
+                target_text, reference, is_dialogue=is_dialogue_cue
+            )
+            # The evidence gate's regional consensus is a better measurement than
+            # anything computed here, so when it has established a real
+            # displacement the shortcut is simply unavailable.
             if large_offset is not None and large_offset.accepted:
-                offset = None
-            if offset is not None and abs(offset) < ALIGNED_OFFSET_THRESHOLD_S:
+                consistency = None
+            if consistency is not None and consistency.aligned:
                 # No re-timing needed. Classify explicitly so "already aligned"
                 # is a measured claim, not an assumption.
                 # Same handoff as the post-alass path: parse the text alass
@@ -925,11 +933,30 @@ class SyncOrchestrator:
                     evaluation, meta, target_id, from_cache=False, resolved=resolved
                 )
                 logger.info(
-                    "[sync] target already aligned (median offset %+.2fs) -> serving original "
-                    "[%s]",
-                    offset,
+                    "[sync] target already aligned (median offset %+.2fs, "
+                    "residual p95 %.0fms, %d/%d sections agree, "
+                    "coverage %.0f%%) -> serving original [%s]",
+                    consistency.median_offset_s or 0.0,
+                    consistency.p95_ms or 0.0,
+                    consistency.sections_agreeing,
+                    consistency.sections_measured,
+                    consistency.coverage * 100,
                     evaluation.sync_state.value,
                 )
+                # Show what the comparison actually looked at. "Already aligned"
+                # is a claim about specific dialogue, so the cues it was decided
+                # on belong in the log; a wrong claim is then visible at a glance
+                # instead of needing a reproduction.
+                for position_ms, target_text_sample, reference_text_sample in (
+                    consistency.samples
+                ):
+                    logger.info(
+                        "[sync] already-aligned sample @%02d:%02d target=%r reference=%r",
+                        position_ms // 60000,
+                        (position_ms % 60000) // 1000,
+                        target_text_sample,
+                        reference_text_sample,
+                    )
                 if self._sync_cache is not None:
                     await self._sync_cache.clear_failed(resolution_key)
                     await self._sync_cache.set(resolution_key, sub_bytes)
