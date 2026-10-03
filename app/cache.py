@@ -23,7 +23,17 @@ _FAILURE_TTL_SECONDS = 600
 #: pre-existing file cannot re-expose a secret. The credential is not needed for
 #: cache correctness: the download path resolves it per request from the URL
 #: config, falling back to the environment (see ``parse_user_config``).
-_SECRET_METADATA_FIELDS = ("subdl_key", "subsource_key", "opensubtitles_key")
+_SECRET_METADATA_FIELDS = (
+    "subdl_key",
+    "subsource_key",
+    "opensubtitles_key",
+    # Account password. Matched by exact field name, so this entry is the only
+    # thing standing between a plaintext password and a `_meta/*.json` file on
+    # disk -- and a password is the one credential here a user is likely to have
+    # reused elsewhere. The username is deliberately not secret and is left in
+    # place so diagnostics can show which account a result came from.
+    "opensubtitles_password",
+)
 
 #: Query parameters that carry a credential inside a URL. The value is dropped
 #: but the URL stays usable: providers re-attach the credential themselves
@@ -52,6 +62,7 @@ _SECRET_PRESENCE_FLAGS = {
     "subdl_key": "has_subdl_key",
     "subsource_key": "has_subsource_key",
     "opensubtitles_key": "has_opensubtitles_key",
+    "opensubtitles_password": "has_opensubtitles_password",
 }
 
 

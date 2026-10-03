@@ -10,6 +10,7 @@ import httpx
 from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
+from app.providers.opensubtitles_auth import OPENSUBTITLES_TOKENS, OpenSubtitlesToken
 from app.utils.language import get_opensubtitles_lang_code, normalize_to_iso639_2
 from app.utils.uploader import extract_uploader
 
@@ -59,7 +60,14 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
     def is_breaker_open(self) -> bool:
         return OPENSUBTITLES_BREAKER.is_open()
 
-    def _get_headers(self, api_key: str) -> dict[str, str]:
+    def _get_headers(self, api_key: str, token: str | None = None) -> dict[str, str]:
+        """Request headers for the v1 API.
+
+        ``Api-Key`` identifies the application and is mandatory on every call.
+        ``Authorization`` carries the user JWT when one has been obtained; the
+        API recommends sending it on every request once authenticated, and a VIP
+        account's alternate host rejects requests that omit it.
+        """
         headers = {
             "User-Agent": self.USER_AGENT,
             "Content-Type": "application/json",
@@ -67,7 +75,50 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         }
         if api_key:
             headers["Api-Key"] = api_key
+        if token:
+            headers["Authorization"] = token
         return headers
+
+    def _resolve_api_key(self, api_key: str | None) -> str:
+        return (api_key or getattr(settings, "OPENSUBTITLES_API_KEY", "") or "").strip()
+
+    def _resolve_credentials(
+        self,
+        api_key: str | None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> tuple[str, str, str]:
+        """Effective ``(api_key, username, password)`` for this request.
+
+        Per-request values win over the environment, which is what lets a user
+        supply their own account on a shared instance. The API key stays
+        mandatory: it identifies the consumer and cannot be replaced by a user
+        login.
+        """
+        return (
+            self._resolve_api_key(api_key),
+            (username or getattr(settings, "OPENSUBTITLES_USERNAME", "") or "").strip(),
+            password or getattr(settings, "OPENSUBTITLES_PASSWORD", "") or "",
+        )
+
+    async def _authenticate(
+        self,
+        client: httpx.AsyncClient,
+        api_key: str,
+        username: str,
+        password: str,
+    ) -> OpenSubtitlesToken | None:
+        """Fetch (or reuse) a user JWT. ``None`` means carry on unauthenticated."""
+        if not username or not password:
+            return None
+        return await OPENSUBTITLES_TOKENS.get_token(
+            client,
+            api_key=api_key,
+            username=username,
+            password=password,
+            base_url=self.BASE_URL,
+            user_agent=self.USER_AGENT,
+        )
 
     async def search_subtitles(
         self,
@@ -84,13 +135,17 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         video_size: int | str | None = None,
         moviehash: str | None = None,
         moviebytesize: int | str | None = None,
+        username: str | None = None,
+        password: str | None = None,
         **kwargs,
     ) -> list[SubtitleRelease]:
         """
         Query OpenSubtitles.com v1 REST API for subtitles by IMDb ID and optional MovieHash.
         Gracefully skips if no API key is configured.
         """
-        effective_key = (api_key or getattr(settings, "OPENSUBTITLES_API_KEY", "") or "").strip()
+        effective_key, effective_user, effective_pass = self._resolve_credentials(
+            api_key, username, password
+        )
         if not effective_key:
             logger.info("OpenSubtitles API key is not configured. Skipping OpenSubtitles search.")
             return []
@@ -142,8 +197,15 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         if v_size:
             params["moviebytesize"] = str(v_size).strip()
 
-        headers = self._get_headers(effective_key)
-        url = f"{self.BASE_URL}/subtitles"
+        # A user JWT is optional here -- search is unlimited without one -- but
+        # sending it is recommended by the API and required for a VIP host, and
+        # it is what raises the download quota the results will later draw on.
+        token = await self._authenticate(
+            self.client, effective_key, effective_user, effective_pass
+        )
+        headers = self._get_headers(effective_key, token.token if token else None)
+        base_url = token.base_url if token else self.BASE_URL
+        url = f"{base_url}/subtitles"
 
         try:
             logger.info(f"[OpenSubtitles Request] Outbound URL: {url} | Params: {params}")
@@ -256,9 +318,21 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
             logger.error(f"[OpenSubtitles] Search error for {imdb_id}: {e}", exc_info=True)
             return []
 
-    async def get_download_url(self, file_id: int, api_key: str | None = None) -> str | None:
+    async def get_download_url(
+        self,
+        file_id: int,
+        api_key: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> str | None:
         """
         Request temporary download link for subtitle file_id via POST /api/v1/download.
+
+        This is one of the two endpoints OpenSubtitles documents as requiring
+        user authentication, so the JWT is not optional in practice: without it
+        the call falls back to the anonymous quota (5/day) instead of the
+        account's. Search does not have this requirement, which is why the
+        credential only becomes load-bearing here.
         """
         if OPENSUBTITLES_BREAKER.is_open():
             logger.info(
@@ -268,17 +342,13 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
             )
             return None
 
-        effective_key = (api_key or getattr(settings, "OPENSUBTITLES_API_KEY", "") or "").strip()
+        effective_key, effective_user, effective_pass = self._resolve_credentials(
+            api_key, username, password
+        )
         if not effective_key:
             logger.error("[OpenSubtitles Download Fail] Missing API key")
             return None
 
-        headers = {
-            "Api-Key": effective_key,
-            "User-Agent": self.USER_AGENT,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
         client = (
             self.client
             if self.client is not None
@@ -286,14 +356,29 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         )
         should_close = self.client is None
         try:
+            token = await self._authenticate(
+                client, effective_key, effective_user, effective_pass
+            )
+            headers = self._get_headers(effective_key, token.token if token else None)
+            base_url = token.base_url if token else self.BASE_URL
             res = await client.post(
-                f"{self.BASE_URL}/download",
+                f"{base_url}/download",
                 headers=headers,
                 json={"file_id": int(file_id)},
                 follow_redirects=True,
             )
             if res.status_code in (200, 201):
                 return res.json().get("link")
+
+            if res.status_code == 401 and token is not None:
+                # A cached token can be revoked or expire early. Drop it so the
+                # next attempt logs in again rather than reusing a dead token.
+                OPENSUBTITLES_TOKENS.invalidate(
+                    effective_key, effective_user, effective_pass
+                )
+                logger.warning(
+                    "[OpenSubtitles Download Fail] Cached token rejected; will re-authenticate"
+                )
 
             if res.status_code in (406, 429):
                 delay = 3600.0 if res.status_code == 406 else 60.0
@@ -318,7 +403,13 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
             if should_close:
                 await client.aclose()
 
-    async def download_archive(self, download_ref: str, api_key: str | None = None) -> bytes | None:
+    async def download_archive(
+        self,
+        download_ref: str,
+        api_key: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> bytes | None:
         """
         Download subtitle file from OpenSubtitles.
         Resolves direct download URL via get_download_url using file_id.
@@ -331,14 +422,16 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
             )
             return None
 
-        effective_key = (api_key or getattr(settings, "OPENSUBTITLES_API_KEY", "") or "").strip()
+        effective_key, _, _ = self._resolve_credentials(api_key, username, password)
 
         m = re.search(r"(\d+)(?:\.srt)?$", str(download_ref).strip())
         file_id = int(m.group(1)) if m else None
 
         direct_link: str | None = None
         if file_id and effective_key:
-            direct_link = await self.get_download_url(file_id, effective_key)
+            direct_link = await self.get_download_url(
+                file_id, effective_key, username=username, password=password
+            )
 
         target_url = direct_link or (download_ref if str(download_ref).startswith("http") else None)
         if not target_url:

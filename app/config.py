@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     SUBDL_API_KEY: str = ""
     SUBSOURCE_API_KEY: str = ""
     OPENSUBTITLES_API_KEY: str = ""
+    # OpenSubtitles account credentials, used only to obtain a user JWT.
+    #
+    # These do NOT unlock hash matching: OpenSubtitles documents search as
+    # unlimited and authenticated only for /infos/user and /download. What they
+    # unlock is the download quota, which is anonymous-limited (5/day) without
+    # them. Per-request values from the user's config take precedence; these are
+    # the fallback for a self-hosted single-user instance.
+    OPENSUBTITLES_USERNAME: str = ""
+    OPENSUBTITLES_PASSWORD: str = ""
 
     # Keyless scraper providers (no API key required)
     ENABLE_YIFYSUBTITLES: bool = True

@@ -16,7 +16,14 @@ REDACTED = "[REDACTED]"
 _QUERY_KEY_REGEX = re.compile(
     r"(?i)\b("
     r"api[_-]?key|apikey|"
-    r"subdl_api_key|subsource_api_key|opensubtitles_api_key"
+    r"subdl_api_key|subsource_api_key|opensubtitles_api_key|"
+    # Account passwords. Included because uvicorn's access log echoes the raw
+    # request target, so any credential a client puts in a query string lands in
+    # the container log verbatim. The configure page posts the password in a body
+    # for exactly this reason, but a hand-crafted or third-party URL would still
+    # reach here, and this filter is the backstop for that.
+    r"password|passwd|pwd|"
+    r"opensubtitles_password"
     r")=([^&\s'\"]+)"
 )
 _HEADER_REGEX = re.compile(
@@ -26,7 +33,10 @@ _BEARER_REGEX = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+")
 
 
 def redact_secrets(text: str) -> str:
-    """Return ``text`` with API keys and bearer tokens replaced by ``[REDACTED]``."""
+    """Return ``text`` with credentials replaced by ``[REDACTED]``.
+
+    Covers API keys, account passwords, and authorization tokens.
+    """
     if not text:
         return text
     text = _QUERY_KEY_REGEX.sub(lambda m: f"{m.group(1)}={REDACTED}", text)

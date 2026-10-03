@@ -206,6 +206,8 @@ async def aggregate_subtitles(
     subdl_key: str | None = None,
     subsource_key: str | None = None,
     opensubtitles_key: str | None = None,
+    opensubtitles_username: str | None = None,
+    opensubtitles_password: str | None = None,
     title: str | None = None,
     year: int | None = None,
     http_client: httpx.AsyncClient | None = None,
@@ -226,6 +228,19 @@ async def aggregate_subtitles(
     effective_subsource_key = subsource_key if subsource_key is not None else prefs.subsource_key
     effective_opensubtitles_key = (
         opensubtitles_key if opensubtitles_key is not None else prefs.opensubtitles_key
+    )
+    # Account credentials ride alongside the key. They are optional and only buy a
+    # user JWT, which raises the download quota; search and hash matching do not
+    # need them.
+    effective_opensubtitles_username = (
+        opensubtitles_username
+        if opensubtitles_username is not None
+        else prefs.opensubtitles_username
+    )
+    effective_opensubtitles_password = (
+        opensubtitles_password
+        if opensubtitles_password is not None
+        else prefs.opensubtitles_password
     )
     effective_langs = languages if languages is not None else prefs.languages
     hi_preference = getattr(prefs, "hi_preference", "neutral") or "neutral"
@@ -368,6 +383,8 @@ async def aggregate_subtitles(
                 title=title,
                 year=year,
                 api_key=effective_opensubtitles_key,
+                username=effective_opensubtitles_username,
+                password=effective_opensubtitles_password,
                 languages=effective_langs,
                 exclude_hi=effective_exclude_hi,
                 video_hash=video_hash,

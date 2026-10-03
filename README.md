@@ -34,7 +34,7 @@ A lightweight, self-hosted [Stremio](https://stremio.com) subtitle addon built w
 | :--- | :--- | :---: | :--- |
 | **SubDL** | API key | ✅ on | Primary source, broad release coverage |
 | **SubSource** | API key | ✅ on | Strong community uploads |
-| **OpenSubtitles** | API key | ⛔ off | Optional; quota-aware |
+| **OpenSubtitles** | API key (account optional) | ⛔ off | Optional; an account raises the download quota |
 | **YIFYSubtitles** | Keyless | ⛔ off | Movies only (IMDb lookup) |
 | **SubtitleCat** | Keyless | ⛔ off | Machine-translated `.srt` files |
 
@@ -189,6 +189,34 @@ The web UI is a 3-step wizard and a stateless token:
 1. **Providers** — pick sources and paste API keys.
 2. **Preferences** — language engine, cleaning toggles, badge preview.
 3. **Install** — addon host, Stremio install actions and the generated manifest URL.
+
+#### A note on credentials in the install URL
+
+The manifest token is **base64-encoded, not encrypted**. Anything that can read
+the install URL can recover every credential in it. API keys are scoped to one
+provider; an OpenSubtitles account password is the kind of secret people reuse,
+so the configure page says so plainly and the value is never echoed back into
+the page or written to the on-disk cache.
+
+For the same reason, prefer `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` in
+`.env` on an instance you run alone, rather than entering an account on the
+configuration page of a shared instance.
+
+#### OpenSubtitles: what an account actually does
+
+An account is **not** required for MovieHash matching. OpenSubtitles documents
+search as unlimited and requires user authentication only for `/infos/user` and
+`/download`, so `moviehash` + `moviebytesize` matching works with the API key
+alone.
+
+What the account buys is the download quota: 5/day anonymous, 20/day for a free
+account, more for VIP. Without it the provider was calling `/download`
+unauthenticated, which is the one of those two endpoints that does require a
+login. A VIP login also returns a different API host (`vip-api.`), which the
+provider then uses for subsequent requests.
+
+Tokens last 24 hours and `/login` is rate-limited to 30 calls an hour, so logins
+are cached in-process and shared between concurrent requests.
 
 ### API Endpoints
 

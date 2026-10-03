@@ -178,6 +178,17 @@ class UserPreferences(BaseModel):
     subdl_key: str = ""
     subsource_key: str = ""
     opensubtitles_key: str = ""
+    #: OpenSubtitles account credentials. Used only to exchange for a user JWT,
+    #: which in turn raises the *download* quota. They do not gate search or
+    #: hash matching -- see app.providers.opensubtitles_auth for why.
+    #:
+    #: Carried in the stateless config token like the API keys. That token is
+    #: base64, not encryption: anything able to read the manifest URL can
+    #: recover these. That is the existing trade-off for the API keys too, but a
+    #: password is a far more reusable secret than a provider key, so the UI says
+    #: so plainly and the value is never echoed back or written to disk.
+    opensubtitles_username: str = ""
+    opensubtitles_password: str = ""
     #: Where the effective provider credentials above came from:
     #: "manifest" (supplied in this request's config), "environment",
     #: "mixed", or "default" (none configured). Recorded at the point the
