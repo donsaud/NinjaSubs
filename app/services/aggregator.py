@@ -206,8 +206,7 @@ async def aggregate_subtitles(
     subdl_key: str | None = None,
     subsource_key: str | None = None,
     opensubtitles_key: str | None = None,
-    opensubtitles_username: str | None = None,
-    opensubtitles_password: str | None = None,
+
     title: str | None = None,
     year: int | None = None,
     http_client: httpx.AsyncClient | None = None,
@@ -229,19 +228,7 @@ async def aggregate_subtitles(
     effective_opensubtitles_key = (
         opensubtitles_key if opensubtitles_key is not None else prefs.opensubtitles_key
     )
-    # Account credentials ride alongside the key. They are optional and only buy a
-    # user JWT, which raises the download quota; search and hash matching do not
-    # need them.
-    effective_opensubtitles_username = (
-        opensubtitles_username
-        if opensubtitles_username is not None
-        else prefs.opensubtitles_username
-    )
-    effective_opensubtitles_password = (
-        opensubtitles_password
-        if opensubtitles_password is not None
-        else prefs.opensubtitles_password
-    )
+
     effective_langs = languages if languages is not None else prefs.languages
     hi_preference = getattr(prefs, "hi_preference", "neutral") or "neutral"
     effective_exclude_hi = (
@@ -290,7 +277,7 @@ async def aggregate_subtitles(
         hi_preference=hi_preference,
         enable_subdl=bool(getattr(prefs, "enable_subdl", True)),
         enable_subsource=bool(getattr(prefs, "enable_subsource", True)),
-        enable_opensubtitles=bool(getattr(prefs, "enable_opensubtitles", False)),
+        enable_opensubtitles=bool(getattr(prefs, "enable_opensubtitles", True)),
         enable_yifysubtitles=bool(getattr(prefs, "enable_yifysubtitles", False)),
         enable_subtitlecat=bool(getattr(prefs, "enable_subtitlecat", False)),
         enable_rtl_fix=bool(getattr(prefs, "enable_rtl_fix", True)),
@@ -367,11 +354,14 @@ async def aggregate_subtitles(
             )
         )
 
-    # Include OpenSubtitles if enabled and an API key/provider is available
-    if bool(getattr(prefs, "enable_opensubtitles", False)) and (
-        effective_opensubtitles_key
-        or getattr(settings, "OPENSUBTITLES_API_KEY", "").strip()
-        or opensubtitles_provider is not None
+    # OpenSubtitles runs through Stremio's keyless v3 endpoint, so the only gate
+    # is the user's toggle. There is no credential to be missing.
+    #
+    # The client check mirrors the other keyless providers: a provider can only be
+    # built when a client exists or one was injected, and skipping is correct
+    # here rather than an error -- there is simply no upstream to ask.
+    if bool(getattr(prefs, "enable_opensubtitles", True)) and (
+        opensubtitles_provider is not None or http_client is not None
     ):
         p_opensubtitles = resolve_provider(opensubtitles_provider, OpenSubtitlesProvider)
         tasks.append(
@@ -382,13 +372,11 @@ async def aggregate_subtitles(
                 episode=parsed_episode,
                 title=title,
                 year=year,
-                api_key=effective_opensubtitles_key,
-                username=effective_opensubtitles_username,
-                password=effective_opensubtitles_password,
                 languages=effective_langs,
                 exclude_hi=effective_exclude_hi,
                 video_hash=video_hash,
                 video_size=video_size,
+                filename=filename,
             )
         )
 

@@ -268,11 +268,6 @@ class SyncOrchestrator:
                 "subdl": meta.get("subdl_key") or "",
                 "subsource": meta.get("subsource_key") or "",
                 "opensubtitles": meta.get("opensubtitles_key") or "",
-                  # Account credentials travel in the same dict so the reference
-                  # search can authenticate. The password never reaches disk: it
-                  # is stripped from metadata on write and sanitized on read.
-                  "opensubtitles_username": meta.get("opensubtitles_username") or "",
-                  "opensubtitles_password": meta.get("opensubtitles_password") or "",
             },
             languages=("eng", "ara"),
         )

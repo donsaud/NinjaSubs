@@ -20,16 +20,9 @@ class Settings(BaseSettings):
     # Upstream Provider API Keys
     SUBDL_API_KEY: str = ""
     SUBSOURCE_API_KEY: str = ""
-    OPENSUBTITLES_API_KEY: str = ""
-    # OpenSubtitles account credentials, used only to obtain a user JWT.
-    #
-    # These do NOT unlock hash matching: OpenSubtitles documents search as
-    # unlimited and authenticated only for /infos/user and /download. What they
-    # unlock is the download quota, which is anonymous-limited (5/day) without
-    # them. Per-request values from the user's config take precedence; these are
-    # the fallback for a self-hosted single-user instance.
-    OPENSUBTITLES_USERNAME: str = ""
-    OPENSUBTITLES_PASSWORD: str = ""
+    # NOTE: OpenSubtitles needs no credential. It is served through Stremio's
+    # keyless v3 endpoint (opensubtitles-v3.strem.io), whose results carry direct
+    # download URLs. No key, account or JWT is involved anywhere.
 
     # Keyless scraper providers (no API key required)
     ENABLE_YIFYSUBTITLES: bool = True

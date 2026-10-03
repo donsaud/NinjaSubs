@@ -53,7 +53,9 @@ def clean_env(monkeypatch):
     """Guarantee the environment contributes nothing, whatever the host has."""
     from app.config import settings
 
-    for field in ("SUBDL_API_KEY", "SUBSOURCE_API_KEY", "OPENSUBTITLES_API_KEY"):
+    # OpenSubtitles is absent on purpose: it is keyless now, so there is no
+    # environment credential for it to contribute and nothing to precedence-resolve.
+    for field in ("SUBDL_API_KEY", "SUBSOURCE_API_KEY"):
         monkeypatch.setattr(settings, field, "", raising=False)
     return settings
 

@@ -139,62 +139,6 @@ async def test_verify_subsource_connection_error(client):
         assert "timeout" in data.get("error_snippet", "").lower() or "error" in str(data).lower()
 
 
-def test_verify_opensubtitles_missing_key(client):
-    """OpenSubtitles verification without key returns valid=False."""
-    resp = client.get("/api/verify/opensubtitles")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["valid"] is False
-    assert "required" in data["message"].lower()
-
-
-@pytest.mark.asyncio
-async def test_verify_opensubtitles_valid_key(client):
-    """OpenSubtitles verification with valid key (HTTP 200)."""
-    mock_resp = httpx.Response(
-        200,
-        json={"data": [{"id": "1"}]},
-        request=httpx.Request(
-            "GET", "https://api.opensubtitles.com/api/v1/subtitles?imdb_id=0111161&languages=en"
-        ),
-    )
-    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
-        resp = client.get("/api/verify/opensubtitles?api_key=valid_os_key")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["valid"] is True
-
-
-@pytest.mark.asyncio
-async def test_verify_opensubtitles_invalid_key(client):
-    """OpenSubtitles verification with invalid key (HTTP 401)."""
-    mock_resp = httpx.Response(
-        401,
-        json={"message": "Invalid API key"},
-        request=httpx.Request(
-            "GET", "https://api.opensubtitles.com/api/v1/subtitles?imdb_id=0111161&languages=en"
-        ),
-    )
-    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
-        resp = client.get("/api/verify/opensubtitles?api_key=invalid_os_key")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["valid"] is False
-
-
-@pytest.mark.asyncio
-async def test_verify_opensubtitles_connection_error(client):
-    """OpenSubtitles verification returns valid=False on connection error."""
-    with patch(
-        "httpx.AsyncClient.get", new=AsyncMock(side_effect=httpx.ConnectError("Connection failed"))
-    ):
-        resp = client.get("/api/verify/opensubtitles?api_key=some_key")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["valid"] is False
-        assert data.get("error") == "Connection error"
-
-
 def test_configure_page_contains_badges_and_debounce(client):
     """Assert configure HTML has status badges, IDs, and debounce listeners."""
     resp = client.get("/configure")
@@ -206,8 +150,9 @@ def test_configure_page_contains_badges_and_debounce(client):
     assert 'id="subdl-status"' in html
     assert 'id="subsource-key"' in html
     assert 'id="subsource-status"' in html
-    assert 'id="opensubtitles-key"' in html
-    assert 'id="opensubtitles-status"' in html
+    # OpenSubtitles is keyless: no key input and no validation status badge.
+    assert 'id="opensubtitles-status"' not in html
+    assert 'id="opensubtitles-key"' not in html
 
     # API key input wrappers (with inline "Get API Key" action)
     assert "provider-key-wrap" in html
@@ -221,7 +166,7 @@ def test_configure_page_contains_badges_and_debounce(client):
     assert "subsourceDebounceTimer" in html
     assert "/api/verify/subdl" in html
     assert "/api/verify/subsource" in html
-    assert "/api/verify/opensubtitles" in html
+    # No OpenSubtitles verify call: the provider takes no credential.
 
 
 def test_configure_page_stremio_installation_card(client):

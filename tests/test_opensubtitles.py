@@ -1,1167 +1,361 @@
-"""Unit tests for OpenSubtitles.com v1 REST API provider implementation."""
+"""OpenSubtitles through Stremio's keyless v3 endpoint.
 
-from unittest.mock import AsyncMock, MagicMock, patch
+The endpoint's contract, verified against the live service:
+``GET https://opensubtitles-v3.strem.io/subtitles/{type}/{id}/{extra}.json``
+returns ``{"subtitles": [...]}`` where each entry carries a **direct** ``url``.
+
+Two behaviours these tests pin, because both were confirmed by probing and
+neither is obvious from the docs:
+
+* it does **not** filter by language, so the filter is ours to apply;
+* it does **not** filter on the hash and reports no hash, so no hash match may
+  be claimed from it.
+
+Every test here mocks the endpoint. None of them reach the network.
+"""
+
+from __future__ import annotations
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
-from app.cache import cache_manager
-from app.main import app
 from app.models import SubtitleRelease
-from app.providers.opensubtitles import OpenSubtitlesProvider
-from app.utils.config_parser import encode_user_config
-
-
-@pytest.fixture
-def client():
-    with TestClient(app) as c:
-        yield c
-
-
-@pytest.mark.asyncio
-async def test_opensubtitles_missing_api_key_returns_empty(monkeypatch):
-    """When no API key is provided and none in env settings, search immediately returns empty list."""
-    from app.config import settings as app_settings
-
-    monkeypatch.setattr(app_settings, "OPENSUBTITLES_API_KEY", "")
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-    provider = OpenSubtitlesProvider(mock_client)
-
-    results = await provider.search_subtitles(imdb_id="tt0111161", api_key="")
-    assert results == []
-    mock_client.get.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_opensubtitles_search_movie_v1():
-    """Verify OpenSubtitles movie search queries /subtitles with correct headers and numeric IMDb ID."""
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-
-    captured_requests = []
-
-    def mock_get(url, params=None, headers=None, timeout=None, **kwargs):
-        captured_requests.append(
-            {"url": url, "params": params, "headers": headers, "kwargs": kwargs}
-        )
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.json.return_value = {
-            "total_pages": 1,
-            "total_count": 2,
-            "data": [
-                {
-                    "id": "item_1",
-                    "type": "subtitle",
-                    "attributes": {
-                        "subtitle_id": "111111",
-                        "language": "ar",
-                        "release": "The.Shawshank.Redemption.1994.1080p.BluRay.x264-ARABIC",
-                        "hearing_impaired": False,
-                        "files": [
-                            {"file_id": 98765, "file_name": "The.Shawshank.Redemption.1994.srt"}
-                        ],
-                    },
-                },
-                {
-                    "id": "item_2",
-                    "type": "subtitle",
-                    "attributes": {
-                        "subtitle_id": "222222",
-                        "language": "ar",
-                        "release": "The.Shawshank.Redemption.1994.720p.HDTV",
-                        "hearing_impaired": True,
-                        "files": [
-                            {
-                                "file_id": 98766,
-                                "file_name": "The.Shawshank.Redemption.1994.720p.srt",
-                            }
-                        ],
-                    },
-                },
-            ],
-        }
-        return resp
-
-    mock_client.get.side_effect = mock_get
-
-    provider = OpenSubtitlesProvider(mock_client)
-    results = await provider.search_subtitles(
-        imdb_id="tt0111161",
-        is_series=False,
-        api_key="test_opensubtitles_key_123",
-        languages=["ara"],
-        exclude_hi=False,
-    )
-
-    assert len(results) == 2
-    assert len(captured_requests) == 1
-
-    req = captured_requests[0]
-    assert req["url"] == "https://api.opensubtitles.com/api/v1/subtitles"
-    assert (
-        req["params"]["imdb_id"] == "111161"
-    )  # tt0111161 -> numeric string without leading tt/zeroes
-    assert req["params"]["languages"] == "ar"
-    assert req["params"]["type"] == "movie"
-    assert "hearing_impaired" not in req["params"]
-
-    assert req["headers"]["Api-Key"] == "test_opensubtitles_key_123"
-    assert req["headers"]["User-Agent"] == "StremioArabicSubs v1.0.0"
-    assert req["headers"]["Accept"] == "application/json"
-    assert req["kwargs"].get("follow_redirects") is True
-
-    item1 = results[0]
-    assert item1.provider == "opensubtitles"
-    assert item1.release_name == "The.Shawshank.Redemption.1994.1080p.BluRay.x264-ARABIC"
-    assert item1.download_url == "/sub/opensubtitles/98765.srt"
-    assert item1.hearing_impaired is False
-    assert item1.lang == "ara"
-
-    item2 = results[1]
-    assert item2.hearing_impaired is True
-
-
-@pytest.mark.asyncio
-async def test_opensubtitles_search_extracts_uploader():
-    """Verify the uploader username is extracted from attributes.uploader.name."""
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-
-    def mock_get(url, params=None, headers=None, timeout=None, **kwargs):
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.json.return_value = {
-            "data": [
-                {
-                    "id": "item_1",
-                    "attributes": {
-                        "language": "ar",
-                        "release": "Movie.2024.1080p.BluRay",
-                        "uploader": {"name": "subsmaster", "uploader_id": 42},
-                        "files": [{"file_id": 111, "file_name": "Movie.2024.srt"}],
-                    },
-                },
-                {
-                    "id": "item_2",
-                    "attributes": {
-                        "language": "ar",
-                        "release": "Movie.2024.720p.HDTV",
-                        "files": [{"file_id": 222, "file_name": "Movie.2024.720p.srt"}],
-                    },
-                },
-            ]
-        }
-        return resp
-
-    mock_client.get.side_effect = mock_get
-
-    provider = OpenSubtitlesProvider(mock_client)
-    results = await provider.search_subtitles(
-        imdb_id="tt0111161",
-        api_key="os_key",
-        languages=["ara"],
-    )
-
-    assert len(results) == 2
-    assert results[0].uploader == "subsmaster"
-    assert results[1].uploader == ""
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("video_hash", [None, "", "   ", "8e245d9679d31e12"])
-@pytest.mark.parametrize(
-    "confirmation",
-    [
-        {},
-        {"moviehash_match": None},
-        {"moviehash_match": False},
-        {"moviehash_match": "false"},
-        {"moviehash_match": "true"},
-        {"moviehash_match": 1},
-        {"moviehash_match": True},
-    ],
+from app.providers.opensubtitles import (
+    OPENSUBTITLES_BREAKER,
+    OpenSubtitlesProvider,
+    _normalize_language,
 )
-async def test_hash_priority_requires_requested_hash_and_boolean_confirmation(
-    video_hash, confirmation
-):
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-    mock_client.get.return_value = httpx.Response(
-        200,
-        json={
-            "data": [
-                {
-                    "attributes": {
-                        "release": "Show.S01E03.WEB-DL",
-                        "language": "ar",
-                        "files": [{"file_id": 12345}],
-                        **confirmation,
-                    }
-                }
-            ],
-        },
-    )
-    provider = OpenSubtitlesProvider(mock_client)
-
-    results = await provider.search_subtitles(
-        imdb_id="tt0903747",
-        api_key="test_key",
-        video_hash=video_hash,
-    )
-
-    expected = bool((video_hash or "").strip()) and confirmation.get("moviehash_match") is True
-    assert len(results) == 1
-    assert results[0].is_hash_match is expected
-
-    from app.services.subtitle_matcher import rank_subtitles
-
-    ranked = rank_subtitles("Show.S01E02.WEB-DL", results)
-    assert bool(ranked) is expected
 
 
-@pytest.mark.asyncio
-async def test_opensubtitles_search_series_v1():
-    """Verify series search adds season_number, episode_number, and type=episode."""
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
+@pytest.fixture(autouse=True)
+def _reset_breaker():
+    OPENSUBTITLES_BREAKER.reset()
+    yield
+    OPENSUBTITLES_BREAKER.reset()
 
-    captured_requests = []
 
-    def mock_get(url, params=None, headers=None, timeout=None, **kwargs):
-        captured_requests.append({"url": url, "params": params, "headers": headers})
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.json.return_value = {
-            "data": [
-                {
-                    "id": "sub_ep_1",
-                    "attributes": {
-                        "language": "ar",
-                        "release": "Breaking.Bad.S05E16.1080p.BluRay",
-                        "hearing_impaired": False,
-                        "files": [{"file_id": 55555, "file_name": "Breaking.Bad.S05E16.srt"}],
-                    },
-                }
-            ]
-        }
-        return resp
+def _item(
+    *,
+    sub_id: str = "1",
+    lang: str = "ara",
+    name: str = "Movie.2024.1080p.WEB-DL-GROUP.srt",
+    release: str | None = None,
+    url: str | None = None,
+) -> dict:
+    return {
+        "id": sub_id,
+        "url": url or f"https://subs5.strem.io/en/download/file/{sub_id}",
+        "lang": lang,
+        "subtitleFileName": name,
+        "movieReleaseName": release if release is not None else name.rsplit(".srt", 1)[0],
+        "releaseGroup": "GROUP",
+        "releaseFormat": "WEB-DL",
+        "SubEncoding": "CP1256",
+        "fpsMilli": 23976,
+        "season": 0,
+        "episode": 0,
+    }
 
-    mock_client.get.side_effect = mock_get
 
-    provider = OpenSubtitlesProvider(mock_client)
-    results = await provider.search_subtitles(
-        imdb_id="tt0903747:5:16",
-        is_series=True,
-        season=5,
-        episode=16,
-        api_key="valid_key",
-    )
+class StubClient:
+    """Records the requested URL and returns a canned v3 payload."""
 
-    assert len(results) == 1
-    req = captured_requests[0]
-    assert req["params"]["imdb_id"] == "903747"
-    assert req["params"]["type"] == "episode"
-    assert req["params"]["season_number"] == 5
-    assert req["params"]["episode_number"] == 16
+    def __init__(self, payload: dict, status: int = 200) -> None:
+        self.payload = payload
+        self.status = status
+        self.urls: list[str] = []
+
+    async def get(self, url: str, headers=None, **kwargs) -> httpx.Response:
+        self.urls.append(url)
+        return httpx.Response(
+            self.status,
+            json=self.payload,
+            request=httpx.Request("GET", url),
+        )
+
+
+def provider(client) -> OpenSubtitlesProvider:
+    return OpenSubtitlesProvider(client)
+
+
+# --- URL construction ---------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_opensubtitles_exclude_hi():
-    """Verify exclude_hi sends hearing_impaired=exclude and filters out any HI items from results."""
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
+async def test_the_url_targets_the_keyless_v3_endpoint():
+    client = StubClient({"subtitles": []})
+    await provider(client).search_subtitles(imdb_id="tt2582802", languages=["ara"])
 
-    captured_requests = []
-
-    def mock_get(url, params=None, headers=None, timeout=None, **kwargs):
-        captured_requests.append({"url": url, "params": params, "headers": headers})
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.json.return_value = {
-            "data": [
-                {
-                    "attributes": {
-                        "language": "ar",
-                        "release": "Non.HI.Release",
-                        "hearing_impaired": False,
-                        "files": [{"file_id": 111}],
-                    }
-                },
-                {
-                    "attributes": {
-                        "language": "ar",
-                        "release": "HI.Release",
-                        "hearing_impaired": True,
-                        "files": [{"file_id": 222}],
-                    }
-                },
-            ]
-        }
-        return resp
-
-    mock_client.get.side_effect = mock_get
-
-    provider = OpenSubtitlesProvider(mock_client)
-    results = await provider.search_subtitles(
-        imdb_id="tt0111161",
-        api_key="valid_key",
-        exclude_hi=True,
-    )
-
-    assert captured_requests[0]["params"]["hearing_impaired"] == "exclude"
-    assert len(results) == 1
-    assert results[0].release_name == "Non.HI.Release"
+    url = client.urls[0]
+    assert url.startswith("https://opensubtitles-v3.strem.io/subtitles/movie/tt2582802")
+    assert url.endswith(".json")
+    # No credential anywhere in the request.
+    assert "Api-Key" not in (provider(client)._get_headers())
+    assert "apikey" not in url.lower()
+    assert "api_key" not in url.lower()
 
 
 @pytest.mark.asyncio
-async def test_opensubtitles_multi_language_mapping():
-    """Verify ISO-639-2 codes are converted to OpenSubtitles ISO-639-1 format (ara, eng -> ar, en)."""
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-
-    captured_requests = []
-
-    def mock_get(url, params=None, headers=None, timeout=None, **kwargs):
-        captured_requests.append({"params": params})
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.json.return_value = {"data": []}
-        return resp
-
-    mock_client.get.side_effect = mock_get
-
-    provider = OpenSubtitlesProvider(mock_client)
-    await provider.search_subtitles(
-        imdb_id="tt0111161",
-        api_key="valid_key",
-        languages=["ara", "eng"],
-    )
-
-    assert captured_requests[0]["params"]["languages"] == "ar,en"
-
-
-@pytest.mark.asyncio
-async def test_opensubtitles_download_archive_success():
-    """Verify download_archive resolves download link via POST /download and fetches file content."""
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-
-    def mock_post(url, json=None, headers=None, timeout=None, **kwargs):
-        assert url == "https://api.opensubtitles.com/api/v1/download"
-        assert json == {"file_id": 12345}
-        assert headers["Api-Key"] == "valid_key"
-        assert kwargs.get("follow_redirects") is True
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.json.return_value = {
-            "link": "https://download.opensubtitles.com/temp/12345.srt",
-            "file_name": "subtitle.srt",
-            "requests": 1,
-            "remaining": 99,
-        }
-        return resp
-
-    def mock_get(url, timeout=None, follow_redirects=True):
-        assert url == "https://download.opensubtitles.com/temp/12345.srt"
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.content = b"1\n00:00:01,000 --> 00:00:04,000\nHello world\n"
-        return resp
-
-    mock_client.post.side_effect = mock_post
-    mock_client.get.side_effect = mock_get
-
-    provider = OpenSubtitlesProvider(mock_client)
-    content = await provider.download_archive(
-        "/sub/opensubtitles/12345.srt",
-        api_key="valid_key",
-    )
-
-    assert content is not None
-    assert b"Hello world" in content
-
-
-@pytest.mark.asyncio
-async def test_opensubtitles_download_archive_direct_http_fallback():
-    """When download_ref is already a direct HTTP link and no key or post needed."""
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-
-    def mock_get(url, timeout=None, follow_redirects=True):
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.content = b"1\n00:00:01,000 --> 00:00:02,000\nDirect link test\n"
-        return resp
-
-    mock_client.get.side_effect = mock_get
-
-    provider = OpenSubtitlesProvider(mock_client)
-    content = await provider.download_archive(
-        "https://cdn.opensubtitles.org/subtitles/direct.srt",
-        api_key="",
-    )
-
-    assert content is not None
-    assert b"Direct link test" in content
-
-
-@pytest.mark.asyncio
-async def test_opensubtitles_resilient_error_handling():
-    """Verify provider handles 401, 429, 500, and network errors gracefully without crashing."""
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-
-    provider = OpenSubtitlesProvider(mock_client)
-
-    # 401 Unauthorized
-    mock_client.get.return_value = MagicMock(status_code=401, text="Unauthorized")
-    assert await provider.search_subtitles("tt0111161", api_key="bad_key") == []
-
-    # 429 Rate limited
-    mock_client.get.return_value = MagicMock(status_code=429, text="Too Many Requests")
-    assert await provider.search_subtitles("tt0111161", api_key="valid_key") == []
-
-    # 500 Internal error
-    mock_client.get.return_value = MagicMock(status_code=500, text="Internal Server Error")
-    assert await provider.search_subtitles("tt0111161", api_key="valid_key") == []
-
-    # Timeout
-    mock_client.get.side_effect = httpx.TimeoutException("Timeout")
-    assert await provider.search_subtitles("tt0111161", api_key="valid_key") == []
-
-
-@pytest.mark.asyncio
-async def test_opensubtitles_search_follows_redirects():
-    """Verify search_subtitles passes follow_redirects=True to handle HTTP 301 gracefully."""
-    mock_client = AsyncMock(spec=httpx.AsyncClient)
-    captured = {}
-
-    def mock_get(url, **kwargs):
-        captured["kwargs"] = kwargs
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.json.return_value = {"data": []}
-        return resp
-
-    mock_client.get.side_effect = mock_get
-    provider = OpenSubtitlesProvider(mock_client)
-    await provider.search_subtitles("tt0111161", api_key="my_key")
-
-    assert captured["kwargs"].get("follow_redirects") is True
-
-
-@pytest.mark.asyncio
-async def test_opensubtitles_stremio_endpoint_integration(client):
-    """Test full integration: passing opensubtitles_key queries OpenSubtitles and formats label correctly."""
-    mock_os_release = SubtitleRelease(
-        release_name="Gladiator.2000.1080p.BluRay.x264-AMIABLE",
-        download_url="/sub/opensubtitles/99999.srt",
-        provider="opensubtitles",
-        lang="ara",
-    )
-
-    user_cfg = encode_user_config(
-        subdl_key="subdl_key",
-        subsource_key="subsource_key",
-        opensubtitles_key="os_key_123",
-        enable_opensubtitles=True,
+async def test_stream_parameters_are_passed_through():
+    """filename / videoSize / videoHash reach the endpoint, as the spec requires."""
+    client = StubClient({"subtitles": []})
+    await provider(client).search_subtitles(
+        imdb_id="tt2582802",
         languages=["ara"],
+        video_hash="8e245d9679d31e12",
+        video_size=19571049411,
+        filename="Whiplash.2014.2160p.UHD.mkv",
     )
 
-    with (
-        patch("app.providers.subdl.SubdlProvider.search_subtitles", new=AsyncMock(return_value=[])),
-        patch(
-            "app.providers.subsource.SubsourceProvider.search_subtitles",
-            new=AsyncMock(return_value=[]),
-        ),
-        patch(
-            "app.providers.opensubtitles.OpenSubtitlesProvider.search_subtitles",
-            new=AsyncMock(return_value=[mock_os_release]),
-        ),
-    ):
-        resp = client.get(f"/{user_cfg}/subtitles/movie/tt0172495.json")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert len(data["subtitles"]) >= 1
-
-        sub = data["subtitles"][0]
-        # Label format: [{score}%] [OpenSubtitles] {cleaned_release_name}
-        assert "[OpenSubtitles]" in sub["title"]
-        assert sub["lang"] == "ara"
-        # URL may carry media-context query params for auto-sync.
-        assert "/sub/opensubtitles/99999.srt" in sub["url"]
+    url = client.urls[0]
+    assert "videoHash%3D8e245d9679d31e12" in url
+    assert "videoSize%3D19571049411" in url
+    assert "filename%3DWhiplash" in url
 
 
 @pytest.mark.asyncio
-async def test_opensubtitles_serve_subtitle_endpoint(client, monkeypatch):
-    """Verify _serve_subtitle_handler properly calls OpenSubtitlesProvider.download_archive and caches result."""
-    import uuid
+async def test_caller_extra_params_are_passed_through_untouched():
+    client = StubClient({"subtitles": []})
+    await provider(client).search_subtitles(
+        imdb_id="tt2582802", languages=["ara"], extra_params={"encoding": "cp1256"}
+    )
 
-    from app.config import settings as app_settings
+    assert "encoding%3Dcp1256" in client.urls[0]
 
-    sub_id = f"os_{uuid.uuid4().hex[:12]}"
-    # A credential is offered to the cache. It must NOT come back out: the
-    # download resolves the key per request (config, then environment), so a
-    # persisted secret can never be replayed from disk.
-    cache_manager.store_metadata(
-        sub_id,
+
+@pytest.mark.asyncio
+async def test_a_series_request_uses_the_series_type_and_episode_query():
+    client = StubClient({"subtitles": []})
+    await provider(client).search_subtitles(
+        imdb_id="tt0111161", is_series=True, season=2, episode=3, languages=["eng"]
+    )
+
+    url = client.urls[0]
+    assert "/subtitles/series/tt0111161" in url
+    assert "season=2" in url and "episode=3" in url
+
+
+@pytest.mark.asyncio
+async def test_a_compound_imdb_id_is_reduced_to_the_base_id():
+    client = StubClient({"subtitles": []})
+    await provider(client).search_subtitles(
+        imdb_id="tt0111161:2:3", is_series=True, season=2, episode=3, languages=["eng"]
+    )
+
+    assert "/subtitles/series/tt0111161" in client.urls[0]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_api_key_is_accepted_and_ignored():
+    """An old install URL may still carry a key. That must not break search."""
+    client = StubClient({"subtitles": [_item()]})
+    releases = await provider(client).search_subtitles(
+        imdb_id="tt1", api_key="legacy-key", languages=["ara"]
+    )
+
+    assert len(releases) == 1
+
+
+# --- language filtering, which the endpoint does not do -----------------------
+
+
+@pytest.mark.asyncio
+async def test_results_are_filtered_to_the_requested_language():
+    """The endpoint returns every language; filtering happens here."""
+    client = StubClient(
         {
-            "sub_id": sub_id,
-            "provider": "opensubtitles",
-            "download_url": "/sub/opensubtitles/77777.srt",
-            "release_name": "Gladiator.2000.1080p.BluRay",
-            "opensubtitles_key": "my_os_key",
-            "lang": "ara",
-        },
+            "subtitles": [
+                _item(sub_id="1", lang="ara"),
+                _item(sub_id="2", lang="eng"),
+                _item(sub_id="3", lang="fre"),
+                _item(sub_id="4", lang="ara"),
+            ]
+        }
     )
-    monkeypatch.setattr(app_settings, "OPENSUBTITLES_API_KEY", "env_os_key", raising=False)
+    releases = await provider(client).search_subtitles(
+        imdb_id="tt1", languages=["ara"]
+    )
 
-    fake_srt_bytes = b"1\n00:00:01,000 --> 00:00:03,000\nSubtitle delivered successfully\n"
-
-    with (
-        patch(
-            "app.providers.opensubtitles.OpenSubtitlesProvider.download_archive",
-            new=AsyncMock(return_value=fake_srt_bytes),
-        ) as mock_dl,
-        patch(
-            "app.cache.cache_manager.get_subtitle",
-            new=AsyncMock(return_value=None),
-        ),
-    ):
-        resp = client.get(f"/sub/{sub_id}.srt")
-        assert resp.status_code == 200
-        assert resp.headers["content-type"].startswith("application/x-subrip")
-        assert b"Subtitle delivered successfully" in resp.content
-        # Authentication still works, resolved from the environment...
-        # The account credentials are forwarded as well (empty here, because
-        # none were configured); they are optional and only raise the download
-        # quota. What matters for this route is that the key is resolved from the
-        # environment and that the persisted key was not reused.
-        mock_dl.assert_called_once_with(
-            "/sub/opensubtitles/77777.srt",
-            api_key="env_os_key",
-            username="",
-            password="",
-        )
-    # ...and the cached secret is gone from disk, not merely unused.
-    import json as _json
-
-    raw = cache_manager.get_meta_path(sub_id).read_text(encoding="utf-8")
-    assert "my_os_key" not in raw
-    stored = _json.loads(raw)
-    assert "opensubtitles_key" not in stored
-    assert stored["has_opensubtitles_key"] is True
+    assert [r.download_url.split("/")[-1] for r in releases] == ["1", "4"]
+    assert all(r.lang == "ara" for r in releases)
 
 
 @pytest.mark.asyncio
-async def test_opensubtitles_proxy_stream_direct_delivery(client):
-    """Verify /sub/opensubtitles/{file_id}.srt directly downloads, transcodes, and normalizes Arabic."""
-    file_id = 987654321
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.content = b"1\n00:00:01,000 --> 00:00:04,000\n\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7 \xd8\xa8\xd9\x83.\n"
+async def test_multiple_requested_languages_are_all_kept():
+    client = StubClient(
+        {"subtitles": [_item(sub_id="1", lang="ara"), _item(sub_id="2", lang="eng")]}
+    )
+    releases = await provider(client).search_subtitles(
+        imdb_id="tt1", languages=["ara", "eng"]
+    )
 
-    with (
-        patch(
-            "app.providers.opensubtitles.OpenSubtitlesProvider.get_download_url",
-            new=AsyncMock(return_value=f"https://download.opensubtitles.com/temp/{file_id}.srt"),
-        ),
-        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
-        patch("app.main._http_client.get", new=AsyncMock(return_value=mock_resp)),
-    ):
-        resp = client.get(f"/sub/opensubtitles/{file_id}.srt?api_key=my_key")
-        assert resp.status_code == 200
-        # Arabic line ends with a period -> the UBA fix appends RLM (U+200F).
-        assert resp.content == mock_resp.content.replace(b".\n", b".\xe2\x80\x8f\n")
-        assert "application/x-subrip" in resp.headers["content-type"]
+    assert len(releases) == 2
 
 
-@pytest.mark.asyncio
-async def test_opensubtitles_proxy_stream_configured_direct_delivery(client):
-    """Verify /{config}/sub/opensubtitles/{file_id}.srt extracts key and delivers normalized subtitle."""
-    file_id = 543210987
-    user_cfg = encode_user_config(opensubtitles_key="cfg_os_key")
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.content = b"1\n00:00:01,000 --> 00:00:04,000\n\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7 \xd8\xa8\xd9\x83.\n"
+def test_language_normalisation_handles_the_codes_the_endpoint_emits():
+    assert _normalize_language("ara") == "ara"
+    assert _normalize_language("ARA") == "ara"
+    assert _normalize_language("") == ""
+    # Three-letter codes the endpoint uses, including ones this codebase does not
+    # have a mapping for, must still round-trip rather than collapse.
+    assert _normalize_language("zho") == "zho"
+    assert _normalize_language("srp") == "srp"
 
-    with (
-        patch(
-            "app.providers.opensubtitles.OpenSubtitlesProvider.get_download_url",
-            new=AsyncMock(return_value=f"https://download.opensubtitles.com/temp/{file_id}.srt"),
-        ) as mock_get_dl,
-        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
-        patch("app.main._http_client.get", new=AsyncMock(return_value=mock_resp)),
-    ):
-        resp = client.get(f"/{user_cfg}/sub/opensubtitles/{file_id}.srt")
-        assert resp.status_code == 200
-        # Arabic line ends with a period -> the UBA fix appends RLM (U+200F).
-        assert resp.content == mock_resp.content.replace(b".\n", b".\xe2\x80\x8f\n")
-        mock_get_dl.assert_called_once_with(file_id, "cfg_os_key")
+
+# --- mapping to SubtitleRelease ----------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_opensubtitles_proxy_stream_not_found(client):
-    """Verify proxy route raises 404 when download URL cannot be resolved (expired or limit)."""
-    with (
-        patch(
-            "app.providers.opensubtitles.OpenSubtitlesProvider.get_download_url",
-            new=AsyncMock(return_value=None),
-        ),
-        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
-    ):
-        resp = client.get("/sub/opensubtitles/999999999.srt?api_key=my_key", follow_redirects=False)
-        assert resp.status_code == 404
-        assert "expired or limit reached" in resp.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_opensubtitles_proxy_stream_fallback_to_subsource(client):
-    """Verify that when OpenSubtitles hits quota limit (get_download_url returns None), it falls back to Subsource."""
-    file_id = 88888888
-    cache_manager.store_metadata(
-        str(file_id),
+async def test_a_result_maps_to_a_directly_downloadable_release():
+    client = StubClient(
         {
-            "sub_id": "abc123subid",
-            "imdb_id": "tt9288030",
-            "media_type": "series",
-            "provider": "opensubtitles",
-            "download_url": f"/sub/opensubtitles/{file_id}.srt",
-            "release_name": "Reacher.S01E01.1080p.WEB-DL",
-            "season": 1,
-            "episode": 1,
-            "subsource_key": "test_subsource_key",
-            "lang": "ara",
-        },
+            "subtitles": [
+                _item(
+                    sub_id="1954576302",
+                    name="Whiplash.2014.720p.WEB-DL-RARBG.srt",
+                    release="Whiplash.2014.720p.WEB-DL.AAC2.0.H264-RARBG",
+                )
+            ]
+        }
     )
+    release = (await provider(client).search_subtitles(imdb_id="tt1", languages=["ara"]))[0]
 
-    fake_arabic_srt = b"1\n00:00:01,000 --> 00:00:04,000\n\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7 \xd8\xa8\xd9\x83\n"
-
-    with (
-        patch(
-            "app.providers.opensubtitles.OpenSubtitlesProvider.get_download_url",
-            new=AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.main._fallback_download_subsource",
-            new=AsyncMock(return_value=fake_arabic_srt),
-        ) as mock_fallback,
-        patch(
-            "app.cache.cache_manager.get_subtitle",
-            new=AsyncMock(return_value=None),
-        ),
-    ):
-        resp = client.get(f"/sub/opensubtitles/{file_id}.srt")
-        assert resp.status_code == 200
-        assert resp.content == fake_arabic_srt
-        assert "application/x-subrip" in resp.headers["content-type"]
-        assert resp.headers["access-control-allow-origin"] == "*"
-        assert "HEAD" in resp.headers["access-control-allow-methods"]
-        mock_fallback.assert_called_once()
+    assert release.provider == "opensubtitles"
+    assert release.download_url == "https://subs5.strem.io/en/download/file/1954576302"
+    assert release.release_name == "Whiplash.2014.720p.WEB-DL.AAC2.0.H264-RARBG"
+    assert release.format == "srt"
+    assert release.lang == "ara"
 
 
 @pytest.mark.asyncio
-async def test_subdl_stream_fallback_to_subsource(client):
-    """Verify that when Subdl hits daily limit (HTTP 429), _serve_subtitle_handler falls back to Subsource."""
-    sub_id = "subdl_fail_1234"
-    cache_manager.store_metadata(
-        sub_id,
-        {
-            "sub_id": sub_id,
-            "imdb_id": "tt9288030",
-            "media_type": "series",
-            "provider": "subdl",
-            "download_url": "https://subdl.com/sub/fake.zip",
-            "release_name": "Reacher.S01E01.1080p.WEB-DL",
-            "season": 1,
-            "episode": 1,
-            "subdl_key": "test_subdl_key",
-            "subsource_key": "test_subsource_key",
-            "lang": "ara",
-        },
-    )
+async def test_the_release_name_falls_back_to_the_filename_then_the_id():
+    client = StubClient({"subtitles": [{"id": "7", "url": "https://x/y", "lang": "ara"}]})
+    release = (await provider(client).search_subtitles(imdb_id="tt1", languages=["ara"]))[0]
 
-    fake_arabic_srt = b"1\n00:00:01,000 --> 00:00:04,000\n\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7 \xd8\xa8\xd9\x83\n"
-
-    with (
-        patch(
-            "app.providers.subdl.SubdlProvider.download_archive",
-            new=AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.main._fallback_download_subsource",
-            new=AsyncMock(return_value=fake_arabic_srt),
-        ) as mock_fallback,
-        patch(
-            "app.cache.cache_manager.get_subtitle",
-            new=AsyncMock(return_value=None),
-        ),
-    ):
-        resp = client.get(f"/sub/{sub_id}.srt")
-        assert resp.status_code == 200
-        assert resp.content == fake_arabic_srt
-        assert "application/x-subrip" in resp.headers["content-type"]
-        mock_fallback.assert_called_once()
+    assert "tt1" in release.release_name
 
 
 @pytest.mark.asyncio
-async def test_head_and_options_requests(client):
-    """Verify HEAD and OPTIONS requests succeed on manifest and subtitle routes with CORS headers."""
-    # 1. Manifest HEAD
-    resp = client.head("/manifest.json")
-    assert resp.status_code == 200
-    assert "HEAD" in resp.headers["access-control-allow-methods"]
+async def test_no_hash_match_is_claimed():
+    """The endpoint neither filters on the hash nor reports one.
 
-    # 2. Subtitles query HEAD
-    with patch("app.main._fetch_subtitles_handler", new=AsyncMock()) as mock_fetch:
-        from app.models import SubtitlesResponse
-
-        mock_fetch.return_value = SubtitlesResponse(subtitles=[])
-        resp_sub = client.head("/subtitles/series/tt9288030:1:1.json")
-        assert resp_sub.status_code == 200
-        assert "HEAD" in resp_sub.headers["access-control-allow-methods"]
-
-
-def test_exact_fallback_release_matching():
-    from types import SimpleNamespace
-
-    from app.main import _is_exact_fallback_release
-
-    requested = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
-    assert _is_exact_fallback_release(
-        requested,
-        " Ahmed ",
-        False,
-        SimpleNamespace(
-            release_name="Sopranos S01E03 1080p WEB-DL DD5.1 H.264-BS",
-            uploader="ahmed",
-            hearing_impaired=False,
-        ),
-    ) is True
-    assert _is_exact_fallback_release(
-        requested,
-        "Ahmed",
-        False,
-        SimpleNamespace(
-            release_name="Sopranos.S01E11.1080p.WEB-DL.srt",
-            uploader="Ahmed",
-            hearing_impaired=False,
-        ),
-    ) is False
-    assert _is_exact_fallback_release(
-        requested,
-        "Ahmed",
-        False,
-        SimpleNamespace(
-            release_name=requested,
-            uploader="SomeoneElse",
-            hearing_impaired=False,
-        ),
-    ) is False
-    assert _is_exact_fallback_release("", "Ahmed", False, SimpleNamespace(release_name=requested)) is False
-
-
-@pytest.mark.asyncio
-async def test_subsource_fallback_uses_weak_compatible_candidate_when_not_exact():
-    """No exact release is a reason to keep looking, not a reason to fail.
-
-    Previously a SubSource season pack was refused outright whenever it was not
-    the exact requested release name, so a candidate that the target's
-    compatibility engine accepts was never even downloaded, let alone tried.
-    Eligibility now stops at ``hard_compatibility_filter``; deciding whether it
-    is actually synchronizable is the pipeline's job, not the provider's.
+    Claiming a match would promote the release into the hash tier and to the top
+    of the list on evidence that does not exist.
     """
-    from app.main import _fallback_download_subsource
-
-    requested_name = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
-    pack_srt = b"1\n00:00:01,000 --> 00:00:04,000\nPack candidate\n"
-    download_calls: list[str] = []
-
-    class _GenericSubsource:
-        async def search_subtitles(self, **kwargs):
-            return [
-                SubtitleRelease(
-                    release_name="Sopranos 1-11.srt",
-                    download_url="https://subsource.test/generic.zip",
-                    provider="subsource",
-                    lang="ara",
-                    uploader="generic-uploader",
-                )
-            ]
-
-        async def download_archive(self, download_ref, api_key=None):
-            download_calls.append(download_ref)
-            return pack_srt
-
-    meta: dict = {"release_name": requested_name, "uploader": "Ahmed"}
-    outcome: dict = {}
-    with patch("app.main.SubsourceProvider", new=lambda client: _GenericSubsource()):
-        result = await _fallback_download_subsource(
-            imdb_id="tt0141842",
-            media_type="series",
-            season=1,
-            episode=3,
-            subsource_key="test_subsource_key",
-            target_filename=requested_name,
-            lang="ara",
-            client=object(),
-            requested_release_name=requested_name,
-            requested_uploader="Ahmed",
-            requested_hearing_impaired=False,
-            meta=meta,
-            outcome=outcome,
+    client = StubClient({"subtitles": [_item(lang="ara")]})
+    release = (
+        await provider(client).search_subtitles(
+            imdb_id="tt1", languages=["ara"], video_hash="8e245d9679d31e12",
+            video_size=19571049411,
         )
-    assert result == pack_srt
-    assert download_calls == ["https://subsource.test/generic.zip"]
-    # The two facts are reported separately: no exact release, but one
-    # target-compatible candidate.
-    assert outcome["exact_candidates"] == 0
-    assert outcome["compatible_candidates"] == 1
-    assert outcome["category"] == "NO_EXACT_RELEASE"
+    )[0]
+
+    assert release.is_hash_match is False
+    assert release.matched_by_hash is False
 
 
 @pytest.mark.asyncio
-async def test_subsource_fallback_refuses_wrong_episode_release():
-    """Eligibility still ends at the hard filter: a wrong episode is refused."""
-    from app.main import _fallback_download_subsource
-
-    requested_name = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
-    download_calls: list[str] = []
-
-    class _WrongEpisode:
-        async def search_subtitles(self, **kwargs):
-            return [
-                SubtitleRelease(
-                    release_name="Sopranos.S01E09.1080p.WEB-DL.DD5.1.H.264-BS.srt",
-                    download_url="https://subsource.test/wrong.zip",
-                    provider="subsource",
-                    lang="ara",
-                    uploader="Ahmed",
-                )
-            ]
-
-        async def download_archive(self, download_ref, api_key=None):
-            download_calls.append(download_ref)
-            raise AssertionError("a wrong-episode candidate must never be downloaded")
-
-    meta: dict = {"release_name": requested_name, "uploader": "Ahmed"}
-    outcome: dict = {}
-    with patch("app.main.SubsourceProvider", new=lambda client: _WrongEpisode()):
-        result = await _fallback_download_subsource(
-            imdb_id="tt0141842",
-            media_type="series",
-            season=1,
-            episode=3,
-            subsource_key="test_subsource_key",
-            target_filename=requested_name,
-            lang="ara",
-            client=object(),
-            requested_release_name=requested_name,
-            requested_uploader="Ahmed",
-            requested_hearing_impaired=False,
-            meta=meta,
-            outcome=outcome,
-        )
-    assert result is None
-    assert download_calls == []
-    assert outcome["category"] == "NO_COMPATIBLE_CANDIDATE"
-    assert outcome["exact_candidates"] == 0
-    assert outcome["compatible_candidates"] == 0
-
-
-@pytest.mark.asyncio
-async def test_subsource_fallback_uses_exact_equivalent_release():
-    from app.main import _fallback_download_subsource
-
-    requested_name = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
-    exact_srt = b"1\n00:00:01,000 --> 00:00:04,000\nExact equivalent\n"
-    download_calls: list[str] = []
-
-    class _ExactSubsource:
-        async def search_subtitles(self, **kwargs):
-            return [
-                SubtitleRelease(
-                    release_name="Sopranos 1-11.srt",
-                    download_url="https://subsource.test/generic.zip",
-                    provider="subsource",
-                    lang="ara",
-                    uploader="generic-uploader",
-                ),
-                SubtitleRelease(
-                    release_name="Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS",
-                    download_url="https://subsource.test/exact.srt",
-                    provider="subsource",
-                    lang="ara",
-                    uploader="Ahmed",
-                ),
-            ]
-
-        async def download_archive(self, download_ref, api_key=None):
-            download_calls.append(download_ref)
-            assert download_ref == "https://subsource.test/exact.srt"
-            return exact_srt
-
-    meta: dict = {"release_name": requested_name, "uploader": "Ahmed"}
-    with patch("app.main.SubsourceProvider", new=lambda client: _ExactSubsource()):
-        result = await _fallback_download_subsource(
-            imdb_id="tt0141842",
-            media_type="series",
-            season=1,
-            episode=3,
-            subsource_key="test_subsource_key",
-            target_filename=requested_name,
-            lang="ara",
-            client=object(),
-            requested_release_name=requested_name,
-            requested_uploader="Ahmed",
-            requested_hearing_impaired=False,
-            meta=meta,
-        )
-    assert result == exact_srt
-    assert download_calls == ["https://subsource.test/exact.srt"]
-    assert meta["provider"] == "subsource"
-    assert meta["download_url"] == "https://subsource.test/exact.srt"
-    assert meta["fallback_download_url"] == "https://subsource.test/exact.srt"
-    assert meta["uploader"] == "Ahmed"
-
-
-@pytest.mark.asyncio
-async def test_subdl_stream_without_exact_subsource_match_returns_502(client):
-    """A failed SubDL ID must fail alone rather than receive a generic SubSource file."""
-    sub_id = "subdl_no_exact_match"
-    requested_name = "Sopranos.S01E03.1080p.WEB-DL.DD5.1.H.264-BS.srt"
-    cache_manager.store_metadata(
-        sub_id,
+async def test_entries_without_a_usable_url_are_dropped():
+    client = StubClient(
         {
-            "sub_id": sub_id,
-            "imdb_id": "tt0141842",
-            "media_type": "series",
-            "provider": "subdl",
-            "download_url": "https://subdl.com/sub/fake.zip",
-            "release_name": requested_name,
-            "season": 1,
-            "episode": 3,
-            "subdl_key": "test_subdl_key",
-            "subsource_key": "test_subsource_key",
-            "lang": "ara",
-            "uploader": "Ahmed",
-        },
-    )
-
-    class _GenericSubsource:
-        async def search_subtitles(self, **kwargs):
-            return [
-                SubtitleRelease(
-                    release_name="Sopranos 1-11.srt",
-                    download_url="https://subsource.test/generic.zip",
-                    provider="subsource",
-                    lang="ara",
-                    uploader="generic-uploader",
-                )
+            "subtitles": [
+                _item(sub_id="1", lang="ara"),
+                {"id": "2", "lang": "ara"},  # no url
+                {"id": "3", "url": "javascript:alert(1)", "lang": "ara"},
             ]
+        }
+    )
+    releases = await provider(client).search_subtitles(imdb_id="tt1", languages=["ara"])
 
-        async def download_archive(self, download_ref, api_key=None):
-            raise AssertionError("generic fallback must not be downloaded")
-
-    with (
-        patch(
-            "app.providers.subdl.SubdlProvider.download_archive",
-            new=AsyncMock(return_value=None),
-        ),
-        patch("app.main.SubsourceProvider", new=lambda client: _GenericSubsource()),
-        patch(
-            "app.cache.cache_manager.get_subtitle",
-            new=AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.cache.cache_manager.save_subtitle",
-            new=AsyncMock(),
-        ) as mock_save,
-    ):
-        resp = client.get(f"/sub/{sub_id}.srt")
-        assert resp.status_code == 502
-        assert mock_save.await_count == 0
+    assert len(releases) == 1
 
 
-def _zip_of(files: dict) -> bytes:
-    """Build an in-memory ZIP from {name: str|bytes}."""
-    import io
-    import zipfile
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name, content in files.items():
-            zf.writestr(name, content.encode("utf-8") if isinstance(content, str) else content)
-    return buf.getvalue()
-
-
-def _store_subdl_meta(sub_id: str) -> None:
-    cache_manager.store_metadata(
-        sub_id,
+@pytest.mark.asyncio
+async def test_hearing_impaired_releases_are_excluded_on_request():
+    client = StubClient(
         {
-            "sub_id": sub_id,
-            "imdb_id": "tt9288030",
-            "media_type": "series",
-            "provider": "subdl",
-            "download_url": "https://subdl.com/sub/bad.zip",
-            "release_name": "Reacher.S01E01.1080p.WEB-DL",
-            "season": 1,
-            "episode": 1,
-            "subdl_key": "test_subdl_key",
-            "subsource_key": "test_subsource_key",
-            "lang": "ara",
-        },
+            "subtitles": [
+                _item(sub_id="1", name="Movie.sdh.srt", release="Movie.SDH"),
+                _item(sub_id="2", name="Movie.srt", release="Movie"),
+            ]
+        }
+    )
+    releases = await provider(client).search_subtitles(
+        imdb_id="tt1", languages=["ara"], exclude_hi=True
     )
 
-
-@pytest.mark.asyncio
-async def test_subdl_invalid_zip_returns_502_not_500(client):
-    """A ZIP with no recognized subtitle falls back, then returns 502 (never 500)."""
-    sub_id = "subdl_invalid_zip_0001"
-    _store_subdl_meta(sub_id)
-    bad_zip = _zip_of({"info.nfo": "no subs here", "cover.jpg": b"\xff\xd8\xff"})
-
-    with (
-        patch(
-            "app.providers.subdl.SubdlProvider.download_archive",
-            new=AsyncMock(return_value=bad_zip),
-        ),
-        patch(
-            "app.main._fallback_download_subsource",
-            new=AsyncMock(return_value=None),
-        ) as mock_fallback,
-        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
-        patch(
-            "app.cache.cache_manager.save_subtitle", new=AsyncMock(return_value=True)
-        ) as mock_save,
-    ):
-        resp = client.get(f"/sub/{sub_id}.srt")
-
-    assert resp.status_code == 502
-    assert resp.status_code != 500
-    assert "no usable subtitle" in resp.json()["detail"].lower()
-    mock_fallback.assert_called_once()
-    # The invalid archive must never be persisted.
-    mock_save.assert_not_called()
+    assert [r.release_name for r in releases] == ["Movie"]
 
 
 @pytest.mark.asyncio
-async def test_subdl_invalid_zip_falls_back_to_subsource(client):
-    """A valid-but-empty ZIP triggers the SubSource fallback and serves it."""
-    sub_id = "subdl_invalid_zip_0002"
-    _store_subdl_meta(sub_id)
-    bad_zip = _zip_of({"info.nfo": "nothing useful"})
-    fake_arabic = b"1\n00:00:01,000 --> 00:00:03,000\n\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7\n"
-
-    with (
-        patch(
-            "app.providers.subdl.SubdlProvider.download_archive",
-            new=AsyncMock(return_value=bad_zip),
-        ),
-        patch(
-            "app.main._fallback_download_subsource",
-            new=AsyncMock(return_value=fake_arabic),
-        ) as mock_fallback,
-        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
-        patch(
-            "app.cache.cache_manager.save_subtitle", new=AsyncMock(return_value=True)
-        ) as mock_save,
-    ):
-        resp = client.get(f"/sub/{sub_id}.srt")
-
-    assert resp.status_code == 200
-    assert resp.content == fake_arabic
-    mock_fallback.assert_called_once()
-    # Only the resolved fallback payload is cached.
-    mock_save.assert_called_once()
+async def test_a_malformed_payload_yields_no_results_rather_than_raising():
+    for payload in ({}, {"subtitles": None}, {"subtitles": "nope"}, []):
+        client = StubClient(payload)
+        assert await provider(client).search_subtitles(imdb_id="t", languages=["ara"]) == []
 
 
 @pytest.mark.asyncio
-async def test_cache_refuses_empty_subtitle(tmp_path):
-    """Empty/whitespace payloads are never persisted (invalid archive guard)."""
-    from app.cache import LRUCacheManager
+async def test_a_429_trips_the_breaker_and_a_later_call_short_circuits():
+    client = StubClient({"subtitles": []}, status=429)
+    assert await provider(client).search_subtitles(imdb_id="t", languages=["ara"]) == []
+    assert OPENSUBTITLES_BREAKER.is_open() is True
 
-    manager = LRUCacheManager(cache_dir=str(tmp_path), max_bytes=10000, max_files=5)
-    assert await manager.save_subtitle("empty", b"") is False
-    assert await manager.save_subtitle("blank", b"   \n\t") is False
-    assert await manager.get_subtitle("empty") is None
-
-
-@pytest.mark.asyncio
-async def test_failed_sub_id_short_circuits_retries(client):
-    """A broken upstream archive is hit once; retries are answered from the failure cache."""
-    sub_id = "subdl_broken_retry_0001"
-    _store_subdl_meta(sub_id)
-    bad_zip = _zip_of({"Suits.S01.720p.Web-DL.ReEnc-DeeJayAhmed.txt": "notice"})
-    download = AsyncMock(return_value=bad_zip)
-
-    with (
-        patch("app.providers.subdl.SubdlProvider.download_archive", new=download),
-        patch(
-            "app.main._fallback_download_subsource", new=AsyncMock(return_value=None)
-        ),
-        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
-    ):
-        first = client.get(f"/sub/{sub_id}.srt")
-        assert first.status_code == 502
-        assert cache_manager.is_failed(sub_id) is True
-
-        second = client.get(f"/sub/{sub_id}.srt")
-        assert second.status_code == 502
-        assert "recent extraction failure" in second.json()["detail"]
-
-    # Two retries, but the upstream archive was only fetched once.
-    assert download.await_count == 1
+    calls = len(client.urls)
+    assert await provider(client).search_subtitles(imdb_id="t", languages=["ara"]) == []
+    assert len(client.urls) == calls, "breaker should have prevented the second request"
 
 
 @pytest.mark.asyncio
-async def test_extract_error_reports_archive_members():
-    """The extraction error must name the archive members for diagnosis."""
-    from app.extractor import SubtitleExtractionError, extract_srt_from_zip
+async def test_a_transport_error_yields_no_results():
+    class Broken:
+        async def get(self, url, headers=None, **kwargs):
+            raise httpx.ConnectError("boom")
 
-    zip_bytes = _zip_of({"Suits.S01.720p.Web-DL.ReEnc-DeeJayAhmed.txt": "notice"})
-    with pytest.raises(SubtitleExtractionError, match="No valid subtitle files") as excinfo:
-        extract_srt_from_zip(zip_bytes)
-    assert "Suits.S01.720p.Web-DL.ReEnc-DeeJayAhmed.txt" in str(excinfo.value)
+    assert await provider(Broken()).search_subtitles(imdb_id="t", languages=["ara"]) == []
 
 
-@pytest.mark.asyncio
-async def test_serve_rejects_non_subtitle_payload(client):
-    """A raw (non-archive) HTML/notice body must never be cached or served."""
-    sub_id = "subdl_non_subtitle_0001"
-    _store_subdl_meta(sub_id)
-    html = b"<html><body>upstream error</body></html>"
-    with (
-        patch(
-            "app.providers.subdl.SubdlProvider.download_archive",
-            new=AsyncMock(return_value=html),
-        ),
-        patch("app.main._fallback_download_subsource", new=AsyncMock(return_value=None)),
-        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
-        patch(
-            "app.cache.cache_manager.save_subtitle", new=AsyncMock(return_value=True)
-        ) as mock_save,
-    ):
-        resp = client.get(f"/sub/{sub_id}.srt")
-    assert resp.status_code == 502
-    mock_save.assert_not_called()
-    assert cache_manager.is_failed(sub_id) is True
+# --- download -----------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_serve_extracts_rar_archive(client, monkeypatch):
-    """A RAR archive (DVDRip packs) is extracted, not served as binary."""
-    sub_id = "subdl_rar_0001"
-    _store_subdl_meta(sub_id)
-    srt = "1\n00:00:01,000 --> 00:00:02,000\nhello rar\n"
-    monkeypatch.setattr(
-        "app.extractor._extract_nonzip_members",
-        lambda raw, kind: [("fl-itw-xvid-cd2.srt", srt.encode("utf-8"))],
+async def test_download_fetches_the_direct_url():
+    payload = b"1\n00:00:01,000 --> 00:00:02,000\nhello\n"
+
+    class DownloadClient:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        async def get(self, url, headers=None, **kwargs) -> httpx.Response:
+            self.urls.append(url)
+            return httpx.Response(
+                200, content=payload, request=httpx.Request("GET", url)
+            )
+
+    client = DownloadClient()
+    got = await OpenSubtitlesProvider(client).download_archive(
+        "https://subs5.strem.io/en/download/file/1954576302"
     )
-    with (
-        patch(
-            "app.providers.subdl.SubdlProvider.download_archive",
-            new=AsyncMock(return_value=b"Rar!\x1a\x07\x00fake"),
-        ),
-        patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
-        patch(
-            "app.cache.cache_manager.save_subtitle", new=AsyncMock(return_value=True)
-        ) as mock_save,
-    ):
-        resp = client.get(f"/sub/{sub_id}.srt")
-    assert resp.status_code == 200
-    assert b"hello rar" in resp.content
-    mock_save.assert_called_once()
+
+    assert got == payload
+    assert client.urls == ["https://subs5.strem.io/en/download/file/1954576302"]
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_numeric_reference_cannot_be_resolved():
+    """A bare file_id came from the old authenticated API.
+
+    The v3 endpoint has no file_id to negotiate, so this has to be a clean miss
+    rather than a request to the wrong host.
+    """
+    client = StubClient({"subtitles": []})
+    assert await OpenSubtitlesProvider(client).download_archive("1954576302") is None
+
+
+@pytest.mark.asyncio
+async def test_get_download_url_is_a_no_op():
+    assert await OpenSubtitlesProvider(StubClient({})).get_download_url(123) is None
+
+
+def test_the_release_model_requires_a_download_url():
+    """A release without one cannot be served, so the field is not optional."""
+    assert "download_url" in SubtitleRelease.model_fields

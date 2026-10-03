@@ -177,18 +177,9 @@ class UserPreferences(BaseModel):
 
     subdl_key: str = ""
     subsource_key: str = ""
+    #: Retained for backward compatibility with configs saved before OpenSubtitles
+    #: moved to the keyless v3 endpoint. It is ignored: the provider takes no key.
     opensubtitles_key: str = ""
-    #: OpenSubtitles account credentials. Used only to exchange for a user JWT,
-    #: which in turn raises the *download* quota. They do not gate search or
-    #: hash matching -- see app.providers.opensubtitles_auth for why.
-    #:
-    #: Carried in the stateless config token like the API keys. That token is
-    #: base64, not encryption: anything able to read the manifest URL can
-    #: recover these. That is the existing trade-off for the API keys too, but a
-    #: password is a far more reusable secret than a provider key, so the UI says
-    #: so plainly and the value is never echoed back or written to disk.
-    opensubtitles_username: str = ""
-    opensubtitles_password: str = ""
     #: Where the effective provider credentials above came from:
     #: "manifest" (supplied in this request's config), "environment",
     #: "mixed", or "default" (none configured). Recorded at the point the
@@ -199,11 +190,12 @@ class UserPreferences(BaseModel):
     exclude_hi: bool = False
     nuvio_mode: bool = False  # True: Clean ISO code ("ara") & Nuvio ID; False: Stremio format ("ara | ...", "AR [★ Match] | ...")
     hi_preference: str = "neutral"  # "neutral", "prefer", or "exclude"
-    # Provider enable/disable toggles (SubDL/SubSource on by default; the rest
-    # stay off until the user explicitly enables them)
+    # Provider enable/disable toggles. SubDL/SubSource on by default; OpenSubtitles
+    # is on too now that it is keyless, so there is nothing to configure and no
+    # reason to make a user opt in. The scrapers stay off until enabled.
     enable_subdl: bool = True
     enable_subsource: bool = True
-    enable_opensubtitles: bool = False
+    enable_opensubtitles: bool = True
     enable_yifysubtitles: bool = False
     enable_subtitlecat: bool = False
     # Arabic RTL normalization pipeline (punctuation/brackets/quotes + RLM)
@@ -257,9 +249,6 @@ class UserPreferences(BaseModel):
         """Backward-compatible alias for the derived legacy preset name."""
         return self.badge_format
 
-    @property
-    def opensubtitles_api_key(self) -> str:
-        return self.opensubtitles_key
 
     def __iter__(self):
         """Allow backward-compatible tuple unpacking: subdl, subsource = parse_user_config(...)."""

@@ -150,53 +150,49 @@ def test_hash_match_without_video_filename():
 # ==========================================
 
 
-@pytest.mark.asyncio
-async def test_opensubtitles_provider_sends_moviehash_and_sets_flag():
-    """
-    Verify OpenSubtitlesProvider properly sets moviehash and moviebytesize params,
-    and correctly flags returned SubtitleRelease with is_hash_match=True.
+async def test_opensubtitles_passes_the_hash_through_but_claims_no_match():
+    """The hash is forwarded; a hash *match* is not claimed.
+
+    The v3 endpoint accepts the stream parameters but, verified against the live
+    service, neither filters on the hash nor reports one back. Claiming a match
+    anyway would promote the release into the hash tier and to the top of the
+    list on evidence that does not exist.
     """
     mock_client = AsyncMock(spec=httpx.AsyncClient)
     provider = OpenSubtitlesProvider(mock_client)
 
-    mock_resp_data = {
-        "total_count": 1,
-        "data": [
-            {
-                "id": "os_sub_123",
-                "attributes": {
-                    "release": "Movie.2024.1080p.WEB-DL-GROUP",
-                    "language": "ar",
-                    "moviehash_match": True,
-                    "hearing_impaired": False,
-                    "files": [{"file_id": 98765, "file_name": "Movie.2024.1080p.srt"}],
-                },
-            }
-        ],
-    }
-
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.status_code = 200
-    mock_resp.json.return_value = mock_resp_data
+    mock_resp.json.return_value = {
+        "subtitles": [
+            {
+                "id": "os_sub_123",
+                "url": "https://subs5.strem.io/en/download/file/98765",
+                "lang": "ara",
+                "subtitleFileName": "Movie.2024.1080p.srt",
+                "movieReleaseName": "Movie.2024.1080p.WEB-DL-GROUP",
+            }
+        ]
+    }
     mock_client.get.return_value = mock_resp
 
     results = await provider.search_subtitles(
         imdb_id="tt1234567",
-        api_key="valid_api_key",
+        languages=["ara"],
         video_hash="8e245d9679d31e12",
         video_size=1048576000,
     )
 
     assert len(results) == 1
-    assert results[0].is_hash_match is True
     assert results[0].provider == "opensubtitles"
-
-    # Verify query params passed to httpx client
-    call_args = mock_client.get.call_args
-    assert call_args is not None
-    params = call_args.kwargs.get("params", {})
-    assert params.get("moviehash") == "8e245d9679d31e12"
-    assert params.get("moviebytesize") == "1048576000"
+    assert results[0].download_url == "https://subs5.strem.io/en/download/file/98765"
+    # Forwarded to the endpoint, in the URL-encoded extra path segment.
+    requested = mock_client.get.call_args.args[0]
+    assert "videoHash%3D8e245d9679d31e12" in requested
+    assert "videoSize%3D1048576000" in requested
+    # No match claimed.
+    assert results[0].is_hash_match is False
+    assert results[0].matched_by_hash is False
 
 
 # ==========================================

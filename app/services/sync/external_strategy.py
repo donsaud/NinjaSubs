@@ -1253,8 +1253,6 @@ class ExternalExactStrategy:
                 target_filename=self._match_filename(query),
                 moviehash=query.video_hash,
                 moviebytesize=query.video_size,
-                username=query.api_keys.get("opensubtitles_username") or None,
-                password=query.api_keys.get("opensubtitles_password") or None,
             )
 
         return await self._search_tiers(_search, query, "opensubtitles")
