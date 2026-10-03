@@ -146,7 +146,10 @@ def test_encode_parse_provider_enable_flags():
     defaults = parse_user_config(encode_user_config("k1", "k2"))
     assert defaults.enable_subdl is True
     assert defaults.enable_subsource is True
-    assert defaults.enable_opensubtitles is False
+    # Enabled by default, like SubDL/SubSource. This used to assert False, which
+    # is what made the OpenSubtitles checkbox a no-op: the configure page emitted
+    # no field when enabled, and the parser read the absent field as off.
+    assert defaults.enable_opensubtitles is True
 
     assert parse_user_config("subdl=k1&enable_subsource=false").enable_subsource is False
 

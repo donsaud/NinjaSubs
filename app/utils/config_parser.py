@@ -32,7 +32,11 @@ def encode_user_config(
     badge_format: str | None = None,
     enable_subdl: bool = True,
     enable_subsource: bool = True,
-    enable_opensubtitles: bool = False,
+    # Key-based providers are opt-out, so that is what this is too. The previous
+    # opt-in shape could not round-trip with the configure page: the page emitted
+    # only `false`, and this defaulting to False meant the flag could never be
+    # turned on from the UI at all.
+    enable_opensubtitles: bool = True,
     enable_yifysubtitles: bool = False,
     enable_subtitlecat: bool = False,
     enable_rtl_fix: bool = True,
@@ -89,8 +93,8 @@ def encode_user_config(
         payload["enable_subdl"] = False
     if enable_subsource is False:
         payload["enable_subsource"] = False
-    if enable_opensubtitles:
-        payload["enable_opensubtitles"] = True
+    if enable_opensubtitles is False:
+        payload["enable_opensubtitles"] = False
     if enable_yifysubtitles:
         payload["enable_yifysubtitles"] = True
     if enable_subtitlecat:
@@ -168,7 +172,7 @@ def parse_user_config(
     badge_parts: list[str] | None = None
     enable_subdl: bool = True
     enable_subsource: bool = True
-    enable_opensubtitles: bool = False
+    enable_opensubtitles: bool = True
     enable_yifysubtitles: bool = False
     enable_subtitlecat: bool = False
     enable_rtl_fix: bool = True
@@ -270,7 +274,7 @@ def parse_user_config(
                 if "enable_subsource" in data:
                     enable_subsource = _as_bool(data.get("enable_subsource"), True)
                 if "enable_opensubtitles" in data:
-                    enable_opensubtitles = _as_bool(data.get("enable_opensubtitles"), False)
+                    enable_opensubtitles = _as_bool(data.get("enable_opensubtitles"), True)
                 if "enable_yifysubtitles" in data or "yifysubtitles" in data:
                     enable_yifysubtitles = _as_bool(
                         data.get("enable_yifysubtitles", data.get("yifysubtitles")), False
@@ -414,7 +418,7 @@ def parse_user_config(
                 if "enable_subsource" in parsed_qs:
                     enable_subsource = _as_bool(parsed_qs["enable_subsource"][0], True)
                 if "enable_opensubtitles" in parsed_qs:
-                    enable_opensubtitles = _as_bool(parsed_qs["enable_opensubtitles"][0], False)
+                    enable_opensubtitles = _as_bool(parsed_qs["enable_opensubtitles"][0], True)
                 if "enable_yifysubtitles" in parsed_qs:
                     enable_yifysubtitles = _as_bool(parsed_qs["enable_yifysubtitles"][0], False)
                 if "enable_subtitlecat" in parsed_qs:
