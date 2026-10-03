@@ -35,6 +35,16 @@ from app.services.sync.alignment import (
     is_reusable_verified,
     may_serve_synchronized,
 )
+from app.services.sync.anchor_preshift import (
+    decide_anchor_preshift,
+    preshift_text,
+)
+from app.services.sync.constant_shift_exemption import (
+    ConstantShiftExemptionState,
+    apply_exemption_to_evaluation,
+    decide_constant_shift_exemption,
+    measure_median_abs_residual,
+)
 from app.services.sync.large_offset import (
     LARGE_OFFSET_MAX_MS,
     REASON_MAX_OFFSET_EXCEEDED,
@@ -1046,6 +1056,44 @@ class SyncOrchestrator:
                     ",".join(large_offset_inv.reason_codes) or "none",
                 )
 
+            # Anchor-correspondence pre-shift. Runs on the normal path, where
+            # cue-sanity has already accepted the reference, so nothing has
+            # proposed an offset and alass is handed an ~11s disagreement
+            # between the two opening dialogues with no hint that it exists.
+            #
+            # Deliberately after the strip above and before alass: the shift is
+            # computed from the exact text alass receives, and applied to that
+            # same text, so the evidence describes the documents that actually
+            # get aligned. When alass cannot bridge a large constant offset it
+            # leaves the timeline alone (production: mad=0ms while peak shift
+            # was +11.08s) and the verifier then refuses on residual p95.
+            #
+            # A refusal here is routine, not an error. The proposal has to be
+            # corroborated across regions *and* have to measurably improve
+            # correspondence; a wrong-but-self-consistent hypothesis is rejected
+            # on the second test. Nothing downstream changes: alass still runs,
+            # and the verifier still decides whether anything is served.
+            preshift_decision = decide_anchor_preshift(target_text, reference)
+            if preshift_decision.accepted and preshift_decision.preshift is not None:
+                preshifted_text = preshift_text(
+                    target_text, preshift_decision.preshift.shift_ms
+                )
+                if preshifted_text is not None:
+                    logger.info(
+                        "[sync] anchor pre-shift applied before alass: %s",
+                        preshift_decision.preshift.summary(),
+                    )
+                    target_text = preshifted_text
+                else:
+                    logger.info(
+                        "[sync] anchor pre-shift discarded: the shift left no cues"
+                    )
+            else:
+                logger.info(
+                    "[sync] anchor pre-shift not applied: %s",
+                    preshift_decision.reason,
+                )
+
             alass_attempted += 1
             alass_started += 1
             self._metrics["alass_runs"] += 1
@@ -1130,6 +1178,35 @@ class SyncOrchestrator:
                         evaluation.sync_state.value,
                         evaluation.verification.value,
                     )
+                # Constant-shift exemption, evaluated BEFORE the verdict is stored
+                # so the cached verdict reflects the exemption. Applies to the
+                # normal path, where an anchor pre-shift was accepted above.
+                #
+                # Scope: residual p95 only, and only for a correction evidenced as
+                # a single constant shift by corroborated multi-region anchors,
+                # a tight median residual, a stable movement MAD and structural
+                # agreement. See app.services.sync.constant_shift_exemption for
+                # why p95 is the wrong measurement when two releases disagree on
+                # cue segmentation -- and why it must not be exempted on its own.
+                constant_shift_state = ConstantShiftExemptionState.ORIGINAL
+                if preshift_decision is not None and preshift_decision.accepted:
+                    exemption = decide_constant_shift_exemption(
+                        preshift_decision.preshift,
+                        evaluation,
+                        validate_alass_output(target_text, synced, reference),
+                        measure_median_abs_residual(synced, reference),
+                    )
+                    constant_shift_state = exemption.state
+                    logger.info(
+                        "[sync] constant_shift.decision serving_state=%s reasons=%s %s",
+                        exemption.state.value,
+                        ",".join(exemption.reason_codes) or "none",
+                        exemption.summary(),
+                    )
+                    if exemption.exempted:
+                        apply_exemption_to_evaluation(evaluation)
+                        self._last_evaluation = evaluation
+
                 self._metrics["candidates_verified"] += 1
                 # Computed before the verdict is stored: a resync verdict records
                 # where its transformed artifact lives, so a later reuse can
@@ -1206,6 +1283,26 @@ class SyncOrchestrator:
                     if not serve_synchronized:
                         logger.info(
                             "[sync] large_offset corrected serving allowed for %s "
+                            "(state=%s, verification=%s) -> serving the corrected "
+                            "subtitle",
+                            target_id,
+                            evaluation.sync_state.value,
+                            evaluation.verification.value,
+                        )
+                    serve_synchronized = True
+                # Constant-shift exemption. Same scoped exception as the Large
+                # Offset branch above -- residual p95 set aside for a correction
+                # that four independent measurements agree was one constant
+                # shift -- but unlike that path this one rewrites the verdict (see
+                # ``apply_exemption_to_evaluation``), so it is only reached when
+                # the exemption already granted it.
+                if (
+                    constant_shift_state
+                    is ConstantShiftExemptionState.EXEMPT_CONSTANT_SHIFT
+                ):
+                    if not serve_synchronized:
+                        logger.info(
+                            "[sync] constant-shift serving allowed for %s "
                             "(state=%s, verification=%s) -> serving the corrected "
                             "subtitle",
                             target_id,
