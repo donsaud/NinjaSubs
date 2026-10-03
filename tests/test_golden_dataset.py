@@ -48,6 +48,17 @@ def _cache_file_count(root: Path) -> int:
     return len([p for p in root.rglob("*") if p.is_file()]) if root.exists() else 0
 
 
+#: The golden corpus subtitle payloads are generated artifacts and stay gitignored
+#: (see ``.gitignore``). Every case in the manifest points at one, so a fresh clone
+#: has no corpus at all and these tests have nothing to measure. They must skip
+#: rather than fail: a red suite on every clean checkout reads as a real
+#: regression and trains people to ignore it.
+requires_golden_corpus = pytest.mark.skipif(
+    _cache_file_count(REPO / "tests" / "fixtures" / "golden_sync" / "subtitles") == 0,
+    reason="golden-corpus subtitles are absent (generated, gitignored)",
+)
+
+
 def run_evaluator(*args: str) -> subprocess.CompletedProcess:
     """Run the evaluator in a subprocess with a real environment."""
     env = dict(os.environ)
@@ -464,6 +475,7 @@ def test_annotation_source_is_recorded(manifest):
 # --- 10. the headline result is reproducible ------------------------------- #
 
 
+@requires_golden_corpus
 def test_benchmark_detects_the_circular_error_case():
     """Self-consistency must not be mistaken for correctness."""
     evaluator = load_evaluator()

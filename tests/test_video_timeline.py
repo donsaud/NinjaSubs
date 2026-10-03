@@ -29,6 +29,15 @@ REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "tests" / "fixtures" / "golden_sync" / "manifest.json"
 EVALUATOR = REPO / "tools" / "evaluate_golden_sync.py"
 
+#: The golden corpus subtitle payloads are generated artifacts and stay gitignored
+#: (see ``.gitignore``). The cases below measure against them, so a fresh clone
+#: has nothing to measure and they must skip rather than fail -- a permanently red
+#: suite on every clean checkout reads as a regression and gets ignored.
+requires_golden_corpus = pytest.mark.skipif(
+    not any((REPO / "tests" / "fixtures" / "golden_sync" / "subtitles").glob("*.srt")),
+    reason="golden-corpus subtitles are absent (generated, gitignored)",
+)
+
 
 def _blocks(
     count: int,
@@ -283,6 +292,7 @@ def test_golden_benchmark_reports_video_validation_observational():
     assert "Counterfactual" in result.stdout
 
 
+@requires_golden_corpus
 def test_video_validation_closes_the_measured_wrong_cut_gap():
     from app.services.sync.alignment import AlignmentAnalyzer
     from app.services.sync.golden import load_manifest
