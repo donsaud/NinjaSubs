@@ -151,7 +151,62 @@ async def test_a_rejected_login_is_not_retried():
         )
         assert token is None
 
-    assert client.login_calls == 3  # one per explicit call, never retried internally
+        # OpenSubtitles allows only 30 logins/hour per consumer and specifically
+        # throttles repeats with wrong credentials. Three subtitle requests with
+        # the same bad password must therefore cost ONE login attempt, not three:
+        # the failure is remembered for FAILED_LOGIN_BACKOFF_SECONDS.
+        assert client.login_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_invalidate_retries_immediately(self):
+        """Invalidate is the 're-authenticate now' path and must not be suppressed."""
+        cache = OpenSubtitlesTokenCache()
+        client = RecordingClient(FakeResponse(401, {"message": "invalid"}))
+        kwargs = {
+            "api_key": "KEY",
+            "username": "me@example.com",
+            "password": "wrong",
+            "base_url": "https://api.opensubtitles.com/api/v1",
+            "user_agent": "test",
+        }
+
+        assert await cache.get_token(client, **kwargs) is None
+        assert await cache.get_token(client, **kwargs) is None
+        assert client.login_calls == 1
+
+        cache.invalidate(kwargs["api_key"], kwargs["username"], kwargs["password"])
+        assert await cache.get_token(client, **kwargs) is None
+        assert client.login_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_a_failed_login_does_not_block_a_different_credential_set(self):
+        """Backoff is scoped to one credential digest, never global."""
+        cache = OpenSubtitlesTokenCache()
+        bad = RecordingClient(FakeResponse(401, {"message": "invalid"}))
+        assert (
+            await cache.get_token(
+                bad,
+                api_key="KEY",
+                username="me",
+                password="wrong",
+                base_url="https://api.opensubtitles.com/api/v1",
+                user_agent="test",
+            )
+            is None
+        )
+        good = RecordingClient(
+            FakeResponse(200, {"token": "JWT", "base_url": "api.opensubtitles.com"})
+        )
+        token = await cache.get_token(
+            good,
+            api_key="OTHER",
+            username="them",
+            password="right",
+            base_url="https://api.opensubtitles.com/api/v1",
+            user_agent="test",
+        )
+        assert token is not None and token.token == "JWT"
+        assert bad.login_calls == 1 and good.login_calls == 1
 
 
 @pytest.mark.asyncio

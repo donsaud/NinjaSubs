@@ -611,7 +611,7 @@ class SubtitleSyncService:
             out_file = tgt_file + ".synced.srt"
 
             # alass syntax: alass <REFERENCE_FILE> <TARGET_TO_FIX> <OUTPUT_FILE> [options]
-            # argv[1] = trusted reference (English), argv[2] = target (Arabic).
+            # argv[1] = trusted reference (any language), argv[2] = target to fix.
             if reference_partial:
                 command = [
                     self.alass_path,

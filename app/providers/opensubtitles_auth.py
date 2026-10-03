@@ -64,6 +64,13 @@ MAX_CACHED_TOKENS = 32
 #: otherwise outlive the token it was created for.
 _MAX_TRACKED_LOCKS = MAX_CACHED_TOKENS * 2
 
+#: How long a failed login suppresses further attempts for the same credentials.
+#: OpenSubtitles allows only 30 logins per hour per consumer and specifically
+#: throttles repeat attempts with wrong credentials, so an uncached failure would
+#: let every concurrent subtitle request spend another slot against that budget
+#: and lock the account out of authenticated downloads entirely.
+FAILED_LOGIN_BACKOFF_SECONDS = 15 * 60.0
+
 
 @dataclass(frozen=True)
 class OpenSubtitlesToken:
@@ -98,6 +105,8 @@ class OpenSubtitlesTokenCache:
     def __init__(self) -> None:
         self._tokens: dict[str, OpenSubtitlesToken] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # digest -> monotonic time until which login is not retried.
+        self._failed_until: dict[str, float] = {}
 
     def _lock_for(self, digest: str) -> asyncio.Lock:
         lock = self._locks.get(digest)
@@ -119,8 +128,15 @@ class OpenSubtitlesTokenCache:
         return entry
 
     def invalidate(self, api_key: str, username: str, password: str) -> None:
-        """Drop the cached token, forcing the next call to log in again."""
-        self._tokens.pop(credential_digest(api_key, username, password), None)
+        """Drop the cached token, forcing the next call to log in again.
+
+        The negative-cache entry is cleared too: this is the "the token was
+        rejected, re-authenticate now" path and must not be suppressed by a
+        backoff left over from an earlier failure.
+        """
+        digest = credential_digest(api_key, username, password)
+        self._tokens.pop(digest, None)
+        self._failed_until.pop(digest, None)
 
     async def get_token(
         self,
@@ -149,12 +165,24 @@ class OpenSubtitlesTokenCache:
         if cached is not None and not cached.expired:
             return cached
 
+        # A recent failure is remembered so a bad password costs one request
+        # rather than one per subtitle request.
+        if time.monotonic() < self._failed_until.get(digest, 0.0):
+            logger.warning(
+                "[OpenSubtitles] Skipping login for user %s; a previous attempt "
+                "failed recently",
+                _mask(username),
+            )
+            return None
+
         # Single-flight: concurrent callers for the same credentials wait for
         # one login rather than each spending a slot in a 30/hour budget.
         async with self._lock_for(digest):
             cached = self._tokens.get(digest)
             if cached is not None and not cached.expired:
                 return cached
+            if time.monotonic() < self._failed_until.get(digest, 0.0):
+                return None
             fresh = await self._login(
                 client,
                 api_key=api_key,
@@ -164,7 +192,13 @@ class OpenSubtitlesTokenCache:
                 user_agent=user_agent,
             )
             if fresh is None:
+                if len(self._failed_until) >= MAX_CACHED_TOKENS:
+                    self._failed_until.pop(next(iter(self._failed_until)), None)
+                self._failed_until[digest] = (
+                    time.monotonic() + FAILED_LOGIN_BACKOFF_SECONDS
+                )
                 return None
+            self._failed_until.pop(digest, None)
             if len(self._tokens) >= MAX_CACHED_TOKENS:
                 self._tokens.pop(next(iter(self._tokens)), None)
             self._tokens[digest] = fresh

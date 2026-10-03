@@ -303,6 +303,28 @@ for entry in AVAILABLE_LANGUAGES:
     _SUBSOURCE_LANG_MAP[code] = entry["subsource"]
     _DISPLAY_PREFIX_MAP[code] = entry["subdl"]
 
+# OpenSubtitles' `/infos/languages` table is not plain ISO-639-1. Fetched live,
+# it publishes 105 codes of which exactly eight are not two letters:
+# `az-az`, `az-zb`, `zh-ca`, `zh-cn`, `zh-tw`, `pt-pt`, `pt-br` and `tm-td`.
+# None of those normalise on their own, so a response using one was labelled
+# "und" and -- worse -- any *request* naming one was normalised through the
+# Arabic default and silently queried as Arabic.
+#
+# Only codes whose language could be confirmed are mapped. The rest are
+# deliberately absent: they now fall back to "und", which is wrong-but-honest,
+# rather than being reported as Arabic, which is confidently wrong. (`sp` in
+# particular is not an OpenSubtitles code; Spanish is `es`.)
+_OPENSUBTITLES_ONLY_CODES: dict[str, str] = {
+    "pt-pt": "por",  # European Portuguese (OS splits it from pt-br)
+    "pt-br": "por",  # Brazilian Portuguese
+    "zh-cn": "zho",  # Chinese, simplified
+    "zh-tw": "zho",  # Chinese, traditional
+    "zh-ca": "zho",  # Chinese, Canada
+    "az-az": "aze",  # Azerbaijani
+}
+for _alias, _code in _OPENSUBTITLES_ONLY_CODES.items():
+    _ISO_639_2_MAP.setdefault(_alias, _code)
+
 
 def normalize_to_iso639_2(raw_lang: str | None, default: str = "ara") -> str:
     """
@@ -348,8 +370,18 @@ for entry in AVAILABLE_LANGUAGES:
 
 
 def get_opensubtitles_lang_code(iso_code: str) -> str:
-    """Get OpenSubtitles API query language code (e.g., 'ar', 'en') for an ISO-639-2 language."""
-    iso_norm = normalize_to_iso639_2(iso_code)
+    """Get OpenSubtitles API query language code (e.g., 'ar', 'en') for an ISO-639-2 language.
+
+    ``normalize_to_iso639_2`` defaults to Arabic, so normalising with it here
+    meant any code missing from the table became ``ara`` -> ``ar``: a request for
+    an unrecognised language silently queried Arabic instead. Normalising with
+    ``und`` and passing anything still unresolved through untouched keeps the
+    search honest -- OpenSubtitles decides what to do with a code it recognises.
+    """
+    iso_norm = normalize_to_iso639_2(iso_code, default="und")
+    if iso_norm == "und":
+        raw = (iso_code or "").strip().lower()
+        return raw or "und"
     return _OPENSUBTITLES_LANG_MAP.get(iso_norm, iso_norm[:2])
 
 

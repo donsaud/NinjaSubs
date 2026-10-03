@@ -1,6 +1,6 @@
 """Sync orchestrator: routes each request through candidate strategies.
 
-Flow per request: gates (server flag, user preference, Arabic only) →
+Flow per request: gates (server flag, user preference, known language) →
 content-bound sync-cache lookup → hash-exact strategy → external exact-match
 strategy → alass alignment → cache the result. Any step may fail; on any
 failure the original, unmodified subtitle bytes are returned so the player
@@ -289,7 +289,11 @@ class SyncOrchestrator:
     async def evaluate_and_sync(
         self, sub_bytes: bytes, meta: dict, target_id: str, auto_sync: bool = False
     ) -> bytes:
-        """Evaluate sync need and synchronize an Arabic subtitle, or return the original bytes."""
+        """Evaluate sync need and synchronize a subtitle, or return the original bytes.
+
+        Language-agnostic: the target may be any language and the reference may
+        be a different one. The reference supplies timing only.
+        """
         # Tag every sync log line emitted from here with a correlation id.
         # Concurrent requests for the same episode otherwise interleave, and
         # attributing their lines to the wrong request is how an incident
@@ -324,8 +328,14 @@ class SyncOrchestrator:
         if not auto_sync:
             logger.info("[sync] skipped: user preference 'Auto-Sync Subtitles' is disabled")
             return sub_bytes
-        if not lang.startswith("ar"):
-            logger.info("[sync] skipped: subtitle language %r is not Arabic", lang)
+        # No language gate here. This used to reject anything not starting with
+        # "ar", which was a product-scope decision for an Arabic-only add-on
+        # rather than a technical requirement: alass aligns any two subtitle
+        # tracks, and the reference may be in a different language from the
+        # target. Language-specific transforms downstream stay conditional on the
+        # subtitle's actual language.
+        if not lang:
+            logger.info("[sync] skipped: subtitle language is unknown; nothing to align")
             return sub_bytes
 
         # No filename-only shortcut: a matching release group does not prove the

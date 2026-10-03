@@ -139,8 +139,15 @@ async def test_orchestrator_gates_skip_strategies(monkeypatch):
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     assert await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", False) == _arabic_bytes()
-    assert await orch.evaluate_and_sync(_arabic_bytes(), {"lang": "eng"}, "t", True) == _arabic_bytes()
+    # An unknown language is the only remaining skip: with no language there is
+    # nothing to align against. A specific non-Arabic language is NOT skipped --
+    # that gate was product scope, not a technical requirement.
+    assert await orch.evaluate_and_sync(_arabic_bytes(), {"lang": ""}, "t", True) == _arabic_bytes()
     assert orch._hash_strategy.calls == 0 and orch._external_strategy.calls == 0
+
+    # A non-Arabic target now enters the pipeline and reaches the strategies.
+    await orch.evaluate_and_sync(_arabic_bytes(), {"lang": "eng"}, "t", True)
+    assert orch._hash_strategy.calls + orch._external_strategy.calls >= 1
 
 
 @pytest.mark.asyncio
