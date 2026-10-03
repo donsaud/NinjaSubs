@@ -1225,6 +1225,18 @@ MUTATIONS: tuple[Mutation, ...] = (
             "agreement, no structural refusal) may override the verifier's refusal"
         ),
     ),
+    # ----------------------------------------------------------------------- #
+    Mutation(
+        name="low-dialogue-anchor-distribution-ignored",
+        file="app/services/sync/reference.py",
+        old="    if health.dialogue_regions < MIN_DIALOGUE_REGIONS:",
+        new="    if False:  # MUTATION: cue count alone decides usability",
+        guards=(
+            "a reference whose dialogue is numerous but bunched into one stretch "
+            "anchors nothing away from that stretch; loosening the coverage floor is "
+            "only sound while the evidence still has to reach across the runtime"
+        ),
+    ),
 )
 
 

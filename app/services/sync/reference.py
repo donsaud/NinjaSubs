@@ -52,6 +52,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 from app.services.subtitle_matcher import parse_srt_cues
+from app.services.sync.large_offset import LARGE_OFFSET_CUES_PER_REGION
 from app.services.sync.structural import StructuralProfile, compare_structures
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,32 @@ logger = logging.getLogger(__name__)
 # cannot support a verified claim, however confident the alignment looks.
 MIN_REFERENCE_CUES = 12
 # Fraction of the target's runtime that must contain reference dialogue.
+#
+# This is now a PROFILE SELECTOR, not a usability gate. The figure is
+# ``len(dialogue) * 2_000 / span``, an estimate built on a 2s mean cue, so it
+# under-reports everything that runs long: a 97-minute feature carrying 903
+# dialogue cues scores 0.31 and was being discarded as ``reference_invalid``
+# while holding far more timing evidence than a dense 22-minute episode. It is
+# still measured and still reported, and it still separates dense content from
+# sparse content -- it just no longer decides usability on its own.
 MIN_DIALOGUE_COVERAGE = 0.55
+# How many equal portions of its own dialogue span a reference must populate.
+# Reuses the region count the large-offset gate already corroborates across, so
+# "spread across the runtime" means the same thing in both places.
+DIALOGUE_PROBE_REGIONS = 5
+# ...and how many of those portions must actually carry dialogue. Requiring a
+# majority rejects a reference whose cues are numerous but bunched into one
+# stretch of the film, which anchors nothing outside that stretch.
+MIN_DIALOGUE_REGIONS = 3
+# A LOW_DIALOGUE reference has to make up for the coverage it lacks with raw
+# evidence, so it needs enough cues to corroborate independently rather than
+# merely to exist: the same per-region bar the large-offset gate already
+# samples across, over the regions it requires. Twelve cues is the floor for
+# *any* claim, not a substitute for coverage -- a 12-cue file spread thin is an
+# anecdote, not a sample, while a feature-length one clears this comfortably.
+LOW_COVERAGE_MIN_DIALOGUE_CUES = (
+    LARGE_OFFSET_CUES_PER_REGION * MIN_DIALOGUE_REGIONS
+)
 # A cue longer than this is usually a stuck cue, not dialogue.
 MAX_CUE_DURATION_MS = 15_000
 # Fraction of cues allowed to be non-monotonic before the file is treated as
@@ -111,6 +137,20 @@ class ReferenceFailure(str, Enum):
     HARD_REJECTED = "reference_hard_rejected"
 
 
+class DialogueProfile(str, Enum):
+    """How much of a reference's own runtime carries observable dialogue.
+
+    ``STANDARD_DIALOGUE`` is the ordinary case. ``LOW_DIALOGUE`` marks a
+    reference that is genuinely sparse -- long feature-length films carry real
+    music and silence between lines -- and is deliberately *not* a verdict:
+    the same reference can still hold plenty of usable timing evidence, and the
+    decision on that is made by evidence count and spread, not by this label.
+    """
+
+    STANDARD_DIALOGUE = "standard_dialogue"
+    LOW_DIALOGUE = "low_dialogue"
+
+
 class ReferenceHealth(BaseModel):
     """Lightweight health signals, reusing the existing cue parser."""
 
@@ -120,6 +160,9 @@ class ReferenceHealth(BaseModel):
     last_dialogue_ms: int | None = None
     median_cue_duration_ms: float | None = None
     dialogue_coverage: float | None = None
+    # Equal portions of the reference's own dialogue span that contain dialogue.
+    dialogue_regions: int = 0
+    profile: DialogueProfile = DialogueProfile.STANDARD_DIALOGUE
     invalid_timing_rate: float = 0.0
     duplicate_cue_rate: float = 0.0
     backward_fraction: float = 0.0
@@ -247,6 +290,15 @@ def analyze_reference_health(
         health.last_dialogue_ms = dialogue[-1][1]
         span = max(1, dialogue[-1][1] - dialogue[0][0])
         health.dialogue_coverage = len(dialogue) * 2_000 / span
+        # How far the dialogue actually reaches. Cue count alone cannot tell a
+        # well-distributed reference from one whose lines are all bunched into
+        # the first act, and only the first can corroborate an alignment
+        # anywhere else in the film.
+        populated: set[int] = set()
+        for start, _end in dialogue:
+            offset = int((start - dialogue[0][0]) / span * DIALOGUE_PROBE_REGIONS)
+            populated.add(min(DIALOGUE_PROBE_REGIONS - 1, max(0, offset)))
+        health.dialogue_regions = len(populated)
         durations = sorted(end - start for start, end in dialogue)
         mid = len(durations) // 2
         health.median_cue_duration_ms = (
@@ -271,12 +323,37 @@ def analyze_reference_health(
         problems.append(f"{health.backward_fraction:.1%} of cues are non-monotonic")
     if health.long_cue_fraction > 0.10:
         problems.append(f"{health.long_cue_fraction:.1%} of cues are implausibly long")
+    # Coverage is reported and used to label the profile, never to reject on its
+    # own: the estimate assumes a 2s mean cue, so a long feature with plenty of
+    # dialogue scores low purely for running long. Usability is decided by the
+    # absolute cue floor above plus how far the dialogue reaches, which is what
+    # "enough observable evidence" actually means.
     if (
-        require_dialogue_coverage
-        and health.dialogue_coverage is not None
+        health.dialogue_coverage is not None
         and health.dialogue_coverage < MIN_DIALOGUE_COVERAGE
     ):
-        problems.append(f"dialogue covers only {health.dialogue_coverage:.0%} of the runtime")
+        health.profile = DialogueProfile.LOW_DIALOGUE
+        health.reasons.append(
+            f"dialogue covers {health.dialogue_coverage:.0%} of the runtime "
+            f"across {health.dialogue_regions} of {DIALOGUE_PROBE_REGIONS} regions "
+            f"({health.dialogue_cues} dialogue cues)"
+        )
+    if health.dialogue_regions < MIN_DIALOGUE_REGIONS:
+        problems.append(
+            f"dialogue occupies only {health.dialogue_regions} of "
+            f"{DIALOGUE_PROBE_REGIONS} timeline regions; there is nothing to "
+            "anchor against away from that stretch"
+        )
+    if (
+        health.profile is DialogueProfile.LOW_DIALOGUE
+        and health.dialogue_cues < LOW_COVERAGE_MIN_DIALOGUE_CUES
+    ):
+        problems.append(
+            f"dialogue covers {health.dialogue_coverage:.0%} of the runtime with "
+            f"only {health.dialogue_cues} cues (need "
+            f"{LOW_COVERAGE_MIN_DIALOGUE_CUES} to make up for it); too few "
+            "anchors to corroborate an alignment"
+        )
 
     # Repeated dialogue is normal - refrains, recurring phrases, a name spoken
     # often - so a high duplicate rate is recorded as a quality note rather than
