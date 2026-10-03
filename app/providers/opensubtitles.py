@@ -310,23 +310,8 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         else:
             mapped_langs = ["ara"]
 
-        params: dict[str, Any] = {
-            "imdb_id": numeric_id,
-            "type": "episode" if is_series else "movie",
-        }
-        if mapped_langs:
-            params["languages"] = ",".join(mapped_langs)
-
-        if is_series:
-            if season is not None:
-                params["season_number"] = int(season)
-            if episode is not None:
-                params["episode_number"] = int(episode)
-
-        if exclude_hi:
-            params["hearing_impaired"] = "exclude"
-
-        # Support OpenSubtitles MovieHash matching
+        # Resolve the MovieHash before building params, because it decides the
+        # shape of the whole query.
         v_hash = (
             moviehash
             or video_hash
@@ -341,11 +326,48 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
             or kwargs.get("moviebytesize")
             or kwargs.get("video_size")
         )
+        v_hash = str(v_hash).strip() if v_hash else ""
 
+        params: dict[str, Any] = {}
+
+        # A MovieHash identifies one exact file. Verified against the live API:
+        #
+        #   ?moviehash=H                       -> 2 rows, moviehash_match=true on both
+        #   ?moviehash=H&imdb_id=X            -> 50 rows, moviehash_match=false on ALL
+        #   ?moviehash=H&season_number=1      -> 0 rows
+        #   ?moviehash=H&moviebytesize=S      -> 2 rows, moviehash_match=true
+        #   ?moviehash=H&type=movie           -> 2 rows, moviehash_match=true
+        #
+        # Adding imdb_id makes the API quietly fall back to a plain IMDb search and
+        # return entirely unrelated rows with moviehash_match=false, which looks
+        # like a successful query but can never be an exact match. Sending
+        # imdb_id and season/episode alongside the hash therefore silently
+        # disabled the whole AutoSync reference path against the real service --
+        # while every mocked test still passed, because the trap is a property of
+        # the API, not of the code under test.
+        #
+        # So: with a hash present the hash alone decides. imdb_id and
+        # season/episode are omitted, which is also what the reference path
+        # requires -- identifiers must not stand in for hash verification.
         if v_hash:
-            params["moviehash"] = str(v_hash).strip()
-        if v_size:
-            params["moviebytesize"] = str(v_size).strip()
+            params["moviehash"] = v_hash
+            if v_size:
+                params["moviebytesize"] = str(v_size).strip()
+            params["type"] = "episode" if is_series else "movie"
+        else:
+            params["imdb_id"] = numeric_id
+            params["type"] = "episode" if is_series else "movie"
+            if is_series:
+                if season is not None:
+                    params["season_number"] = int(season)
+                if episode is not None:
+                    params["episode_number"] = int(episode)
+
+        if mapped_langs:
+            params["languages"] = ",".join(mapped_langs)
+
+        if exclude_hi:
+            params["hearing_impaired"] = "exclude"
 
         # A user JWT is optional here -- search is unlimited without one -- but
         # sending it is recommended by the API and required for a VIP host, and

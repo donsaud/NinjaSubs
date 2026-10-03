@@ -504,6 +504,104 @@ async def test_download_without_an_api_key_cannot_resolve_a_link():
 
 
 # ---------------------------------------------------------------------------
+# MovieHash query shape -- verified against the live API
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_moviehash_query_never_sends_imdb_id():
+    """Regression, found by a live smoke test.
+
+    Measured against the real service:
+
+        ?moviehash=H                 -> 2 rows, moviehash_match=true on both
+        ?moviehash=H&imdb_id=X       -> 50 rows, moviehash_match=false on ALL
+        ?moviehash=H&season_number=1 -> 0 rows
+        ?moviehash=H&moviebytesize=S -> 2 rows, moviehash_match=true
+        ?moviehash=H&type=movie      -> 2 rows, moviehash_match=true
+
+    Sending imdb_id alongside the hash makes OpenSubtitles fall back to a plain
+    IMDb search. It still answers HTTP 200 with plenty of plausible rows, so the
+    failure is invisible: the reference path just never sees
+    moviehash_match=true and can never obtain an exact reference. A nonsense
+    hash returns 0 rows, which is what proves the hash is honoured at all.
+    """
+    seen: dict = {}
+
+    def get(url, headers, params, kw):
+        seen.clear()
+        seen.update(params or {})
+        return Response(200, {"data": []})
+
+    stub = Stub(get=get)
+    await provider(stub).search_subtitles(
+        imdb_id="tt10872600",
+        is_series=False,
+        api_key=KEY,
+        languages=[],
+        moviehash="239f938f5b1d6ebd",
+        moviebytesize=9500000000,
+    )
+
+    assert seen["moviehash"] == "239f938f5b1d6ebd"
+    assert str(seen["moviebytesize"]) == "9500000000"
+    assert seen["type"] == "movie"
+    assert "imdb_id" not in seen, "imdb_id silently disables MovieHash matching"
+    assert "season_number" not in seen
+    assert "episode_number" not in seen
+
+
+@pytest.mark.asyncio
+async def test_a_series_moviehash_query_also_drops_season_and_episode():
+    seen: dict = {}
+
+    def get(url, headers, params, kw):
+        seen.clear()
+        seen.update(params or {})
+        return Response(200, {"data": []})
+
+    stub = Stub(get=get)
+    await provider(stub).search_subtitles(
+        imdb_id="tt0903747",
+        is_series=True,
+        season=1,
+        episode=2,
+        api_key=KEY,
+        languages=[],
+        moviehash="239f938f5b1d6ebd",
+    )
+    assert "imdb_id" not in seen
+    assert "season_number" not in seen
+    assert "episode_number" not in seen
+
+
+@pytest.mark.asyncio
+async def test_a_query_without_a_hash_is_unchanged():
+    """The normal provider path must keep using imdb_id and season/episode."""
+    seen: dict = {}
+
+    def get(url, headers, params, kw):
+        seen.clear()
+        seen.update(params or {})
+        return Response(200, {"data": []})
+
+    stub = Stub(get=get)
+    await provider(stub).search_subtitles(
+        imdb_id="tt0903747",
+        is_series=True,
+        season=1,
+        episode=2,
+        api_key=KEY,
+        languages=["ara"],
+    )
+    assert seen["imdb_id"] == "903747"
+    assert seen["season_number"] == 1
+    assert seen["episode_number"] == 2
+    assert seen["type"] == "episode"
+    assert "moviehash" not in seen
+
+
+# ---------------------------------------------------------------------------
 # Secrets never leak
 # ---------------------------------------------------------------------------
 

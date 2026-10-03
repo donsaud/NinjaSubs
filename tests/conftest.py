@@ -62,6 +62,32 @@ def settings_cache_points_at_tests():
 
 
 @pytest.fixture(autouse=True)
+def no_ambient_opensubtitles_credentials(monkeypatch):
+    """Strip OpenSubtitles credentials from the environment for every test.
+
+    ``app.config`` loads ``.env``, so a developer machine that has real
+    credentials configured silently changes test behaviour: provider code falls
+    back to ``settings.OPENSUBTITLES_*`` when a test passes an empty key, and
+    tests that assert "no key configured" or "a credential wins over the
+    environment" start failing for reasons that have nothing to do with the code
+    under test.
+
+    This also guarantees no test can accidentally authenticate against the real
+    service. Tests that need credentials pass them explicitly.
+    """
+    from app.config import settings
+
+    for name in (
+        "OPENSUBTITLES_API_KEY",
+        "OPENSUBTITLES_USERNAME",
+        "OPENSUBTITLES_PASSWORD",
+    ):
+        monkeypatch.setattr(settings, name, "", raising=False)
+        monkeypatch.delenv(name, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_request_context():
     """No sync log line may inherit a request id from another test."""
     from app.logging_context import current_request_id, set_request_id
