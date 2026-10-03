@@ -1,9 +1,11 @@
 """Regressions found by the autosync audit, exercised at cache and serving seams."""
 
 import asyncio
+import hashlib
 import os
 import shutil
 import subprocess
+import urllib.parse
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -19,6 +21,14 @@ from app.services.sync.orchestrator import SyncOrchestrator
 from app.services.sync.query import ReferenceQuery, ResolvedReference
 from app.services.sync_service import SubtitleSyncService
 from app.utils.config_parser import encode_user_config
+
+# The v3 endpoint has no numeric file id. The manifest keys the cache on
+# sha256(url) and carries the direct URL in ?u=, because an encoded URL cannot
+# live in a path parameter: the server decodes the path before routing, turning
+# %2F back into a real slash.
+_OS_DIRECT_URL = "https://subs5.strem.io/en/download/subencoding/file/42"
+_OS_CACHE_KEY = hashlib.sha256(_OS_DIRECT_URL.encode()).hexdigest()[:16]
+_OS_REF = f"{_OS_CACHE_KEY}.srt?u={urllib.parse.quote(_OS_DIRECT_URL, safe='')}"
 
 
 def _srt(shifts=None):
@@ -177,14 +187,14 @@ def test_request_playback_context_overrides_shared_search_metadata():
 async def test_opensubtitles_cached_route_runs_autosync(monkeypatch, enabled_sync):
     config = encode_user_config(auto_sync=True, subdl_key="current-key")
     request = Request({
-        "type": "http", "method": "GET", "path": f"/{config}/sub/opensubtitles/42.srt",
+        "type": "http", "method": "GET", "path": f"/{config}/sub/opensubtitles/{_OS_REF}",
         "query_string": b"imdb=tt1&filename=Movie.2020.BluRay-GRP.mkv", "headers": [],
     })
     monkeypatch.setattr(main.cache_manager, "get_subtitle", AsyncMock(return_value=_srt().encode()))
     monkeypatch.setattr(main.cache_manager, "get_metadata", lambda _: _meta())
     sync = AsyncMock(return_value=_srt([1] * 10).encode())
     monkeypatch.setattr(main, "_maybe_sync_subtitle", sync)
-    response = await main.proxy_opensubtitles_stream(42, request, config)
+    response = await main.proxy_opensubtitles_stream(_OS_CACHE_KEY, request, config)
     assert sync.await_count == 1
     args = sync.call_args.args
     assert args[1]["target_filename"] == "Movie.2020.BluRay-GRP.mkv"
@@ -236,7 +246,7 @@ async def test_external_cancellation_stops_provider_tasks(tmp_path):
 async def test_opensubtitles_fresh_routes_run_autosync(monkeypatch, enabled_sync, source):
     config = encode_user_config(auto_sync=True, subdl_key="current-key")
     request = Request({
-        "type": "http", "method": "GET", "path": "/sub/opensubtitles/42.srt",
+        "type": "http", "method": "GET", "path": f"/sub/opensubtitles/{_OS_REF}",
         "query_string": b"imdb=tt1&filename=Movie.2020.BluRay-GRP.mkv", "headers": [],
     })
     monkeypatch.setattr(main.cache_manager, "get_subtitle", AsyncMock(return_value=None))
@@ -253,7 +263,7 @@ async def test_opensubtitles_fresh_routes_run_autosync(monkeypatch, enabled_sync
     monkeypatch.setattr(main, "_fallback_download_subsource", AsyncMock(return_value=_srt().encode()))
     sync = AsyncMock(return_value=_srt([1] * 10).encode())
     monkeypatch.setattr(main, "_maybe_sync_subtitle", sync)
-    response = await main.proxy_opensubtitles_stream(42, request, config)
+    response = await main.proxy_opensubtitles_stream(_OS_CACHE_KEY, request, config)
     assert sync.await_count == 1
     assert sync.call_args.args[3] is True
     assert b"00:00:11,000" in response.body

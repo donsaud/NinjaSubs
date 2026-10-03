@@ -362,16 +362,6 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         )
         return results
 
-    async def get_download_url(self, file_id: int | str) -> str | None:
-        """No longer meaningful.
-
-        The v3 endpoint hands out a direct URL per result, so there is nothing
-        left to negotiate. Kept as a method because the base class and the
-        external-strategy download path call it.
-        """
-        logger.debug("[OpenSubtitles] get_download_url is a no-op for the v3 endpoint")
-        return None
-
     async def download_archive(
         self,
         download_ref: str,

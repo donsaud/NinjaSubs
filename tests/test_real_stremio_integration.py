@@ -14,7 +14,9 @@ all the way through the Stremio /subtitles endpoint response:
 7. Contract Fields: id, url, lang, title, format integrity
 """
 
+import hashlib
 import re
+import urllib.parse
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -27,12 +29,25 @@ from app.utils.config_parser import encode_user_config
 
 
 def get_release_name(item: dict) -> str:
-    sub_id = item["url"].rstrip("/").split("/")[-1].split(".")[0]
-    meta = cache_manager.get_metadata(sub_id)
-    if not meta and "_" in item.get("id", ""):
-        sub_id = item["id"].rsplit("_", 1)[-1]
-        meta = cache_manager.get_metadata(sub_id)
-    return meta.get("release_name", "") if meta else ""
+    # Drop the query string first: the serve URL carries ?imdb=...&filename=...
+    raw = item["url"].split("?", 1)[0].rstrip("/")
+    seg = raw.split("/")[-1]
+    # Strip only the trailing subtitle extension. A blanket split(".")[0] would
+    # also cut at the dot inside the percent-encoded upstream host.
+    for ext in (".srt", ".ass", ".ssa", ".vtt"):
+        if seg.lower().endswith(ext):
+            seg = seg[: -len(ext)]
+            break
+    # OpenSubtitles results carry the percent-encoded direct URL in the path,
+    # and its cache key is sha256(url)[:16]. Other providers key on sub_id.
+    candidates = [hashlib.sha256(urllib.parse.unquote(seg).encode()).hexdigest()[:16], seg]
+    if "_" in item.get("id", ""):
+        candidates.append(item["id"].rsplit("_", 1)[-1])
+    for key in candidates:
+        meta = cache_manager.get_metadata(key)
+        if meta:
+            return meta.get("release_name", "")
+    return ""
 
 
 @pytest.fixture
