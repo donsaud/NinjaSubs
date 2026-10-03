@@ -178,7 +178,7 @@ def test_opensubtitles_config_parsing_and_property():
     assert prefs.subdl_key == "subdl_1"
     assert prefs.subsource_key == "subsource_2"
     assert prefs.opensubtitles_key == "os_key_3"
-    assert prefs.opensubtitles_key == "os_key_3"  # legacy alias removed with the keyless move
+    assert prefs.opensubtitles_api_key == "os_key_3"
 
     # Query string format
     qs = "subdl=k1&subsource=k2&opensubtitles=os3"

@@ -688,12 +688,10 @@ def test_configure_page_shows_unified_provider_rows(client):
         "enableSubtitlecat",
     ):
         assert f'id="{toggle}"' in body
-    # SubDL and SubSource only; OpenSubtitles is keyless and badged Free / No Key.
-    assert body.count("Requires Key") == 2
+    assert body.count("Requires Key") == 3
     assert 'id="subdlKey"' in body
     assert 'id="subsourceKey"' in body
-    # OpenSubtitles is a plain toggle row now -- no collapsible key card.
-    assert 'id="opensubtitlesKey"' not in body
+    assert 'id="opensubtitlesKey"' in body
     # Semantic badge colors
     assert "bg-amber-500/10 text-amber-400 border-amber-500/20" in body
     assert "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" in body

@@ -1,45 +1,8 @@
-"""OpenSubtitles via Stremio's keyless v3 add-on endpoint.
-
-Why this endpoint
------------------
-The official ``api.opensubtitles.com`` REST API needs an ``Api-Key``, and its
-``/download`` endpoint additionally needs a user JWT -- so a working install
-required the user to paste a credential, and downloads were capped at the
-anonymous quota (5/day) without an account.
-
-``opensubtitles-v3.strem.io`` is the same catalogue exposed as a Stremio
-add-on. It needs no key, and every result carries a **direct download URL**, so
-the authenticated ``/download`` round-trip disappears entirely. Nothing in this
-module sends a credential, and none is accepted.
-
-Contract, verified against the live endpoint
---------------------------------------------
-``GET /subtitles/{type}/{id}/{extra}.json`` returns
-``{"subtitles": [{id, url, lang, subtitleFileName, movieReleaseName,
-releaseGroup, releaseFormat, SubEncoding, fpsMilli, season, episode, ...}]}``.
-
-Two behaviours worth knowing, both confirmed by probing rather than assumed:
-
-* **The endpoint does not filter.** It returns every language for the title
-  regardless of ``extra``, and ignores ``language=`` in the query string. So the
-  language filter is applied here, client-side, against the requested set.
-* **It does not filter on the hash either.** A request carrying ``videoHash`` +
-  ``videoSize`` returned the same 95 objects as a bare IMDb request, and the
-  response carries no hash field to confirm a match. The stream parameters are
-  still passed through, because the endpoint is free to start honouring them and
-  a narrower result set is strictly better. But no hash match is *claimed*
-  here: :attr:`SubtitleRelease.is_hash_match` stays False, because an unverified
-  claim would promote a subtitle to the top tier on evidence that does not
-  exist. Hash-tier ranking therefore remains available for providers that can
-  actually prove a match.
-"""
-
-from __future__ import annotations
+"""OpenSubtitles.com v1 REST API subtitle provider integration."""
 
 import logging
 import re
 import time
-import urllib.parse
 from typing import Any
 
 import httpx
@@ -47,14 +10,15 @@ import httpx
 from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
-from app.utils.language import normalize_to_iso639_2
+from app.providers.opensubtitles_auth import OPENSUBTITLES_TOKENS, OpenSubtitlesToken
+from app.utils.language import get_opensubtitles_lang_code, normalize_to_iso639_2
 from app.utils.uploader import extract_uploader
 
 logger = logging.getLogger("uvicorn.error")
 
 
 class OpenSubtitlesCircuitBreaker:
-    """Process-wide cooldown after the upstream rate-limits (HTTP 429) or fails."""
+    """Process-wide cooldown after OpenSubtitles rate-limits (HTTP 429) or quota exhaustion (HTTP 406)."""
 
     def __init__(self, default_cooldown: float = 3600.0) -> None:
         self.default_cooldown = default_cooldown
@@ -66,7 +30,7 @@ class OpenSubtitlesCircuitBreaker:
         self._open_until = time.monotonic() + duration
         self._reason = reason
         logger.warning(
-            "[OpenSubtitles] Circuit breaker tripped (%s); skipping OpenSubtitles requests for %.0fs",
+            "[OpenSubtitles] Circuit breaker tripped (%s); skipping OpenSubtitles downloads for %.0fs",
             reason or "Quota/RateLimit",
             duration,
         )
@@ -85,125 +49,76 @@ class OpenSubtitlesCircuitBreaker:
 
 OPENSUBTITLES_BREAKER = OpenSubtitlesCircuitBreaker()
 
-#: Maps an upstream ISO-639-2 code onto the code the endpoint actually returns,
-#: for the cases where they differ. Anything absent falls through to a
-#: normalised comparison, so this is an optimisation for correctness rather than
-#: a lookup table that has to be kept exhaustive.
-_LANG_ALIASES = {
-    "zho": "zho",
-    "chi": "zho",
-    "srp": "srp",
-    "slv": "slv",
-    "may": "may",
-    "msa": "may",
-}
-
-#: ``hearing_impaired`` is not a field in the v3 payload. These markers are what
-#: the upstream actually uses in release names for SDH tracks, so that is where
-#: the distinction has to come from.
-_HI_MARKERS = re.compile(r"(?i)\b(sdh|hi\b|hearing\s*impaired|for\s+the\s+deaf)")
-
-#: Extensions the endpoint serves. Used to label the format when the release
-#: name does not say.
-_FORMAT_BY_SUFFIX = {
-    "srt": "srt",
-    "sub": "sub",
-    "ass": "ass",
-    "ssa": "ssa",
-    "vtt": "vtt",
-    "smi": "smi",
-    "ttml": "ttml",
-}
-
-
-def _normalize_language(code: str | None) -> str:
-    """Upstream code -> the ISO-639-2 form this codebase filters on."""
-    raw = (code or "").strip().lower()
-    if not raw:
-        return ""
-    return _LANG_ALIASES.get(raw) or normalize_to_iso639_2(raw, default=raw)
-
 
 class OpenSubtitlesProvider(BaseSubtitleProvider):
-    """Subtitle provider backed by Stremio's keyless OpenSubtitles add-on."""
+    """Subtitle provider implementation for OpenSubtitles.com v1 REST API."""
 
     name = "opensubtitles"
-    BASE_URL = "https://opensubtitles-v3.strem.io"
+    BASE_URL = "https://api.opensubtitles.com/api/v1"
     USER_AGENT = "StremioArabicSubs v1.0.0"
 
     def is_breaker_open(self) -> bool:
         return OPENSUBTITLES_BREAKER.is_open()
 
-    def _get_headers(self) -> dict[str, str]:
-        """No credential header.
+    def _get_headers(self, api_key: str, token: str | None = None) -> dict[str, str]:
+        """Request headers for the v1 API.
 
-        The endpoint is keyless by design. Accepting an ``api_key`` argument here
-        would be actively misleading, so none is taken.
+        ``Api-Key`` identifies the application and is mandatory on every call.
+        ``Authorization`` carries the user JWT when one has been obtained; the
+        API recommends sending it on every request once authenticated, and a VIP
+        account's alternate host rejects requests that omit it.
         """
-        return {
+        headers = {
             "User-Agent": self.USER_AGENT,
+            "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        if api_key:
+            headers["Api-Key"] = api_key
+        if token:
+            headers["Authorization"] = token
+        return headers
 
-    @staticmethod
-    def _build_extra(
-        *,
-        video_hash: str | None,
-        video_size: int | str | None,
-        filename: str | None,
-        extra_params: dict[str, Any] | None,
-    ) -> str:
-        """URL-encoded extra segment for the path.
+    def _resolve_api_key(self, api_key: str | None) -> str:
+        return (api_key or getattr(settings, "OPENSUBTITLES_API_KEY", "") or "").strip()
 
-        Stremio's convention puts the query string in the path, URL-encoded as a
-        single segment: ``videoSize%3D123%26filename%3Dx``. ``urlencode`` alone
-        is not enough -- it escapes the values but leaves ``=`` and ``&``
-        literal, which would split the request's own query string at the ``&``
-        and silently drop everything after it.
-        """
-        params: dict[str, str] = {}
-        if filename:
-            params["filename"] = str(filename)
-        if video_size not in (None, ""):
-            params["videoSize"] = str(video_size)
-        if video_hash:
-            params["videoHash"] = str(video_hash)
-        for key, value in (extra_params or {}).items():
-            if value in (None, ""):
-                continue
-            params[str(key)] = str(value)
-        if not params:
-            return ""
-        return urllib.parse.quote(urllib.parse.urlencode(params), safe="")
-
-    def _build_url(
+    def _resolve_credentials(
         self,
-        *,
-        media_type: str,
-        imdb_id: str,
-        extra: str,
-        query: dict[str, Any] | None,
-    ) -> str:
-        path = f"/subtitles/{media_type}/{imdb_id}"
-        if extra:
-            path += f"/{extra}"
-        url = f"{self.BASE_URL}{path}.json"
-        # Anything the caller could not fit in `extra` still goes on the query
-        # string, which the endpoint accepts and ignores.
-        if query:
-            url += "?" + urllib.parse.urlencode(
-                {k: v for k, v in query.items() if v not in (None, "")}
-            )
-        return url
+        api_key: str | None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> tuple[str, str, str]:
+        """Effective ``(api_key, username, password)`` for this request.
 
-    @staticmethod
-    def _looks_hi(*texts: str | None) -> bool:
-        return any(bool(t and _HI_MARKERS.search(t)) for t in texts)
+        Per-request values win over the environment, which is what lets a user
+        supply their own account on a shared instance. The API key stays
+        mandatory: it identifies the consumer and cannot be replaced by a user
+        login.
+        """
+        return (
+            self._resolve_api_key(api_key),
+            (username or getattr(settings, "OPENSUBTITLES_USERNAME", "") or "").strip(),
+            password or getattr(settings, "OPENSUBTITLES_PASSWORD", "") or "",
+        )
 
-    @staticmethod
-    def _format_for(name: str) -> str:
-        suffix = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-        return _FORMAT_BY_SUFFIX.get(suffix, "srt")
+    async def _authenticate(
+        self,
+        client: httpx.AsyncClient,
+        api_key: str,
+        username: str,
+        password: str,
+    ) -> OpenSubtitlesToken | None:
+        """Fetch (or reuse) a user JWT. ``None`` means carry on unauthenticated."""
+        if not username or not password:
+            return None
+        return await OPENSUBTITLES_TOKENS.get_token(
+            client,
+            api_key=api_key,
+            username=username,
+            password=password,
+            base_url=self.BASE_URL,
+            user_agent=self.USER_AGENT,
+        )
 
     async def search_subtitles(
         self,
@@ -216,185 +131,312 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         api_key: str | None = None,
         languages: list[str] | None = None,
         exclude_hi: bool = False,
-        *,
         video_hash: str | None = None,
         video_size: int | str | None = None,
-        filename: str | None = None,
-        extra_params: dict[str, Any] | None = None,
+        moviehash: str | None = None,
+        moviebytesize: int | str | None = None,
+        username: str | None = None,
+        password: str | None = None,
         **kwargs,
     ) -> list[SubtitleRelease]:
-        """Query the keyless v3 endpoint and filter the result client-side.
-
-        ``api_key`` is part of the base-class signature and is accepted purely so
-        a caller that still passes one does not fail. It is ignored, with a log
-        line: the credential is no longer meaningful, and refusing would turn a
-        working provider into an error for anyone whose saved config still
-        carries a key from before the move to v3.
         """
-        if api_key:
-            logger.info(
-                "[OpenSubtitles] Ignoring a configured API key: this provider is keyless."
-            )
-
-        # Legacy aliases, still honoured so older call sites keep working.
-        v_hash = video_hash or kwargs.get("moviehash") or kwargs.get("videoHash")
-        v_size = video_size or kwargs.get("moviebytesize") or kwargs.get("videoSize")
-
-        clean_imdb = str(imdb_id).split(":")[0].strip()
-        media_type = "series" if is_series else "movie"
-
-        # The breaker is consulted before building anything. Without this a
-        # rate-limited upstream keeps absorbing a request per subtitle lookup for
-        # the whole cooldown.
-        if OPENSUBTITLES_BREAKER.is_open():
-            logger.info(
-                "[OpenSubtitles] Circuit breaker open (%.0fs remaining); skipping search for %s",
-                OPENSUBTITLES_BREAKER.remaining,
-                clean_imdb,
-            )
+        Query OpenSubtitles.com v1 REST API for subtitles by IMDb ID and optional MovieHash.
+        Gracefully skips if no API key is configured.
+        """
+        effective_key, effective_user, effective_pass = self._resolve_credentials(
+            api_key, username, password
+        )
+        if not effective_key:
+            logger.info("OpenSubtitles API key is not configured. Skipping OpenSubtitles search.")
             return []
 
-        query: dict[str, Any] = {}
+        # Clean IMDb ID: strip compound series markers (:s:e) and leading "tt"
+        clean_imdb = str(imdb_id).split(":")[0].strip()
+        try:
+            numeric_id = str(int(re.sub(r"[^0-9]", "", clean_imdb)))
+        except (ValueError, TypeError):
+            numeric_id = clean_imdb.replace("tt", "").lstrip("0") or "0"
+
+        # Languages mapped from ISO-639-2 to ISO-639-1 (e.g. "ara" -> "ar")
+        target_langs = languages or ["ara"]
+        mapped_langs = list(dict.fromkeys([get_opensubtitles_lang_code(lang) for lang in target_langs]))
+
+        params: dict[str, Any] = {
+            "imdb_id": numeric_id,
+            "languages": ",".join(mapped_langs) if mapped_langs else "ar",
+            "type": "episode" if is_series else "movie",
+        }
+
         if is_series:
             if season is not None:
-                query["season"] = season
+                params["season_number"] = int(season)
             if episode is not None:
-                query["episode"] = episode
+                params["episode_number"] = int(episode)
 
-        extra = self._build_extra(
-            video_hash=v_hash,
-            video_size=v_size,
-            filename=filename,
-            extra_params=extra_params,
+        if exclude_hi:
+            params["hearing_impaired"] = "exclude"
+
+        # Support OpenSubtitles MovieHash matching
+        v_hash = (
+            moviehash
+            or video_hash
+            or kwargs.get("videoHash")
+            or kwargs.get("moviehash")
+            or kwargs.get("video_hash")
         )
-        url = self._build_url(
-            media_type=media_type, imdb_id=clean_imdb, extra=extra, query=query
+        v_size = (
+            moviebytesize
+            or video_size
+            or kwargs.get("videoSize")
+            or kwargs.get("moviebytesize")
+            or kwargs.get("video_size")
         )
 
-        wanted = {
-            _normalize_language(code) for code in (languages or ["ara"])
-        }
-        wanted.discard("")
+        if v_hash:
+            params["moviehash"] = str(v_hash).strip()
+        if v_size:
+            params["moviebytesize"] = str(v_size).strip()
+
+        # A user JWT is optional here -- search is unlimited without one -- but
+        # sending it is recommended by the API and required for a VIP host, and
+        # it is what raises the download quota the results will later draw on.
+        token = await self._authenticate(
+            self.client, effective_key, effective_user, effective_pass
+        )
+        headers = self._get_headers(effective_key, token.token if token else None)
+        base_url = token.base_url if token else self.BASE_URL
+        url = f"{base_url}/subtitles"
 
         try:
-            logger.info(f"[OpenSubtitles Request] Outbound URL: {url}")
+            logger.info(f"[OpenSubtitles Request] Outbound URL: {url} | Params: {params}")
             resp = await self.client.get(
                 url,
-                headers=self._get_headers(),
+                params=params,
+                headers=headers,
                 timeout=settings.UPSTREAM_TIMEOUT,
                 follow_redirects=True,
             )
-        except Exception as exc:
-            logger.error(
-                f"[OpenSubtitles] Request error for {imdb_id}: {type(exc).__name__}"
-            )
-            return []
 
-        if resp.status_code == 429:
-            OPENSUBTITLES_BREAKER.trip(60.0, reason="HTTP 429")
-            return []
-        if resp.status_code != 200:
-            logger.warning(
-                f"[OpenSubtitles] Unexpected status {resp.status_code} for {clean_imdb}"
-            )
-            return []
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                except Exception as json_err:
+                    logger.warning(f"[OpenSubtitles] JSON decode error: {json_err}")
+                    return []
 
-        try:
-            payload = resp.json()
-        except Exception as exc:
-            logger.warning(f"[OpenSubtitles] JSON decode error: {type(exc).__name__}")
-            return []
+                raw_items = data.get("data", []) if isinstance(data, dict) else []
+                logger.info(f"[OpenSubtitles Response] Total items received: {len(raw_items)}")
 
-        raw_items = payload.get("subtitles") if isinstance(payload, dict) else None
-        if not isinstance(raw_items, list):
-            return []
-        logger.info(f"[OpenSubtitles Response] Total items received: {len(raw_items)}")
+                results: list[SubtitleRelease] = []
+                for item in raw_items:
+                    if not isinstance(item, dict):
+                        continue
+                    attributes = item.get("attributes", {})
+                    files = attributes.get("files", [])
+                    file_id = None
+                    file_name = None
+                    if isinstance(files, list) and files:
+                        file_id = files[0].get("file_id")
+                        file_name = files[0].get("file_name")
 
-        results: list[SubtitleRelease] = []
-        skipped_language = 0
-        for item in raw_items:
-            if not isinstance(item, dict):
-                continue
-            direct_url = str(item.get("url") or "").strip()
-            if not direct_url.lower().startswith(("http://", "https://")):
-                continue
+                    if not file_id:
+                        continue
 
-            norm_lang = _normalize_language(item.get("lang"))
-            if wanted and norm_lang not in wanted:
-                # The endpoint returns every language for the title, so this is
-                # where the language filter actually happens.
-                skipped_language += 1
-                continue
+                    # Extract release name
+                    release_name = (
+                        attributes.get("release")
+                        or file_name
+                        or f"{imdb_id}.OpenSubtitles.{file_id}"
+                    )
+                    release_name = str(release_name).strip()
 
-            file_name = str(item.get("subtitleFileName") or "").strip()
-            release_name = (
-                str(item.get("movieReleaseName") or "").strip()
-                or file_name
-                or f"{clean_imdb}.OpenSubtitles.{item.get('id', '')}".strip(".")
-            )
+                    # Extract language
+                    raw_lang = attributes.get("language") or "ar"
+                    norm_lang = normalize_to_iso639_2(raw_lang, default="ara")
 
-            if exclude_hi and self._looks_hi(release_name, file_name):
-                continue
+                    # Hearing impaired handling
+                    is_hi = bool(attributes.get("hearing_impaired"))
+                    if exclude_hi and is_hi:
+                        continue
 
-            results.append(
-                SubtitleRelease(
-                    release_name=release_name,
-                    # The v3 endpoint's whole point: a direct, credential-free URL.
-                    download_url=direct_url,
-                    provider=self.name,
-                    lang=norm_lang or "ara",
-                    format=self._format_for(file_name or release_name),
-                    uploader=extract_uploader(release_name),
-                    # No hash match is claimed. The endpoint does not filter on
-                    # the hash and does not report one, so asserting a match would
-                    # promote this to the hash tier on evidence that is absent.
-                    is_hash_match=False,
-                    matched_by_hash=False,
+                    # Uploader/author username (e.g. attributes.uploader.name)
+                    uploader = extract_uploader(attributes)
+
+                    is_hash_match = (
+                        bool(params.get("moviehash")) and attributes.get("moviehash_match") is True
+                    )
+
+                    file_name_lower = str(file_name or "").lower()
+                    sub_fmt = "srt"
+                    if file_name_lower.endswith(".ass"):
+                        sub_fmt = "ass"
+                    elif file_name_lower.endswith(".ssa"):
+                        sub_fmt = "ssa"
+                    elif file_name_lower.endswith(".vtt"):
+                        sub_fmt = "vtt"
+                    elif attributes.get("format"):
+                        fmt_attr = str(attributes.get("format")).lower()
+                        if fmt_attr in ("ass", "ssa", "vtt", "srt"):
+                            sub_fmt = fmt_attr
+
+                    url = f"/sub/opensubtitles/{file_id}.{sub_fmt}"
+                    results.append(
+                        SubtitleRelease(
+                            release_name=release_name,
+                            download_url=url,
+                            provider="opensubtitles",
+                            format=sub_fmt,
+                            hearing_impaired=is_hi,
+                            lang=norm_lang,
+                            is_hash_match=is_hash_match,
+                            matched_by_hash=is_hash_match,
+                            uploader=uploader,
+                        )
+                    )
+
+                logger.info(f"[OpenSubtitles Response] Total items found: {len(results)}")
+                return results
+
+            elif resp.status_code in (401, 403):
+                logger.warning(
+                    f"[OpenSubtitles] Authentication failed (HTTP {resp.status_code}). Check OPENSUBTITLES_API_KEY."
                 )
-            )
+                return []
+            elif resp.status_code == 429:
+                logger.warning("[OpenSubtitles] Rate limit reached (HTTP 429).")
+                return []
+            else:
+                logger.warning(
+                    f"[OpenSubtitles] Unexpected HTTP {resp.status_code} for {imdb_id}: {resp.text[:300]}"
+                )
+                return []
 
-        logger.info(
-            "[OpenSubtitles] %d result(s) after filtering (skipped %d for language, "
-            "requested %s)",
-            len(results),
-            skipped_language,
-            ",".join(sorted(wanted)) or "any",
-        )
-        return results
+        except httpx.TimeoutException:
+            logger.warning(f"[OpenSubtitles] Query timed out for {imdb_id}")
+            return []
+        except Exception as e:
+            logger.error(f"[OpenSubtitles] Search error for {imdb_id}: {e}", exc_info=True)
+            return []
 
-    async def get_download_url(self, file_id: int | str) -> str | None:
-        """No longer meaningful.
-
-        The v3 endpoint hands out a direct URL per result, so there is nothing
-        left to negotiate. Kept as a method because the base class and the
-        external-strategy download path call it.
+    async def get_download_url(
+        self,
+        file_id: int,
+        api_key: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> str | None:
         """
-        logger.debug("[OpenSubtitles] get_download_url is a no-op for the v3 endpoint")
-        return None
+        Request temporary download link for subtitle file_id via POST /api/v1/download.
+
+        This is one of the two endpoints OpenSubtitles documents as requiring
+        user authentication, so the JWT is not optional in practice: without it
+        the call falls back to the anonymous quota (5/day) instead of the
+        account's. Search does not have this requirement, which is why the
+        credential only becomes load-bearing here.
+        """
+        if OPENSUBTITLES_BREAKER.is_open():
+            logger.info(
+                "[OpenSubtitles] Circuit breaker open (%.0fs remaining); skipping download request for file %s",
+                OPENSUBTITLES_BREAKER.remaining,
+                file_id,
+            )
+            return None
+
+        effective_key, effective_user, effective_pass = self._resolve_credentials(
+            api_key, username, password
+        )
+        if not effective_key:
+            logger.error("[OpenSubtitles Download Fail] Missing API key")
+            return None
+
+        client = (
+            self.client
+            if self.client is not None
+            else httpx.AsyncClient(timeout=10.0, follow_redirects=True)
+        )
+        should_close = self.client is None
+        try:
+            token = await self._authenticate(
+                client, effective_key, effective_user, effective_pass
+            )
+            headers = self._get_headers(effective_key, token.token if token else None)
+            base_url = token.base_url if token else self.BASE_URL
+            res = await client.post(
+                f"{base_url}/download",
+                headers=headers,
+                json={"file_id": int(file_id)},
+                follow_redirects=True,
+            )
+            if res.status_code in (200, 201):
+                return res.json().get("link")
+
+            if res.status_code == 401 and token is not None:
+                # A cached token can be revoked or expire early. Drop it so the
+                # next attempt logs in again rather than reusing a dead token.
+                OPENSUBTITLES_TOKENS.invalidate(
+                    effective_key, effective_user, effective_pass
+                )
+                logger.warning(
+                    "[OpenSubtitles Download Fail] Cached token rejected; will re-authenticate"
+                )
+
+            if res.status_code in (406, 429):
+                delay = 3600.0 if res.status_code == 406 else 60.0
+                try:
+                    data = res.json()
+                    reset_unix = data.get("reset_time_unix")
+                    if reset_unix:
+                        diff = float(reset_unix) - time.time()
+                        delay = max(60.0, min(diff, 86400.0))
+                except Exception:
+                    pass
+                OPENSUBTITLES_BREAKER.trip(delay, reason=f"HTTP {res.status_code}")
+
+            logger.error(
+                f"[OpenSubtitles Download Fail] Status: {res.status_code} | {res.text[:200]}"
+            )
+            return None
+        except Exception as e:
+            logger.error(f"[OpenSubtitles Download Fail] Exception: {e}")
+            return None
+        finally:
+            if should_close:
+                await client.aclose()
 
     async def download_archive(
         self,
         download_ref: str,
         api_key: str | None = None,
-        **kwargs,
+        username: str | None = None,
+        password: str | None = None,
     ) -> bytes | None:
-        """Fetch a subtitle from the direct URL the search returned.
-
-        ``download_ref`` may be that URL, or an internal ``/sub/opensubtitles/...``
-        reference; both are resolved here. ``api_key`` is accepted and ignored.
+        """
+        Download subtitle file from OpenSubtitles.
+        Resolves direct download URL via get_download_url using file_id.
         """
         if OPENSUBTITLES_BREAKER.is_open():
             logger.info(
-                "[OpenSubtitles Download] Circuit breaker open (%.0fs remaining); skipping %s",
+                "[OpenSubtitles Download] Circuit breaker open (%.0fs remaining); skipping download for %s",
                 OPENSUBTITLES_BREAKER.remaining,
                 download_ref,
             )
             return None
 
-        target_url = self._resolve_download_url(download_ref)
+        effective_key, _, _ = self._resolve_credentials(api_key, username, password)
+
+        m = re.search(r"(\d+)(?:\.srt)?$", str(download_ref).strip())
+        file_id = int(m.group(1)) if m else None
+
+        direct_link: str | None = None
+        if file_id and effective_key:
+            direct_link = await self.get_download_url(
+                file_id, effective_key, username=username, password=password
+            )
+
+        target_url = direct_link or (download_ref if str(download_ref).startswith("http") else None)
         if not target_url:
             logger.warning(
-                f"[OpenSubtitles Download] No usable URL for reference {download_ref}"
+                f"[OpenSubtitles Download] No valid download URL resolved for {download_ref}"
             )
             return None
 
@@ -405,39 +447,19 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
         )
         should_close = self.client is None
         try:
-            resp = await client.get(
-                target_url,
-                headers={"User-Agent": self.USER_AGENT},
-                follow_redirects=True,
-                timeout=settings.UPSTREAM_TIMEOUT,
-            )
-            if resp.status_code == 200 and resp.content:
-                return resp.content
-            if resp.status_code == 429:
-                OPENSUBTITLES_BREAKER.trip(60.0, reason="HTTP 429")
+            logger.info(f"[OpenSubtitles Download] Downloading content from {target_url}")
+            dl_resp = await client.get(target_url, follow_redirects=True)
+            if dl_resp.status_code == 200 and dl_resp.content:
+                return dl_resp.content
             logger.warning(
-                f"[OpenSubtitles Download] Status {resp.status_code} for {target_url}"
+                f"[OpenSubtitles Download] Download failed with HTTP {dl_resp.status_code}"
             )
             return None
-        except Exception as exc:
-            logger.error(f"[OpenSubtitles Download] Exception: {type(exc).__name__}")
+        except Exception as dl_err:
+            logger.warning(
+                f"[OpenSubtitles Download] Error downloading content from {target_url}: {dl_err}"
+            )
             return None
         finally:
             if should_close:
                 await client.aclose()
-
-    def _resolve_download_url(self, download_ref: str) -> str | None:
-        """Turn whatever the caller holds into a fetchable URL."""
-        ref = str(download_ref or "").strip()
-        if ref.lower().startswith(("http://", "https://")):
-            return ref
-        # An internal reference carries the upstream URL itself. Older cached
-        # entries stored a bare numeric file_id, which the v3 endpoint cannot
-        # resolve at all -- returning None makes that a clean miss rather than a
-        # request to the wrong host.
-        m = re.fullmatch(r"/sub/opensubtitles/([^/]+)\.srt", ref)
-        if m:
-            candidate = urllib.parse.unquote(m.group(1))
-            if candidate.lower().startswith(("http://", "https://")):
-                return candidate
-        return None
