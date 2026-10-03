@@ -5,7 +5,6 @@
 """
 
 import re
-import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,21 +13,6 @@ from app.models import SubtitleRelease, UserPreferences
 from app.services.aggregator import aggregate_subtitles, format_informative_badge
 from app.services.subtitle_matcher import rank_subtitles
 from app.utils.config_parser import encode_user_config, parse_user_config
-
-_OS_DIRECT_URL = "https://download.opensubtitles.com/temp/x.srt"
-_OS_CACHE_KEY = (
-    __import__("hashlib").sha256(_OS_DIRECT_URL.encode()).hexdigest()[:16]
-)
-
-
-def _os_ref() -> str:
-    """Serve-path segment plus the ?u= carrying the direct URL.
-
-    The v3 endpoint has no numeric file id, and an encoded URL cannot sit in a
-    path parameter (the server decodes the path before routing, so %2F becomes a
-    real slash). The URL therefore rides in ?u=, which routing leaves alone.
-    """
-    return f"{_OS_CACHE_KEY}.srt?u={urllib.parse.quote(_OS_DIRECT_URL, safe='')}"
 
 # ============================================================================
 # 1. PREFERENCE SERIALIZATION
@@ -134,10 +118,14 @@ async def test_rtl_fix_toggle_controls_served_content(client):
         mock_http = AsyncMock()
         mock_http.get = AsyncMock(return_value=mock_resp)
         with (
+            patch(
+                "app.providers.opensubtitles.OpenSubtitlesProvider.get_download_url",
+                new=AsyncMock(return_value="https://download.opensubtitles.com/temp/x.srt"),
+            ),
             patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
             patch("app.main._http_client", new=mock_http),
         ):
-            resp = client.get(f"/{cfg}/sub/opensubtitles/{_os_ref()}.srt")
+            resp = client.get(f"/{cfg}/sub/opensubtitles/{700 + int(enabled)}.srt")
             assert resp.status_code == 200
             if expect_rlm:
                 assert rlm in resp.content
@@ -225,10 +213,14 @@ async def test_ad_removal_toggle_controls_served_content(client):
         mock_http = AsyncMock()
         mock_http.get = AsyncMock(return_value=mock_resp)
         with (
+            patch(
+                "app.providers.opensubtitles.OpenSubtitlesProvider.get_download_url",
+                new=AsyncMock(return_value="https://download.opensubtitles.com/temp/y.srt"),
+            ),
             patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
             patch("app.main._http_client", new=mock_http),
         ):
-            resp = client.get(f"/{cfg}/sub/opensubtitles/{_os_ref()}.srt")
+            resp = client.get(f"/{cfg}/sub/opensubtitles/{900 + int(enabled)}.srt")
             assert resp.status_code == 200
             if expect_ad:
                 assert b"www.adsite.com" in resp.content
@@ -290,10 +282,14 @@ async def test_keep_translator_credits_toggle_controls_served_content(client):
         mock_http = AsyncMock()
         mock_http.get = AsyncMock(return_value=mock_resp)
         with (
+            patch(
+                "app.providers.opensubtitles.OpenSubtitlesProvider.get_download_url",
+                new=AsyncMock(return_value="https://download.opensubtitles.com/temp/z.srt"),
+            ),
             patch("app.cache.cache_manager.get_subtitle", new=AsyncMock(return_value=None)),
             patch("app.main._http_client", new=mock_http),
         ):
-            resp = client.get(f"/{cfg}/sub/opensubtitles/{_os_ref()}.srt")
+            resp = client.get(f"/{cfg}/sub/opensubtitles/{1200 + int(keep)}.srt")
             assert resp.status_code == 200
             assert b"www.adsite.com" not in resp.content
             if expect_credit:

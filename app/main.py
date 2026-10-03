@@ -944,36 +944,14 @@ async def _fetch_subtitles_handler(
 
         # Subtitle URL: if config_str is present, maintain path prefix
         if rel_prov == "opensubtitles":
-            # The v3 endpoint hands out a direct URL per result and has no
-            # numeric file id, so the URL has to reach the serve route or a cold
-            # cache has nothing to fetch from.
-            #
-            # It travels as the `u` query parameter, not in the path: a
-            # percent-encoded URL contains %2F, and the ASGI server decodes the
-            # path before routing, which turns those back into real slashes and
-            # makes the path param unmatchable. Query strings are not decoded
-            # for routing, so this survives intact.
-            direct_url = (rel.download_url or "").strip()
-            if not direct_url.lower().startswith(("http://", "https://")):
-                # Nothing fetchable; keep the generic sub_id path so this entry
-                # degrades to a clean miss rather than requesting a bad host.
-                direct_url = ""
-            # Cache key derived from the URL: stable across restarts and unique
-            # per result. Scraping digits out of the URL collided every result
-            # onto the same few ids, which served one subtitle for all of them.
-            file_id = (
-                hashlib.sha256(direct_url.encode("utf-8")).hexdigest()[:16]
-                if direct_url
-                else sub_id
-            )
+            m_fid = re.search(r"(\d+)", rel.download_url)
+            file_id = m_fid.group(1) if m_fid else sub_id
             cache_manager.store_metadata(str(file_id), meta_dict)
             sub_url = (
                 f"{base_url}/{config_str}/sub/opensubtitles/{file_id}.{sub_format}"
                 if config_str
                 else f"{base_url}/sub/opensubtitles/{file_id}.{sub_format}"
             )
-            if direct_url:
-                sub_url = f"{sub_url}?u={urllib.parse.quote(direct_url, safe='')}"
         else:
             sub_url = (
                 f"{base_url}/{config_str}/sub/{sub_id}.{sub_format}"
@@ -994,9 +972,7 @@ async def _fetch_subtitles_handler(
             stream_url=stream_url,
         )
         if context_qs:
-            # OpenSubtitles URLs already carry ?u=<direct url>, so append with
-            # & rather than starting a second query string.
-            sub_url = f"{sub_url}{'&' if '?' in sub_url else '?'}{context_qs}"
+            sub_url = f"{sub_url}?{context_qs}"
 
         subtitle_items.append(
             SubtitleItem(
@@ -2526,23 +2502,8 @@ async def _serve_subtitle_handler(
 @app.api_route("/{config}/sub/opensubtitles/{file_id}.srt", methods=["GET", "HEAD"])
 @app.api_route("/{config}/sub/opensubtitles/{file_id}.ass", methods=["GET", "HEAD"])
 @app.api_route("/{config}/sub/opensubtitles/{file_id}.vtt", methods=["GET", "HEAD"])
-async def proxy_opensubtitles_stream(file_id: str, request: Request, config: str | None = None):
-    """Proxy an OpenSubtitles result with UTF-8 transcoding and local caching.
-
-    ``file_id`` is the percent-encoded direct URL the v3 endpoint returned for
-    this result (the manifest builder puts it there). It is deliberately a
-    string: there is no numeric id to resolve any more, and the URL is the only
-    thing that identifies the result once the cache is cold.
-    """
-    # `file_id` is the sha256 cache key the manifest builder assigned. The
-    # upstream URL rides along in ?u= because the ASGI server decodes the path
-    # before routing, so an encoded URL cannot live in a path parameter.
-    direct_url = (request.query_params.get("u") or "").strip()
-    if not direct_url.lower().startswith(("http://", "https://")):
-        # No usable URL (a legacy entry, or a malformed ?u): a clean miss
-        # rather than a request to the wrong host.
-        direct_url = ""
-    cache_key = str(file_id)
+async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str | None = None):
+    """Proxy OpenSubtitles stream with UTF-8 transcoding and local caching."""
     # Determine requested format from route
     path = request.url.path.lower()
     if path.endswith(".vtt"):
@@ -2622,14 +2583,14 @@ async def proxy_opensubtitles_stream(file_id: str, request: Request, config: str
 
     async def _sync_payload(payload: bytes, meta: dict | None) -> bytes:
         return await _sync_subtitle_for_response(
-            payload, meta, _media_context_from_request(request), cache_key, cfg_prefs,
+            payload, meta, _media_context_from_request(request), str(file_id), cfg_prefs,
             auto_sync_enabled, convert_ass_enabled,
         )
 
     # 1. Check local disk cache first
-    cached_content = await cache_manager.get_subtitle(cache_key)
+    cached_content = await cache_manager.get_subtitle(str(file_id))
     if cached_content:
-        meta = cache_manager.get_metadata(cache_key)
+        meta = cache_manager.get_metadata(str(file_id))
         media_ctx = _media_context_from_request(request)
         req_season = media_ctx.get("season")
         req_episode = media_ctx.get("episode")
@@ -2652,11 +2613,11 @@ async def proxy_opensubtitles_stream(file_id: str, request: Request, config: str
         if mismatch:
             logger.warning(
                 "[cache] detected cross-episode collision for OpenSubtitles %s (req: S%sE%s, cached: S%sE%s) -> invalidating stale cache",
-                cache_key, req_season, req_episode, meta_season, meta_episode,
+                file_id, req_season, req_episode, meta_season, meta_episode,
             )
             cached_content = None
         else:
-            release_name = meta.get("release_name", cache_key) if meta else cache_key
+            release_name = meta.get("release_name", file_id) if meta else file_id
             cached_content = await _sync_payload(cached_content, meta)
             return _build_subtitle_response(
                 cached_content,
@@ -2696,10 +2657,15 @@ async def proxy_opensubtitles_stream(file_id: str, request: Request, config: str
             or ""
         )
 
-    # 3. Fetch the direct URL the v3 endpoint gave us. No negotiation step: the
-    #    search result already carried a fetchable link.
+    # 3. Attempt to fetch OpenSubtitles temporary download URL and download content directly
     global _http_client
-    download_url = direct_url
+    if _http_client is None:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            opensubtitles_provider = OpenSubtitlesProvider(client)
+            download_url = await opensubtitles_provider.get_download_url(file_id)
+    else:
+        opensubtitles_provider = OpenSubtitlesProvider(_http_client)
+        download_url = await opensubtitles_provider.get_download_url(file_id)
 
     if download_url:
         dl_client = _http_client
@@ -2710,12 +2676,12 @@ async def proxy_opensubtitles_stream(file_id: str, request: Request, config: str
         try:
             dl_resp = await dl_client.get(download_url, follow_redirects=True)
             if dl_resp.status_code == 200 and dl_resp.content:
-                meta = cache_manager.get_metadata(cache_key)
-                release_name = meta.get("release_name", cache_key) if meta else cache_key
+                meta = cache_manager.get_metadata(str(file_id))
+                release_name = meta.get("release_name", file_id) if meta else file_id
                 sub_bytes = transcode_to_utf8(
                     dl_resp.content, lang=(meta.get("lang") if meta else None)
                 )
-                await cache_manager.save_subtitle(cache_key, sub_bytes)
+                await cache_manager.save_subtitle(str(file_id), sub_bytes)
                 sub_bytes = await _sync_payload(sub_bytes, meta)
                 return _build_subtitle_response(
                     sub_bytes,
@@ -2744,10 +2710,10 @@ async def proxy_opensubtitles_stream(file_id: str, request: Request, config: str
                 await dl_client.aclose()
 
     # 4. OpenSubtitles failed / quota exceeded: Fallback to Subsource
-    meta = cache_manager.get_metadata(cache_key)
+    meta = cache_manager.get_metadata(str(file_id))
     if meta and meta.get("imdb_id"):
         logger.warning(
-            f"OpenSubtitles download_url failed/limit reached for file_id {cache_key}. "
+            f"OpenSubtitles download_url failed/limit reached for file_id {file_id}. "
             f"Attempting fallback to Subsource for {meta.get('imdb_id')}..."
         )
         # Never sourced from cached metadata (stripped on write, sanitized on
@@ -2772,14 +2738,14 @@ async def proxy_opensubtitles_stream(file_id: str, request: Request, config: str
         )
         if fallback_bytes:
             logger.info(
-                f"OpenSubtitles fallback succeeded for cache key {cache_key} ({len(fallback_bytes)} bytes)"
+                f"OpenSubtitles fallback succeeded for file_id {file_id} ({len(fallback_bytes)} bytes)"
             )
-            cache_manager.store_metadata(cache_key, meta)
-            await cache_manager.save_subtitle(cache_key, fallback_bytes)
+            cache_manager.store_metadata(str(file_id), meta)
+            await cache_manager.save_subtitle(str(file_id), fallback_bytes)
             fallback_bytes = await _sync_payload(fallback_bytes, meta)
             return _build_subtitle_response(
                 fallback_bytes,
-                meta.get("release_name", cache_key),
+                meta.get("release_name", file_id),
                 req_fmt,
                 rtl_fix_enabled,
                 ad_removal_enabled,

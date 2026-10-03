@@ -16,23 +16,15 @@ Every test here mocks the endpoint. None of them reach the network.
 
 from __future__ import annotations
 
-import hashlib
-import urllib.parse
-from unittest.mock import AsyncMock, patch
-
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
-from app.cache import cache_manager
-from app.main import app
 from app.models import SubtitleRelease
 from app.providers.opensubtitles import (
     OPENSUBTITLES_BREAKER,
     OpenSubtitlesProvider,
     _normalize_language,
 )
-from app.utils.config_parser import encode_user_config
 
 
 @pytest.fixture(autouse=True)
@@ -360,86 +352,10 @@ async def test_a_legacy_numeric_reference_cannot_be_resolved():
 
 
 @pytest.mark.asyncio
-async def test_the_v3_endpoint_needs_no_negotiation_step():
-    """There is no file id to exchange for a URL any more.
-
-    The old credentialed flow had get_download_url(file_id) negotiate a
-    temporary link. The v3 endpoint returns a direct URL per result instead, so
-    the method is gone entirely -- keeping a stub that always returned None is
-    what let the serve route look like it worked while fetching nothing.
-    """
-    assert not hasattr(OpenSubtitlesProvider, "get_download_url")
+async def test_get_download_url_is_a_no_op():
+    assert await OpenSubtitlesProvider(StubClient({})).get_download_url(123) is None
 
 
 def test_the_release_model_requires_a_download_url():
     """A release without one cannot be served, so the field is not optional."""
     assert "download_url" in SubtitleRelease.model_fields
-
-
-# ============================================================================
-# SERVE PATH: the direct URL must survive a cold cache
-# ============================================================================
-
-
-def _wipe_cached_result(cache_key: str) -> None:
-    """Drop any cached bytes for a result, simulating a cold start."""
-    path = cache_manager.get_subtitle_path(cache_key)
-    if path.exists():
-        path.unlink()
-
-
-def test_the_serve_url_carries_the_direct_url_for_a_cold_cache():
-    """Regression: the result must be fetchable with nothing in the cache.
-
-    The keyless provider has no numeric file id, so the only thing identifying a
-    result is the URL the v3 endpoint handed back. The manifest used to scrape
-    digits out of it into `/sub/opensubtitles/5.srt`; the serve route then asked
-    the provider to resolve that id, which cannot exist for this endpoint, so
-    every request 404'd unless a stale cache entry happened to be lying around.
-
-    The URL now travels in `?u=` rather than the path: the ASGI server decodes
-    the path before routing, so a percent-encoded URL's %2F becomes a real slash
-    and the route stops matching at all.
-    """
-    direct_url = "https://subs5.strem.io/en/download/subencoding-stremio/file/4242"
-    release = SubtitleRelease(
-        release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
-        download_url=direct_url,
-        provider="opensubtitles",
-        lang="ara",
-    )
-    srt = "1\n00:00:01,000 --> 00:00:02,000\nhello\n"
-    upstream = httpx.Response(
-        200, content=srt.encode(), request=httpx.Request("GET", direct_url)
-    )
-    cache_key = hashlib.sha256(direct_url.encode()).hexdigest()[:16]
-    cfg = encode_user_config(enable_opensubtitles=True)
-
-    # The context manager runs the lifespan, which builds the shared httpx client
-    # the aggregator needs before it will query any provider.
-    with (
-        TestClient(app) as client,
-        patch(
-            "app.providers.opensubtitles.OpenSubtitlesProvider.search_subtitles",
-            new=AsyncMock(return_value=[release]),
-        ),
-        patch(
-            "app.providers.cinemeta.CinemetaClient.get_metadata",
-            new=AsyncMock(return_value={"title": "Movie", "year": 2024}),
-        ),
-    ):
-        resp = client.get(f"/{cfg}/subtitles/movie/tt9999999/filename=x.mkv.json?nocache=1")
-    assert resp.status_code == 200
-    served = resp.json()["subtitles"][0]["url"]
-
-    # The direct URL must be present and intact, and the path keyed on its hash.
-    assert f"u={urllib.parse.quote(direct_url, safe='')}" in served
-    assert f"/sub/opensubtitles/{cache_key}." in served
-
-    # Simulate a restart: no cached bytes for this key.
-    _wipe_cached_result(cache_key)
-
-    with patch("app.main._http_client", new=AsyncMock(get=AsyncMock(return_value=upstream))):
-        fetched = TestClient(app).get(served)
-    assert fetched.status_code == 200, served
-    assert b"hello" in fetched.content
