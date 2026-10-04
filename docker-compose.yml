@@ -51,6 +51,12 @@ services:
       - ALASS_PATH=${ALASS_PATH:-alass}
       - ALASS_TIMEOUT_SECONDS=${ALASS_TIMEOUT_SECONDS:-10}
       - ALASS_MAX_CONCURRENT_SYNCS=${ALASS_MAX_CONCURRENT_SYNCS:-1}
+      # Candidate budget per request. Raised from the code default of 3 so the
+      # whole discovered reference pool is explored when several candidates are
+      # available; each is still verified independently and nothing unverified
+      # is ever served. Cost is bounded because resolve_all caps downloads at
+      # REFERENCE_POOL_LIMIT (6), so 8 attempts can never exceed 6 real runs.
+      - ALASS_CANDIDATE_LIMIT=${ALASS_CANDIDATE_LIMIT:-8}
       - SYNC_TOTAL_REQUEST_BUDGET=${SYNC_TOTAL_REQUEST_BUDGET:-15.0}
       - SYNC_REQUIRE_EXACT_MATCH=${SYNC_REQUIRE_EXACT_MATCH:-true}
       # AUTOSYNC_TEST_OVERRIDE -- development/test only. Defaults to false, and
