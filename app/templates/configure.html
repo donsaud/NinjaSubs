@@ -961,22 +961,13 @@
                                      reserves 118px of padding for a "Get API Key" button
                                      these fields do not have. -->
                                 <div class="mt-4">
-                                    <label for="opensubtitles-username" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles account username <span class="text-slate-600">(optional)</span></label>
+                                    <label for="opensubtitles-username" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles username</label>
                                     <input type="text" id="opensubtitles-username" value="{{initial_os_username}}" placeholder="your OpenSubtitles username" class="mono-input w-full" autocomplete="username">
                                 </div>
                                 <div class="mt-3">
-                                    <label for="opensubtitles-password" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles account password <span class="text-slate-600">(optional)</span></label>
+                                    <label for="opensubtitles-password" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles password</label>
                                     <input type="password" id="opensubtitles-password" value="" placeholder="your OpenSubtitles password" class="mono-input w-full" autocomplete="current-password">
                                 </div>
-                                <p class="text-[11px] text-slate-500 mt-3 leading-relaxed">
-                                    An account raises the OpenSubtitles <em>download</em> quota (5/day anonymous &rarr; 20/day free, more for VIP).
-                                    It is not needed to search or for MovieHash matching &mdash; those work with the API key alone.
-                                </p>
-                                <p class="text-[11px] text-amber-500/90 mt-1.5 leading-relaxed">
-                                    Stored in this add-on's install URL, which is base64-encoded, <strong>not</strong> encrypted.
-                                    Anyone who can read that URL can recover it, and it appears in server access logs.
-                                    Only add it on an instance you control, and prefer a dedicated password.
-                                </p>
                             </div>
                         </div>
 
