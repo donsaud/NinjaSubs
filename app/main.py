@@ -78,6 +78,10 @@ from app.utils.release_matcher import (
     extract_stream_params,
     sanitize_release_name,
 )
+from app.utils.request_diagnostics import (
+    RequestDiagnosticsMiddleware,
+    install_access_log_redaction,
+)
 from app.utils.rtl import fix_rtl_punctuation_bytes
 
 logging.basicConfig(
@@ -206,6 +210,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Registered after CORS so it observes the request first and the CORS-modified
+# response last. Sanitized only: it logs whether a configuration arrived and
+# whether its credential fields were populated, never a value.
+app.add_middleware(RequestDiagnosticsMiddleware)
 
 
 @app.middleware("http")
@@ -404,6 +412,10 @@ async def verify_subdl_endpoint(api_key: str | None = None):
 
 
 uvicorn_logger = logging.getLogger("uvicorn.error")
+
+# Configured add-on URLs carry credentials in their first path segment; strip them
+# from access logs before uvicorn writes a single line.
+install_access_log_redaction()
 
 
 @app.get("/api/verify/subsource")
