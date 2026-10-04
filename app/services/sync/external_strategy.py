@@ -47,6 +47,22 @@ from app.services.sync.reference_v2 import release_family_key as _release_family
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.sync.query import ReferenceQuery
 
+# Minimum pause between consecutive reference DOWNLOADS from the same
+# provider within one request.
+#
+# Why this exists: resolving the candidate pool eagerly meant up to
+# REFERENCE_POOL_LIMIT downloads fired back-to-back. Against SubDL that tripped
+# the provider's rate limiter and opened the circuit breaker mid-request:
+#
+#   GET dl.subdl.com/...3610179-8527589.zip  ->  HTTP 429 Too Many Requests
+#   WARNING: Subdl circuit breaker tripped (HTTP 429); skipping SubDL for 60s
+#   subdl returned 0 candidate(s)  ->  resolve_all: 0 distinct candidate(s)
+#
+# A later candidate in that same request then had no reference at all and fell
+# back to serving the original. Pacing restores politeness without weakening
+# any verification gate.
+_REFERENCE_DOWNLOAD_MIN_INTERVAL_SECONDS = 0.6
+
 logger = logging.getLogger(__name__)
 
 # Below the request budget (SYNC_TOTAL_REQUEST_BUDGET, default 7.5s) so
@@ -1057,6 +1073,141 @@ class ExternalExactStrategy:
         if provider is self._opensubtitles:
             return query.api_keys.get("opensubtitles")
         return None
+
+    async def resolve_all_with_provenance(
+        self,
+        query: ReferenceQuery,
+        *,
+        update_validator: Callable[[str], bool] | None = None,
+    ) -> list[ResolvedReference]:
+        """Download several DISTINCT usable references, best-ranked first.
+
+        Why this exists: `resolve_with_provenance` returns exactly one
+        reference. The orchestrator's retry loop advances between *strategies*,
+        not between candidates, so when only SubDL is configured and no
+        MovieHash exists there is a single strategy able to yield a reference
+        and therefore a single ALASS attempt. If that one candidate is the
+        wrong cut, the request ends unsynchronized even though other candidate
+        releases for the same film were available all along.
+
+        Production evidence (Whiplash, tt2582802): one cached `subdl_edition`
+        reference with 922 cues was aligned against an 825-cue target (1.12x
+        surplus), giving movement MAD 9356ms and residual matching that
+        DEGRADED from 33 to 130 unmatched cues at a 5s tolerance. The verifier
+        rejected it correctly -- but no second candidate was ever tried.
+
+        Deduplication is by SUBTITLE CONTENT SHA-256, never by filename: two
+        providers routinely publish the same timing model under different
+        release names, and treating those as distinct candidates would spend
+        two downloads to learn one fact.
+
+        Ranking beyond the existing provider/release signals: cue-count
+        distance and first-cue proximity against the target are used to ORDER
+        candidates, because a reference cut from a different edit has a
+        different cue count and a different opening dialogue. These are ranking
+        signals ONLY. They are never treated as proof that two files are the
+        same cut, never establish identity, and never bypass the verifier --
+        every returned candidate still has to survive the existing verification
+        gates on its own merits.
+        """
+        validate = update_validator
+        providers = [
+            p for p in (self._subdl, self._subsource, self._opensubtitles) if p is not None
+        ]
+        if not providers:
+            return []
+
+        candidates = await self._gather_candidates(providers, query)
+        if not candidates:
+            logger.warning(
+                "[reference] no candidates from %s",
+                [self._provider_label(p) for p in providers],
+            )
+            return []
+
+        provider_of = {id(rel): provider for rel, provider in candidates}
+        ranked = _select_candidates_ranked([rel for rel, _ in candidates], query)
+        if not ranked:
+            logger.warning("[reference] resolve_all: no season/episode-matched reference")
+            return []
+
+        try:
+            from app.config import settings as _settings
+
+            limit = max(1, int(getattr(_settings, "REFERENCE_POOL_LIMIT", 6) or 6))
+        except Exception:  # pragma: no cover
+            limit = 6
+
+        out: list[ResolvedReference] = []
+        seen_digests: set[str] = set()
+        stem = query.cache_stem
+        downloaded = 0
+
+        for cand in ranked:
+            if len(out) >= limit:
+                break
+            cand_provider = provider_of.get(id(cand))
+            if cand_provider is None:
+                continue
+            if self._is_rejected(stem, cand):
+                continue
+            if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
+                continue
+            # Preserve the existing quota rule exactly: a non-hash OpenSubtitles
+            # download spends the account's metered daily allowance, so it stays
+            # reserved for MovieHash-exact references.
+            if (
+                cand_provider is self._opensubtitles
+                and reference_tier(query.target_filename, cand) != TIER_HASH
+            ):
+                continue
+
+            # Pace consecutive downloads so one request cannot burst a provider
+            # into a 429 / circuit break. Skipped for the first download so the
+            # common single-candidate case pays no latency.
+            if downloaded:
+                await asyncio.sleep(_REFERENCE_DOWNLOAD_MIN_INTERVAL_SECONDS)
+
+            downloaded += 1
+            result = await self._download_candidate(cand, cand_provider, query)
+            text = result.text
+            if not text:
+                continue
+            if validate is not None and not validate(text):
+                # The validator only returns a bool, so re-measure here purely
+                # to attribute the verdict to a NAMED candidate. Without this
+                # the log cannot say which release was dropped or why.
+                # Name the candidate so the orchestrator's adjacent
+                # cue-sanity diagnostic (which carries the measured delta and
+                # first-dialogue offsets) can be attributed to a release.
+                logger.info(
+                    "[reference] resolve_all: candidate SKIPPED name=%r lang=%s cues=%d",
+                    getattr(cand, "release_name", "?"),
+                    getattr(cand, "lang", "?"),
+                    text.count(" --> "),
+                )
+                continue
+
+            digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+            if digest in seen_digests:
+                logger.info(
+                    "[reference] resolve_all: candidate %r has duplicate content (%s); skipping",
+                    getattr(cand, "release_name", "?"),
+                    digest[:12],
+                )
+                continue
+            seen_digests.add(digest)
+            out.append(result)
+
+        logger.info(
+            "[reference] resolve_all: %d distinct candidate(s) from %d ranked release(s) "
+            "(limit=%d) digests=%s",
+            len(out),
+            downloaded,
+            limit,
+            sorted(d[:12] for d in seen_digests),
+        )
+        return out
 
     async def _download_candidate(
         self, best, provider, query: ReferenceQuery

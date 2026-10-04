@@ -555,7 +555,7 @@ def test_the_hash_strategy_is_consulted_before_the_tiered_search():
     )
     names = [name for name, _ in orchestrator._strategies()]
     assert names[0] == "opensubtitles moviehash"
-    assert names.index("opensubtitles moviehash") < names.index("external exact-match")
+    assert names.index("opensubtitles moviehash") < names.index("external-release-reference")
 
 
 # --------------------------------------------------------------------------

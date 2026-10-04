@@ -2045,7 +2045,7 @@ async def _sync_subtitle_for_response(
 
 
 def _build_sync_orchestrator() -> SyncOrchestrator | None:
-    """Construct the sync orchestrator using external exact-match references (SubDL/SubSource/OpenSubtitles)."""
+    """Construct the sync orchestrator using external-release-reference references (SubDL/SubSource/OpenSubtitles)."""
     if _http_client is None:
         return None
     return SyncOrchestrator(

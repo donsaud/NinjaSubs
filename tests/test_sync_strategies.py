@@ -1,4 +1,4 @@
-"""Tests for the sync strategies (external exact-match, hash-exact) and the orchestrator."""
+"""Tests for the sync strategies (external-release-reference, hash-exact) and the orchestrator."""
 
 from types import SimpleNamespace
 
@@ -156,7 +156,7 @@ async def test_orchestrator_prefers_external_then_caches(monkeypatch):
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     reference = BIG_REF.decode()
-    # Tier order is external exact-match -> hash: the external reference wins.
+    # Tier order is external-release-reference -> hash: the external reference wins.
     orch = _orchestrator(
         external_strategy=_FakeStrategy(reference),
         hash_strategy=_FakeStrategy("should-not-be-used"),
@@ -263,7 +263,7 @@ async def test_orchestrator_falls_back_to_next_strategy_on_sync_failure(monkeypa
     assert orch._hash_strategy.calls == 1
     assert sync_svc.calls == 2
     assert (
-        "external exact-match strategy reference failed sync/validation -> falling back to next strategy"
+        "external-release-reference strategy reference failed sync/validation -> falling back to next strategy"
         in caplog.text
     )
 

@@ -1,7 +1,7 @@
 """Sync orchestrator: routes each request through candidate strategies.
 
 Flow per request: gates (server flag, user preference, known language) →
-content-bound sync-cache lookup → hash-exact strategy → external exact-match
+content-bound sync-cache lookup → hash-exact strategy → external-release-reference
 strategy → alass alignment → cache the result. Any step may fail; on any
 failure the original, unmodified subtitle bytes are returned so the player
 always receives a usable subtitle (strict fail-safe fallback).
@@ -59,13 +59,50 @@ from app.services.sync.large_offset_investigation import (
     investigate_large_offset,
     validate_alass_output,
 )
-from app.services.sync.matching import is_informative_release_name
+from app.services.sync.matching import (
+    is_bare_disc_track_name,
+    is_informative_release_name,
+)
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync.reference import is_dialogue_cue
 from app.services.sync_cache import SyncCache
 from app.utils.cleaners import strip_intro_credits
 
 logger = logging.getLogger(__name__)
+
+# Reference ``kind`` values that assert exact current-video identity (i.e. a
+# verified MovieHash match) rather than filename/title similarity. Only a
+# hash-derived reference may align a target that carries no identity of its
+# own; everything else is a heuristic guess.
+_HASH_DERIVED_REFERENCE_KINDS = frozenset({"hash"})
+
+
+class _PreResolvedReference:
+    """Replays one already-resolved reference through the existing loop.
+
+    Holds a candidate produced by `ExternalExactStrategy.resolve_all_with_provenance`
+    so the orchestrator's normal per-candidate path -- cue-sanity gate, disc-track
+    skip, ALASS budget, and the verifier -- applies to it unchanged.
+    """
+
+    validates_target = False
+
+    def __init__(self, resolved: Any) -> None:
+        self._resolved = resolved
+
+    async def resolve_with_provenance(self, query: Any, **kwargs: Any) -> Any:
+        return self._resolved
+
+
+def decision_kind_is_name_based(kind: str | None) -> bool:
+    """True when a reference's provenance is similarity, not exact identity.
+
+    ``hash_reference.py`` emits ``kind="hash"`` and that kind is only reached
+    after OpenSubtitles returned ``attributes.moviehash_match is True`` for the
+    hash the request supplied. Every other kind ("edition", title-based,
+    provider default) rests on filename or title similarity.
+    """
+    return (kind or "").strip().lower() not in _HASH_DERIVED_REFERENCE_KINDS
 
 
 def _content_digest(data: bytes) -> str:
@@ -245,7 +282,14 @@ class SyncOrchestrator:
         if self._hash_reference_strategy is not None:
             strats.append(("opensubtitles moviehash", self._hash_reference_strategy))
         if self._external_strategy is not None:
-            strats.append(("external exact-match", self._external_strategy))
+            # Deliberately NOT called "exact-match". This strategy's certainty is
+            # entirely a function of what it resolved: kind="hash" means proven
+            # exact identity, while kind="edition" is only a release-name
+            # guess. A single strategy label implied the stronger of the two
+            # for every candidate, which made a `decision=edition` reference
+            # read as an exact match in the live trace. The per-candidate
+            # `decision=%s` in the log line below carries the real provenance.
+            strats.append(("external-release-reference", self._external_strategy))
         if self._hash_strategy is not None:
             strats.append(("hash-exact", self._hash_strategy))
         return strats
@@ -683,13 +727,58 @@ class SyncOrchestrator:
                     )
                 return reused_bytes
 
+            # Negative cache for a MEASURED rejection. The verified fast path
+            # above only short-circuits successes, so a stored UNVERIFIED
+            # verdict used to fall through and re-run alass on every request.
+            # Production evidence: two Whiplash requests 33 minutes apart
+            # produced byte-identical rejections (p95 2416ms, mad 9356ms,
+            # residual unmatched 33 -> 130) and each burned a subprocess.
+            #
+            # The verdict is content-bound: `_verdict_key` is derived from the
+            # video fingerprint + subtitle hash + language, so this can only
+            # ever be recalled for the exact same pairing that failed. A
+            # different video, a different subtitle, or a different language
+            # gets a different key and still runs normally.
+            #
+            # This serves `sub_bytes`, the ORIGINAL, because an unverified
+            # rejection has no trustworthy transformed artifact. It never
+            # upgrades a rejection into a verified claim -- `_evaluation_from_verdict`
+            # reports it as `cached`, and `sync_state` stays UNVERIFIED.
+            if remembered and remembered_state == SyncState.UNVERIFIED.value:
+                self._metrics["verification_cache_hits"] += 1
+                self._last_evaluation = self._evaluation_from_verdict(remembered)
+                self._audit_serve(
+                    self._last_evaluation, meta, target_id, from_cache=True, resolved=None
+                )
+                logger.info(
+                    "[sync] reusing measured rejection for sub=%s: %s (no alass run; "
+                    "previously failed verification for this exact video/subtitle pair)",
+                    target_id,
+                    self._last_evaluation.explain(),
+                )
+                if self._sync_cache is not None:
+                    await self._sync_cache.set(resolution_key, sub_bytes)
+                return sub_bytes
+
         if self._sync_service is None:  # pragma: no cover - defensive
             logger.warning("[sync] no sync service configured -> serving original subtitle")
             return sub_bytes
 
-        # Reference strategies in priority order (external exact-match reference,
+        # Reference strategies in priority order (external-release-reference reference,
         # then OpenSubtitles MovieHash). The playing stream is never probed.
         attempts: list[tuple[str, Any]] = list(self._strategies())
+
+        def _first_dialogue_ms(text: str) -> int | None:
+            """First real dialogue cue, for diagnostic context only."""
+            from app.services.subtitle_matcher import (
+                first_dialogue_cluster,
+                strip_intro_nonspeech,
+            )
+
+            try:
+                return first_dialogue_cluster(strip_intro_nonspeech(text))
+            except Exception:  # pragma: no cover - diagnostics must never break sync
+                return None
 
         def _passes_cue_sanity(reference_text: str) -> bool:
             """Execution-window cue check, used to reject a wrong-cut reference.
@@ -718,10 +807,23 @@ class SyncOrchestrator:
                     assessment.summary(),
                 )
                 return True
+            # Diagnostic detail. The rejection REASON alone cannot distinguish
+            # "wrong cut" from "this release simply opens with a credit block",
+            # which is why the 5-of-6 candidate skip in the Whiplash pool could
+            # not be explained from the logs. These are the exact numbers the
+            # gate measured, so the next decision is made on evidence rather
+            # than on a hypothesis.
             logger.warning(
-                "[sync] candidate reference rejected by cue-sanity (%s); "
-                "trying next candidate",
+                "[sync] candidate reference rejected by cue-sanity: reason=%s "
+                "delta_ms=%s candidate_first_ms=%s reference_first_ms=%s "
+                "window_ms=%s penalty=%s target_first_ms=%s; trying next candidate",
                 verdict["reason"],
+                verdict["delta_ms"],
+                verdict["candidate_first_ms"],
+                verdict["reference_first_ms"],
+                verdict["threshold_ms"],
+                verdict["penalty"],
+                _first_dialogue_ms(target_text),
             )
             return False
 
@@ -779,6 +881,87 @@ class SyncOrchestrator:
         alass_completed = 0
         alass_deferred = 0
         candidates_rejected = 0
+        # True once a reference was resolved, aligned, and REJECTED. The tail
+        # must not then mark_failed: that flag means "no usable reference",
+        # and overloading it with "the reference did not verify" would
+        # suppress the very retry this multi-candidate loop exists to perform.
+        rejected_candidates_seen = False
+
+        # --- Multi-candidate expansion -------------------------------------
+        #
+        # `attempts` is a list of STRATEGIES, so the existing retry loop only
+        # ever advanced between providers. A strategy returned exactly one
+        # reference, which meant a wrong-cut first pick ended the request even
+        # when other candidate releases for the same film were sitting in the
+        # pool unused (Whiplash: 922-cue reference vs 825-cue target, one
+        # attempt, no alternative).
+        #
+        # Rather than re-indent the ~600-line execution body, each distinct
+        # candidate is wrapped in a tiny adapter that replays it through the
+        # SAME loop. Every existing guarantee therefore applies unchanged to
+        # every candidate: the cue-sanity gate, the disc-track skip, the ALASS
+        # budget, and -- critically -- the verifier, which runs independently on
+        # each one. A candidate is served only if it passes on its own merits.
+        #
+        # The MovieHash strategy is deliberately NOT expanded. Its single
+        # reference is exact-identity evidence (`moviehash_match is True`);
+        # spending that on a ranked list of weaker candidates would trade proven
+        # identity for guesswork.
+        expanded_attempts: list[tuple[str, Any]] = []
+        for _name, _obj in attempts:
+            _multi = getattr(_obj, "resolve_all_with_provenance", None)
+            if not callable(_multi):
+                expanded_attempts.append((_name, _obj))
+                continue
+            # Preserve the strategy cache-hit shortcut BEFORE any fan-out. A
+            # previously proven reference must still be reused without asking a
+            # provider again, exactly as the single-reference path did.
+            _cache = getattr(_obj, "cache", None)
+            _hit = None
+            if _cache is not None:
+                try:
+                    _hit = _cache.get(query)
+                except Exception:  # pragma: no cover - cache must not break sync
+                    _hit = None
+            # A cache hit is NOT an exit. It used to be, which silently
+            # disabled multi-candidate expansion for every repeat request --
+            # i.e. exactly the Whiplash case, where a cached `subdl_edition`
+            # reference meant one ALASS run and no alternative was ever tried.
+            # The proven reference stays FIRST (it is still the best-informed
+            # candidate); the fan-out then supplies genuine alternatives.
+            try:
+                _cands = await _multi(query, update_validator=_passes_cue_sanity)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "[sync] %s multi-candidate expansion failed: %s -> single reference",
+                    _name, exc,
+                )
+                _cands = []
+            if _hit is not None and getattr(_hit, "text", None):
+                # Keep the cached reference first, and do not re-offer it if the
+                # fan-out already returned identical content.
+                _hit_text = _hit.text
+                if not any(getattr(c, "text", None) == _hit_text for c in _cands):
+                    _cands = [_hit, *_cands]
+            if not _cands:
+                # The fan-out already ran and found nothing usable. Calling the
+                # strategy again here would repeat the identical provider search
+                # and reach the identical empty result, so the request simply
+                # proceeds with no reference and serves the original.
+                logger.info(
+                    "[sync] %s produced no usable reference candidate; serving original",
+                    _name,
+                )
+                continue
+            logger.info(
+                "[sync] %s offered %d distinct candidate(s); each will be verified independently",
+                _name, len(_cands),
+            )
+            for _i, _c in enumerate(_cands):
+                expanded_attempts.append(
+                    (f"{_name}#candidate{_i + 1}", _PreResolvedReference(_c))
+                )
+        attempts = expanded_attempts
 
         for strategy_name, strategy_obj in attempts:
             try:
@@ -793,6 +976,39 @@ class SyncOrchestrator:
                 resolved = ResolvedReference(None)
 
             if not resolved.text:
+                continue
+
+            # Futile-alignment skip for a bare disc track with no identity
+            # evidence. A container filename like ``00001.m2ts`` names no
+            # release, so the only reference reachable here is a name-based
+            # guess about a *different* cut. Running alass against it cannot
+            # succeed: the observed Whiplash run burned a subprocess and
+            # ~1.7s only for the verifier to reject it (p95 2416ms > 2000ms,
+            # movement mad 9356ms, residual matching degraded 33 -> 130).
+            #
+            # This is a *skip*, never an acceptance. It runs only when BOTH
+            # hold:
+            #   1. no video_hash was supplied, so there is no exact identity;
+            #   2. the reference is not hash-derived (``decision_kind`` is not
+            #      "hash"), so it rests on filename/title similarity alone.
+            #
+            # With a real MovieHash the hash strategy supplies exact identity
+            # evidence and the reference is legitimately trustworthy, so a disc
+            # track name must NOT block it. Gating on both conditions is what
+            # keeps this from weakening any trust path: a genuine hash match
+            # still aligns normally.
+            if (
+                decision_kind_is_name_based(resolved.kind)
+                and is_bare_disc_track_name(meta.get("target_filename"))
+                and not str(meta.get("video_hash") or "").strip()
+            ):
+                logger.info(
+                    "[sync] skipping futile alass: target=%r is a bare disc track with no "
+                    "video_hash, and the best reference is a name-based %s match; serving "
+                    "the original subtitle unsynchronized",
+                    meta.get("target_filename"),
+                    resolved.kind,
+                )
                 continue
 
             last_resolved = resolved
@@ -854,10 +1070,23 @@ class SyncOrchestrator:
                     # large-offset candidate at all, so the plain
                     # cue-sanity path owns this rejection.
                     if large_offset is None:
+                        # Name the candidate AND the measured numbers. Without
+                        # them a drop here is indistinguishable from a candidate
+                        # that was never considered, which is exactly the
+                        # confusion that hid the inert multi-candidate loop.
                         logger.info(
-                            "[sync] normal cue-sanity rejection (offset "
-                            "within the %.0fs window, or no measurable "
+                            "[sync] normal cue-sanity rejection: candidate=%s "
+                            "reason=%s delta_ms=%s candidate_first_ms=%s "
+                            "reference_first_ms=%s window_ms=%s target_first_ms=%s "
+                            "(offset within the %.0fs window, or no measurable "
                             "dialogue to compare)",
+                            strategy_name,
+                            sanity["reason"],
+                            sanity["delta_ms"],
+                            sanity["candidate_first_ms"],
+                            sanity["reference_first_ms"],
+                            sanity["threshold_ms"],
+                            _first_dialogue_ms(target_text),
                             FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS / 1000.0,
                         )
                     elif REASON_MAX_OFFSET_EXCEEDED in large_offset.reason_codes:
@@ -1378,7 +1607,32 @@ class SyncOrchestrator:
                     evaluation.sync_state.value,
                     evaluation.verification.value,
                 )
-                return served
+                if serve_synchronized:
+                    return served
+                # A REJECTED candidate must NOT end the request.
+                #
+                # This used to return unconditionally, which made the
+                # multi-candidate expansion structurally inert: candidate1 always
+                # terminated the loop, so 6 discovered candidates produced exactly
+                # 1 alass run. Observed live -- only
+                # external-release-reference#candidate1 ever appeared, with no
+                # SKIPPED/cue-sanity lines, proving the other five were never
+                # rejected on their merits, just never reached.
+                #
+                # Continuing is safe and does not weaken verification: the
+                # rejection has already been measured, audited and stored as an
+                # UNVERIFIED verdict, and NOTHING is served here. If no later
+                # candidate verifies either, the loop falls through to the
+                # existing tail, which logs "all sync strategies failed" and
+                # returns the original subtitle unchanged.
+                logger.info(
+                    "[sync] candidate %s was rejected by verification; "
+                    "trying the next reference candidate (original will be served "
+                    "if none verifies)",
+                    strategy_name,
+                )
+                rejected_candidates_seen = True
+                continue
 
             logger.warning(
                 "[sync] %s strategy reference failed sync/validation -> falling back to next strategy",
@@ -1389,7 +1643,7 @@ class SyncOrchestrator:
             logger.info("[sync] no deterministic reference available -> aborting sync")
         else:
             logger.warning("[sync] all sync strategies failed -> serving original subtitle")
-        if self._sync_cache is not None:
+        if self._sync_cache is not None and not rejected_candidates_seen:
             await self._sync_cache.mark_failed(resolution_key)
         return sub_bytes
 

@@ -405,6 +405,41 @@ def is_informative_release_name(name: str | None) -> bool:
     return bool(_RELEASE_TOKEN_REGEX.search(candidate))
 
 
+_DISC_TRACK_STEM_REGEX = re.compile(r"^\d{4,6}$")
+
+
+def is_bare_disc_track_name(name: str | None) -> bool:
+    """True for a raw ripped disc track filename such as ``00001.m2ts``.
+
+    A bare track number carries no release group, resolution, source, or
+    edition tokens, so it cannot be matched to a subtitle release by name. It
+    is a *container* filename, not a release name.
+
+    Why this matters for AutoSync: when such a stream is the target and no
+    ``video_hash`` was supplied, the only reference obtainable is a
+    name-based ("edition") guess for some *other* release. Observed on
+    ``Whiplash.2014.2160p.UHD.BluRay.x254-SURCODE.mkv``'s disc track
+    ``00001.m2ts``: alass aligned a 51.8 GB m2ts against a 2160p release
+    reference with a ~1.12x cue-count surplus (922 vs 825 cues), and residual
+    matching *degraded* under a tighter tolerance (unmatched 33 -> 130 at
+    5s). The verifier correctly rejected it, but the subprocess and the wait
+    were spent for a guaranteed failure.
+
+    This predicate only ever *skips* a futile alignment attempt. It never
+    accepts a result, never relaxes a threshold, and never marks anything as
+    an exact/hash match. A disc track that DOES carry a ``video_hash`` is not
+    affected -- see the caller's hash check -- because hash identity is real
+    evidence regardless of what the filename looks like.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return False
+    stem, dot, ext = raw.rpartition(".")
+    if not dot:
+        return False
+    return bool(_DISC_TRACK_STEM_REGEX.match(stem.strip()))
+
+
 _MULTI_SEASON_RANGE_REGEX = re.compile(r"\bs\d{1,2}\s*-\s*s?\d{1,2}\b", re.IGNORECASE)
 
 # A *reliable* single-episode marker (SxxExx, Exx/EPxx, Episode N, Part N,
