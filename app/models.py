@@ -3,7 +3,7 @@
 from enum import IntEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictBool, model_validator
 
 
 class MatchTier(IntEnum):
@@ -95,8 +95,20 @@ class SubtitleRelease(BaseModel):
     lang: str = "ara"
     score: int = 0
     match_percentage: int = 0
-    is_hash_match: bool = False
-    matched_by_hash: bool = False  # explicit OpenSubtitles MovieHash flag (synced with is_hash_match)
+    # MovieHash provenance flags.
+    #
+    # StrictBool, not bool: these two fields are the *sole* carrier of "this
+    # result is byte-exact for the current video", and Pydantic's lax bool would
+    # silently coerce 1 / "1" / "true" / any truthy object into True. That
+    # turned a single strict `is True` check in one provider into the only
+    # guarantee in the system -- any other construction site could launder a
+    # non-boolean into an exact-hash claim and reach deterministic Tier 0.
+    #
+    # An exact match therefore requires a real boolean AND that the same request
+    # actually sent a moviehash to the provider (enforced in the provider).
+    # Nothing derives these from filename, IMDb ID, title, release name or size.
+    is_hash_match: StrictBool = False
+    matched_by_hash: StrictBool = False  # explicit OpenSubtitles MovieHash flag (synced with is_hash_match)
     status: str = ""  # e.g. "synced" when a synced artifact exists for the current stream
     match_tier: MatchTier | None = None
     compatibility: Any | None = None

@@ -35,6 +35,7 @@ from app.config import settings
 from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.decode import decode_payload, looks_like_cumulative_pack
 from app.services.sync.query import ReferenceQuery, ResolvedReference
+from app.services.sync.reference import ReferenceTrust
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -291,6 +292,18 @@ class OpenSubtitlesHashReferenceStrategy:
             kind="hash",
             candidate=release_name,
             partial=True,
+            # P0-3: record WHY this reference is trustworthy. ReferenceTrust.STRONG
+            # is defined as "Byte-exact hash match, or an exact release identity"
+            # (reference.py), which is precisely the evidence here: OpenSubtitles
+            # reported moviehash_match for the hash this request supplied.
+            #
+            # What this does NOT do is assert that the target's timings are
+            # correct. AlignmentAnalyzer still measures every cue; reference trust
+            # is only ever allowed to WITHHOLD a verified claim
+            # (alignment.py:769-777), never to create one. A MovieHash match
+            # proves current-video identity, not subtitle timing correctness, so
+            # the timing verifier remains the sole authority on synchronisation.
+            reference_trust=ReferenceTrust.STRONG.value,
         )
 
     def _credentials(self, query: ReferenceQuery) -> tuple[str, str, str]:

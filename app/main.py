@@ -1884,9 +1884,17 @@ def _media_context_from_request(request: Request) -> dict[str, Any]:
         ("episode", "episode"),
         ("filename", "target_filename"),
         ("name", "target_filename"),
+        # Symmetric with the search-side extractor (ranking.py:664,670), which
+        # accepts videoHash/video_hash/moviehash/hash and videoSize/... The serve
+        # side previously knew only the snake/lowercase spellings, so a camelCase
+        # `videoHash=` on a subtitle URL was silently dropped and the request
+        # looked hashless. Only spellings the search path already accepts are
+        # added; unrelated keys are still ignored.
         ("videohash", "video_hash"),
+        ("videoHash", "video_hash"),
         ("video_hash", "video_hash"),
         ("videosize", "video_size"),
+        ("videoSize", "video_size"),
         ("video_size", "video_size"),
         ("stream_url", "stream_url"),
         ("streamUrl", "stream_url"),
@@ -1922,6 +1930,27 @@ def _merge_sync_meta(meta: dict | None, context: dict | None) -> dict:
             or merged.get(key) in (None, "")
         ):
             merged[key] = context[key]
+
+    # P0-1 -- cross-video identity containment.
+    #
+    # A cached metadata record is keyed by the subtitle candidate alone
+    # (sha256 of provider/release_name/download_url), with no video identity in
+    # the key, yet it carries the video_hash/video_size of whichever request wrote
+    # it last. The loop above correctly lets a *present* request value win, so a
+    # request carrying hash=B overwrites A's contribution. The remaining hole is
+    # a request that carries no video identity at all: nothing overrides it, so
+    # it silently inherits the previous video's hash.
+    #
+    # That inherited value is not merely unused -- it is identity evidence, and
+    # an exact-hash reference or a cache key could be derived from it. So when the
+    # current request proves nothing about the video, the cached video identity is
+    # dropped rather than trusted. Request-over-cache precedence is untouched:
+    # a hash that IS supplied still wins, exactly as above.
+    if not has_video_fingerprint(context):
+        for untrusted in ("video_hash", "video_size"):
+            if merged.get(untrusted) not in (None, ""):
+                merged.pop(untrusted, None)
+
     merged.setdefault("lang", merged.get("lang") or "ara")
 
     # Debrid/Usenet proxies expose an obfuscated basename inside a directory
@@ -2644,9 +2673,16 @@ async def _serve_subtitle_handler(
 
 @app.api_route("/sub/opensubtitles/{file_id}.srt", methods=["GET", "HEAD"])
 @app.api_route("/sub/opensubtitles/{file_id}.ass", methods=["GET", "HEAD"])
+@app.api_route("/sub/opensubtitles/{file_id}.ssa", methods=["GET", "HEAD"])
+@app.api_route("/sub/opensubtitles/{file_id}.sub", methods=["GET", "HEAD"])
 @app.api_route("/sub/opensubtitles/{file_id}.vtt", methods=["GET", "HEAD"])
 @app.api_route("/{config}/sub/opensubtitles/{file_id}.srt", methods=["GET", "HEAD"])
 @app.api_route("/{config}/sub/opensubtitles/{file_id}.ass", methods=["GET", "HEAD"])
+# The provider emits .ssa (opensubtitles.py:447) and _FILE_ID_RE accepts .ssa
+# and .sub, so both must be routable. Without these an SSA-format result was
+# advertised by the manifest and then 404'd on the serve path.
+@app.api_route("/{config}/sub/opensubtitles/{file_id}.ssa", methods=["GET", "HEAD"])
+@app.api_route("/{config}/sub/opensubtitles/{file_id}.sub", methods=["GET", "HEAD"])
 @app.api_route("/{config}/sub/opensubtitles/{file_id}.vtt", methods=["GET", "HEAD"])
 async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str | None = None):
     """Proxy OpenSubtitles stream with UTF-8 transcoding and local caching."""

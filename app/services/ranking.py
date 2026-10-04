@@ -671,10 +671,18 @@ def extract_stream_params(
             val = query_params.get(sk)
             if val:
                 raw_sz = urllib.parse.unquote(str(val)).strip()
-                try:
-                    params["video_size"] = int(raw_sz)
-                except (ValueError, TypeError):
-                    params["video_size"] = raw_sz
+                # P1-3: same normalisation as the extra-segment branch. A byte
+                # size of 0 is not a real file size for this API, so it means
+                # "unavailable" and is normalised to None exactly once, here,
+                # rather than surviving as int 0 that later `or ""` fallbacks
+                # silently erase at different hops.
+                if raw_sz in ("", "0"):
+                    params["video_size"] = None
+                else:
+                    try:
+                        params["video_size"] = int(raw_sz)
+                    except (ValueError, TypeError):
+                        params["video_size"] = raw_sz
                 break
 
     if extra:
@@ -705,12 +713,23 @@ def extract_stream_params(
                     params["video_hash"] = val
                 elif (
                     key in ("videosize", "video_size", "moviebytesize", "size")
-                    and not params["video_size"]
+                    and params["video_size"] in (None, "")
                 ):
-                    try:
-                        params["video_size"] = int(val)
-                    except (ValueError, TypeError):
-                        params["video_size"] = val
+                # P1-3: presence, not truthiness. A supplied size of 0 used to be
+                # treated as absent (`not params["video_size"]` sees int 0 as
+                # falsy) and silently overwritten by the extra segment, while
+                # its sibling hash -- stored as str "0" -- was immune. 0 is not a
+                # meaningful byte size for this API, so it is normalised to
+                # "missing" once, here, instead of meaning different things at
+                # different hops.
+                    raw = val.strip()
+                    if raw in ("", "0"):
+                        params["video_size"] = None
+                    else:
+                        try:
+                            params["video_size"] = int(raw)
+                        except (ValueError, TypeError):
+                            params["video_size"] = raw
         else:
             if not params["filename"] and re.search(r"(?i)\.(mkv|mp4|avi|ts|m2ts|webm)$", decoded):
                 # Preserve a meaningful parent folder when the basename is an
