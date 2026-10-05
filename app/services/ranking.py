@@ -643,6 +643,41 @@ def get_source_popularity_percentage(subtitle_name: str) -> int:
 get_source_popularity_score = get_source_popularity_percentage
 
 
+_VIDEO_HASH_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def normalize_video_hash(value: Any) -> str | None:
+    """Normalise a client-supplied MovieHash, or return ``None``.
+
+    MovieHash is OPTIONAL. A missing hash is a normal, fully supported state:
+    the pipeline continues through release-compatibility reference selection and
+    the verifier remains the sole authority on synchronisation. Nothing here
+    derives, computes, or guesses a hash -- it only validates one that a client
+    actually supplied.
+
+    A malformed value is treated as UNAVAILABLE rather than passed through,
+    because ``extract_stream_params`` previously accepted any non-empty string.
+    A truthy-but-invalid value would otherwise reach
+    ``OpenSubtitlesProvider``'s ``params["moviehash"]``, spending a metered
+    OpenSubtitles call on a query that can never match and logging a request
+    that looks like an exact-identity lookup.
+
+    Strictly 16 hex characters, which is the width OpenSubtitles returns and
+    the width ``opensubtitles.py`` documents. Case and surrounding whitespace
+    are normalised; nothing else is coerced.
+    """
+    if value is None:
+        return None
+    # ``bytes`` is truthy and would stringify to "b'...'"; reject explicitly
+    # rather than letting a non-string reach int()/re.
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().lower()
+    if not candidate:
+        return None
+    return candidate if _VIDEO_HASH_RE.match(candidate) else None
+
+
 def extract_stream_params(
     extra: str | None,
     query_params: Any | None = None,
@@ -664,8 +699,12 @@ def extract_stream_params(
         for hk in ("videoHash", "video_hash", "moviehash", "hash"):
             val = query_params.get(hk)
             if val:
-                params["video_hash"] = urllib.parse.unquote(str(val)).strip()
-                break
+                # Malformed values are dropped, not forwarded. The loop keeps
+                # scanning so a later alias can still supply a valid hash.
+                normalized = normalize_video_hash(urllib.parse.unquote(str(val)))
+                if normalized:
+                    params["video_hash"] = normalized
+                    break
 
         for sk in ("videoSize", "video_size", "moviebytesize", "size"):
             val = query_params.get(sk)
@@ -710,7 +749,7 @@ def extract_stream_params(
                     key in ("videohash", "video_hash", "moviehash", "hash")
                     and not params["video_hash"]
                 ):
-                    params["video_hash"] = val
+                    params["video_hash"] = normalize_video_hash(val)
                 elif (
                     key in ("videosize", "video_size", "moviebytesize", "size")
                     and params["video_size"] in (None, "")

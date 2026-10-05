@@ -413,12 +413,19 @@ def test_extract_stream_params_parsing():
     assert params["video_hash"] == "a1b2c3d4e5f67890"
     assert params["video_size"] == 524288000
 
-    # From query params
+    # From query params. The hash must be a valid 16-hex MovieHash: the
+    # ingestion boundary now rejects anything else as unavailable rather than
+    # forwarding a malformed value into a metered OpenSubtitles lookup.
     params_q = extract_stream_params(
-        None, query_params={"videoHash": "hash999", "videoSize": "2048", "filename": "Movie.mkv"}
+        None,
+        query_params={
+            "videoHash": "a1b2c3d4e5f67890",
+            "videoSize": "2048",
+            "filename": "Movie.mkv",
+        },
     )
     assert params_q["filename"] == "Movie.mkv"
-    assert params_q["video_hash"] == "hash999"
+    assert params_q["video_hash"] == "a1b2c3d4e5f67890"
     assert params_q["video_size"] == 2048
 
 
