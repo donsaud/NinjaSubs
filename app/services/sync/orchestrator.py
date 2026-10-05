@@ -63,6 +63,12 @@ from app.services.sync.matching import (
     is_bare_disc_track_name,
     is_informative_release_name,
 )
+from app.services.sync.outcomes import (
+    REJECTED,
+    SYNC_OUTCOMES,
+    VERIFIED,
+    classify_outcome,
+)
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync.reference import is_dialogue_cue
 from app.services.sync_cache import SyncCache
@@ -575,6 +581,23 @@ class SyncOrchestrator:
         """Counters for observability (cache hit rate, alass runs per request)."""
         return dict(self._metrics)
 
+    @staticmethod
+    def _record_outcome(meta: dict | None, outcome: str) -> None:
+        """Record one terminal request outcome for per-title telemetry.
+
+        Exactly one call per request, at the point the final bytes are decided.
+        Telemetry must never break serving, so every failure here is swallowed.
+        """
+        try:
+            SYNC_OUTCOMES.record(
+                (meta or {}).get("imdb_id"),
+                (meta or {}).get("season"),
+                (meta or {}).get("episode"),
+                outcome,
+            )
+        except Exception:  # pragma: no cover - telemetry must never break sync
+            pass
+
     async def _store_verdict(
         self,
         verdict_key: str | None,
@@ -777,6 +800,7 @@ class SyncOrchestrator:
                             "sync_confidence": remembered.get("sync_confidence"),
                         },
                     )
+                self._record_outcome(meta, VERIFIED)
                 return reused_bytes
 
             # Negative cache for a MEASURED rejection. The verified fast path
@@ -810,6 +834,7 @@ class SyncOrchestrator:
                 )
                 if self._sync_cache is not None:
                     await self._sync_cache.set(resolution_key, sub_bytes)
+                self._record_outcome(meta, REJECTED)
                 return sub_bytes
 
         if self._sync_service is None:  # pragma: no cover - defensive
@@ -1331,6 +1356,12 @@ class SyncOrchestrator:
                             "sync_confidence": evaluation.sync_confidence,
                         },
                     )
+                self._record_outcome(
+                    meta,
+                    VERIFIED
+                    if str(evaluation.sync_state.value).startswith("verified")
+                    else REJECTED,
+                )
                 return sub_bytes
 
             # "Relaxed" means the target name carries no edition signal, so the
@@ -1708,6 +1739,10 @@ class SyncOrchestrator:
                     evaluation.verification.value,
                 )
                 if serve_synchronized:
+                    self._record_outcome(
+                        meta,
+                        classify_outcome(True, serving_state.value, False),
+                    )
                     return served
                 # A REJECTED candidate must NOT end the request.
                 #
@@ -1745,6 +1780,9 @@ class SyncOrchestrator:
             logger.warning("[sync] all sync strategies failed -> serving original subtitle")
         if self._sync_cache is not None and not rejected_candidates_seen:
             await self._sync_cache.mark_failed(resolution_key)
+        self._record_outcome(
+            meta, classify_outcome(False, None, rejected_candidates_seen)
+        )
         return sub_bytes
 
     @staticmethod
