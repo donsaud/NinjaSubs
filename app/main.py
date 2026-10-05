@@ -605,6 +605,59 @@ async def get_configured_manifest(config: str, request: Request):
     return _build_manifest(config_str=config, request=request)
 
 
+def _opensubtitles_file_id(rel: Any) -> str | None:
+    """Provider file_id for an OpenSubtitles listing entry, else None.
+
+    The proxy serve route (`/sub/opensubtitles/{file_id}.srt`) stores both
+    synced artifacts and measured verdicts under this id, while the listing
+    path otherwise keys everything by ``rel_sub_id``. Both lookup sites must
+    use this identical extraction or serve-time evidence stays invisible at
+    ranking time. Returns None for non-OpenSubtitles entries and when no
+    numeric id is present; never raises.
+    """
+    try:
+        if str(getattr(rel, "provider", "") or "").lower() != "opensubtitles":
+            return None
+        m_fid = re.search(r"(\d+)", str(getattr(rel, "download_url", "") or ""))
+        return m_fid.group(1) if m_fid else None
+    except Exception:
+        return None
+
+
+async def _lookup_search_verdict(
+    sync_cache: Any,
+    verdict_fingerprint: str | None,
+    rel_sub_id: str,
+    rel: Any,
+) -> dict[str, Any] | None:
+    """Find a measured verdict for one listing candidate, if one exists.
+
+    Tries the listing-time candidate id first, then -- for OpenSubtitles
+    entries only -- the provider file_id extracted from the download URL with
+    the identical regex the subtitle-URL builder uses. The proxy serve route
+    (`/sub/opensubtitles/{file_id}.srt`) stores serve-time verdicts under that
+    file_id, so without the second lookup a verified OpenSubtitles subtitle
+    could never surface its verdict at ranking time. Returns ``None`` when
+    nothing is stored; never raises, so cache trouble degrades to prediction.
+    """
+    if not verdict_fingerprint:
+        return None
+    try:
+        verdict = await sync_cache.get_verdict_by_ref(verdict_fingerprint, rel_sub_id)
+    except Exception:
+        verdict = None
+    if verdict is None:
+        file_id = _opensubtitles_file_id(rel)
+        if file_id:
+            try:
+                verdict = await sync_cache.get_verdict_by_ref(
+                    verdict_fingerprint, file_id
+                )
+            except Exception:
+                verdict = None
+    return verdict
+
+
 async def _fetch_subtitles_handler(
     media_type: str,
     raw_id: str,
@@ -832,19 +885,27 @@ async def _fetch_subtitles_handler(
             synced_blob = await _sync_cache.find_synced_for(parsed.imdb_id, rel_sub_id)
         except Exception:
             synced_blob = None
+        if synced_blob is None:
+            # Same key mismatch as the verdict lookup below: synced artifacts
+            # for proxy-served entries are stored under the provider file_id,
+            # so the rel_sub_id scan above can never find them. Without this
+            # the "Synced" badge never appears on the entries that earned it.
+            file_id = _opensubtitles_file_id(rel)
+            if file_id:
+                try:
+                    synced_blob = await _sync_cache.find_synced_for(
+                        parsed.imdb_id, file_id
+                    )
+                except Exception:
+                    synced_blob = None
         if synced_blob is not None:
             rel.status = "synced"
 
         # Reuse a previously MEASURED verdict for this exact video + candidate.
         # Cache dominates prediction: real evidence beats a metadata guess.
-        verdict = None
-        if verdict_fingerprint:
-            try:
-                verdict = await _sync_cache.get_verdict_by_ref(
-                    verdict_fingerprint, rel_sub_id
-                )
-            except Exception:
-                verdict = None
+        verdict = await _lookup_search_verdict(
+            _sync_cache, verdict_fingerprint, rel_sub_id, rel
+        )
         if verdict:
             rel.sync_state = verdict.get("sync_state")
             rel.sync_verification = "cached"
