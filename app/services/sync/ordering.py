@@ -11,9 +11,16 @@ threshold change can silently reshuffle results:
 1. rejected candidates last, and only when something better exists;
 2. synchronization evidence, strongest first;
 3. the existing ``MatchTier`` hierarchy;
-4. synchronization confidence;
-5. the existing compatibility percentage;
-6. stable, content-derived tie-breakers.
+4. same-video identity (``is_hash_match``);
+5. synchronization confidence;
+6. the existing compatibility percentage;
+7. stable, content-derived tie-breakers.
+
+Same-video identity is deliberately subordinate to synchronization state. A
+MovieHash match proves WHICH FILE a subtitle belongs to; it says nothing about
+whether its timings are correct. A candidate the verifier confirmed always
+outranks a hash-exact candidate whose timing is unknown, and a prediction never
+counts as verification.
 
 Two deliberate refusals:
 
@@ -116,6 +123,32 @@ def _sync_confidence_of(item: Any) -> float:
     return -1.0
 
 
+def _identity_rank(item: Any) -> int:
+    """Same-video identity evidence: lower is stronger.
+
+    Consumes ``is_hash_match`` and nothing else. That flag is set in exactly one
+    place -- ``OpenSubtitlesProvider`` sets it only when the request actually
+    carried a ``moviehash`` AND OpenSubtitles returned
+    ``attributes.moviehash_match is True`` -- and it is a ``StrictBool``, so no
+    truthy string can reach it. SubDL, SubSource and the other providers cannot
+    inherit it. This function therefore never *infers* identity: it reads a
+    provenance flag that was already earned, and it never mutates the candidate.
+
+    Identity is deliberately NOT inferred from provider name, filename
+    similarity, release name, MatchTier, video size, language, prediction, or
+    sync state. A release-name guess is compatibility evidence, not
+    same-video identity, and conflating the two is exactly the mistake this
+    ranking exists to avoid.
+
+    Note the deliberate absence of any hash *computation*: the addon receives a
+    hash when the client supplies one and never derives one from video bytes.
+    """
+    value = getattr(item, "is_hash_match", None)
+    if value is None and isinstance(item, dict):
+        value = item.get("is_hash_match")
+    return 0 if value is True else 1
+
+
 def _base_rank(item: Any) -> int:
     """Position assigned by the existing matcher, when recorded.
 
@@ -185,8 +218,15 @@ def comparison_key(item: Any) -> tuple:
     """Full sort key. Exposed so the ordering is directly testable.
 
     Precedence: user language preference, sync state, evidence availability,
-    the matcher's own rank, sync confidence, compatibility score, then stable
-    identity tie-breakers.
+    the matcher's own rank, same-video identity, sync confidence, compatibility
+    score, then stable identity tie-breakers.
+
+    Same-video identity sits deliberately BELOW synchronization state and
+    evidence, so a hash-exact subtitle with unverified timing never outranks a
+    hashless subtitle the verifier actually confirmed. It sits ABOVE sync
+    confidence, the compatibility percentage and provider/release, because among
+    candidates with comparable timing evidence, proof that the subtitle belongs
+    to THIS video is the next strongest discriminator.
     """
     state, availability = _normalized_evidence(item)
     return (
@@ -194,6 +234,7 @@ def comparison_key(item: Any) -> tuple:
         _STATE_ORDER.get(state, _STATE_ORDER[None]),
         _AVAILABILITY_ORDER.get(availability, _AVAILABILITY_ORDER[None]),
         _base_rank(item),
+        _identity_rank(item),
         -_sync_confidence_of(item),
         -_score_of(item),
         *_identity(item),

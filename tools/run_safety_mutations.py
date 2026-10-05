@@ -52,6 +52,28 @@ MUTATIONS: tuple[Mutation, ...] = (
     # OpenSubtitles call on a query that cannot match while the log reads like
     # an exact-identity lookup.
     Mutation(
+        name="same-video-identity-rank-removed",
+        file="app/services/sync/ordering.py",
+        old="        _identity_rank(item),",
+        new="        # MUTATION: same-video identity dropped from the comparator",
+        guards=(
+            "among candidates with comparable timing evidence, a proven same-video "
+            "subtitle must outrank one that is merely release-compatible"
+        ),
+    ),
+    Mutation(
+        name="same-video-identity-promoted-above-sync",
+        file="app/services/sync/ordering.py",
+        old="""        _base_rank(item),
+        _identity_rank(item),""",
+        new="""        _identity_rank(item),
+        _base_rank(item),""",  # MUTATION
+        guards=(
+            "same-video identity must stay BELOW synchronization state: a MovieHash "
+            "match proves WHICH FILE, never that the timings are correct"
+        ),
+    ),
+    Mutation(
         name="video-hash-validation-removed",
         file="app/services/ranking.py",
         old="    return candidate if _VIDEO_HASH_RE.match(candidate) else None",
