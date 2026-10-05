@@ -42,6 +42,45 @@ class Mutation:
 
 
 MUTATIONS: tuple[Mutation, ...] = (
+    # --- MovieHash input-boundary validation ------------------------------
+    #
+    # MovieHash is OPTIONAL acceleration, not a synchronisation dependency, and
+    # hashless synchronization is a first-class supported path. These three
+    # protect the *other* half of that contract: when a client DOES supply a
+    # hash, only a well-formed one may be treated as identity evidence. A
+    # malformed value forwarded into ``params["moviehash"]`` spends a metered
+    # OpenSubtitles call on a query that cannot match while the log reads like
+    # an exact-identity lookup.
+    Mutation(
+        name="video-hash-validation-removed",
+        file="app/services/ranking.py",
+        old="    return candidate if _VIDEO_HASH_RE.match(candidate) else None",
+        new="    return candidate  # MUTATION: any truthy value becomes identity evidence",
+        guards=(
+            "a malformed client-supplied videoHash must be treated as unavailable, "
+            "never forwarded as exact-identity evidence"
+        ),
+    ),
+    Mutation(
+        name="video-hash-format-not-enforced",
+        file="app/services/ranking.py",
+        old='_VIDEO_HASH_RE = re.compile(r"^[0-9a-f]{16}$")',
+        new='_VIDEO_HASH_RE = re.compile(r"^[0-9a-zA-Z]{1,64}$")  # MUTATION',
+        guards=(
+            "MovieHash is exactly 16 hex characters: a wrong-length or non-hex "
+            "value is not a MovieHash and must not reach hash reference logic"
+        ),
+    ),
+    Mutation(
+        name="video-hash-normalization-skipped",
+        file="app/services/ranking.py",
+        old="    candidate = value.strip().lower()",
+        new="    candidate = value.strip()  # MUTATION: case/whitespace not normalised",
+        guards=(
+            "a hash differing only by case or padding must normalise to one "
+            "canonical form, so the same video cannot split into two identities"
+        ),
+    ),
     Mutation(
         name="target-fingerprint-binding-removed",
         file="app/services/sync_cache.py",
