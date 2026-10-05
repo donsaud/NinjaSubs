@@ -42,6 +42,30 @@ class Mutation:
 
 
 MUTATIONS: tuple[Mutation, ...] = (
+    # --- Reference tier strictness ----------------------------------------
+    #
+    # Same-group references (e.g. the Dexter d3g match) must be exhausted
+    # across ALL providers before weaker tiers are tried. The tier key must
+    # stay first in the sort tuple: provider priority and language preference
+    # are tie-breakers only, and promoting either above the tier would silently
+    # starve same-group references.
+    Mutation(
+        name="reference-tier-demoted-below-provider-priority",
+        file="app/services/sync/external_strategy.py",
+        old="""    tiered.sort(
+        key=lambda item: (
+            item[0],""",
+        new="""    tiered.sort(
+        key=lambda item: (
+            -_PROVIDER_TIE_PRIORITY.get(
+                str(getattr(item[1], "provider", "") or "").lower(), 0
+            ),
+            item[0],""",
+        guards=(
+            "an exact-group reference must outrank a weaker-tier reference "
+            "regardless of provider; provider priority is a tie-breaker only"
+        ),
+    ),
     # --- MovieHash input-boundary validation ------------------------------
     #
     # MovieHash is OPTIONAL acceleration, not a synchronisation dependency, and

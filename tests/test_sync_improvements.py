@@ -60,6 +60,47 @@ def test_exact_release_group_beats_known_micro_rip_group():
     assert ranked[0] is random_rel
 
 
+def test_tier_beats_provider_priority_and_language_in_full_sort():
+    """Group-first must hold end-to-end through the sort, not just in
+    ``reference_tier``.
+
+    The tier-1 candidate below has everything working against it except its
+    tier: lowest-priority provider (opensubtitles), non-English non-target
+    language, and it is listed second. The tier-2 candidate has the highest
+    provider priority and the English anchor preference. If provider priority
+    or language ever moves above the tier key in the sort tuple, this fails --
+    which is exactly the silent regression that would starve same-group
+    references like the Dexter d3g match.
+    """
+    target = "Dexter.S08E04.1080p.BluRay.x264-D3G.mkv"
+    query = ReferenceQuery(
+        imdb_id="tt0773262",
+        media_type="series",
+        season=8,
+        episode=4,
+        target_filename=target,
+    )
+
+    tier_one = SubtitleRelease(
+        release_name="Dexter.S08E04.1080p.BluRay.x264-D3G.srt",
+        download_url="http://cdn/d3g",
+        provider="opensubtitles",
+        lang="fra",
+    )
+    tier_two = SubtitleRelease(
+        release_name="Dexter.S08E04.1080p.BluRay.x264-OTHER.srt",
+        download_url="http://cdn/other",
+        provider="subsource",
+        lang="eng",
+    )
+
+    assert reference_tier(target, tier_one) == TIER_EXACT_GROUP
+    assert reference_tier(target, tier_two) == TIER_SOURCE_EDITION
+
+    ranked = _select_candidates_ranked([tier_two, tier_one], query)
+    assert ranked[0] is tier_one
+
+
 def test_validate_synced_output_rejects_zero_collapse():
     """Verify that output where timestamps collapsed to 0 is rejected."""
     target = (
