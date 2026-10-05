@@ -251,7 +251,7 @@ def test_no_hash_penalty_is_applied_to_every_candidate():
     ]
     keys = [comparison_key(r) for r in plain]
     for key in keys:
-        assert key[4] == 1, "identity rank is neutral when no hash is present"
+        assert key[5] == 1, "identity rank is neutral when no hash is present"
 
 
 # ===========================================================================
@@ -299,7 +299,7 @@ def test_identity_is_not_inferred_from_provider_or_name():
     )
     subdl_plain = _release("other.srt", hash_match=False, provider="subdl")
     keys = [comparison_key(r) for r in (opensubtitles_plain, subdl_plain)]
-    assert keys[0][4] == keys[1][4] == 1
+    assert keys[0][5] == keys[1][5] == 1
 
 
 # ===========================================================================
@@ -334,6 +334,62 @@ def test_a_verified_fallback_can_still_rank_above_an_unverified_exact():
     )
     assert order_candidates([exact_unverified, fallback_verified])[0] is fallback_verified
     assert fallback_verified.match_tier == MatchTier.FALLBACK
+
+
+# ===========================================================================
+# 7b. Sync quality outranks compatibility within the same sync evidence
+# ===========================================================================
+
+
+def test_stronger_verified_evidence_beats_better_compatibility():
+    """Among candidates with the same sync state and availability, stronger
+    measured evidence ranks first even when compatibility is worse."""
+    strong = _attach(
+        _release("strong.srt", tier=MatchTier.FALLBACK),
+        VERIFIED,
+        AV_VERIFIED,
+        base=10,
+        confidence=98.0,
+    )
+    weak = _attach(
+        _release("weak.srt", tier=MatchTier.EXACT),
+        VERIFIED,
+        AV_VERIFIED,
+        base=0,
+        confidence=72.0,
+    )
+    assert order_candidates([weak, strong])[0] is strong
+
+
+def test_demoted_prediction_carries_no_confidence_into_ranking():
+    """A prediction below the action floor keeps a stored confidence number,
+    but the comparator must not count it: the claim was refused."""
+    from app.services.sync.ordering import _ranked_confidence
+
+    demoted = _attach(
+        _release("demoted.srt"),
+        PREDICTED,
+        AV_PREDICTED,
+        base=5,
+        confidence=40.0,
+    )
+    assert _ranked_confidence(demoted, "unknown") == -1.0
+    unknown = _attach(_release("u.srt"), UNKNOWN_STATE, AV_UNKNOWN, base=0)
+    assert order_candidates([demoted, unknown])[0] is unknown
+
+
+def test_actionable_prediction_confidence_still_counts():
+    """A prediction above the floor keeps its confidence as positive evidence,
+    but only within the predicted availability tier."""
+    from app.services.sync.ordering import _ranked_confidence
+
+    actionable = _attach(
+        _release("p.srt"),
+        PREDICTED,
+        AV_PREDICTED,
+        confidence=0.9,
+    )
+    assert _ranked_confidence(actionable, "predicted") == 0.9
 
 
 # ===========================================================================

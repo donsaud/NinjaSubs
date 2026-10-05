@@ -10,9 +10,9 @@ threshold change can silently reshuffle results:
 
 1. rejected candidates last, and only when something better exists;
 2. synchronization evidence, strongest first;
-3. the existing ``MatchTier`` hierarchy;
-4. same-video identity (``is_hash_match``);
-5. synchronization confidence;
+3. synchronization confidence (stronger verified evidence first);
+4. the existing ``MatchTier`` hierarchy;
+5. same-video identity (``is_hash_match``);
 6. the existing compatibility percentage;
 7. stable, content-derived tie-breakers.
 
@@ -21,6 +21,13 @@ MovieHash match proves WHICH FILE a subtitle belongs to; it says nothing about
 whether its timings are correct. A candidate the verifier confirmed always
 outranks a hash-exact candidate whose timing is unknown, and a prediction never
 counts as verification.
+
+Synchronization confidence sits above compatibility so that, among candidates
+with the same sync state and evidence strength, the one with stronger measured
+evidence ranks first. Confidence values come from the existing verifier and
+prediction machinery; nothing here invents a score. Candidates with no sync
+claim keep the lowest confidence (-1.0) and therefore still fall through to
+compatibility order.
 
 Two deliberate refusals:
 
@@ -214,28 +221,43 @@ def _normalized_evidence(item: Any) -> tuple[str | None, str | None]:
     return state, availability
 
 
+def _ranked_confidence(item: Any, availability: str | None) -> float:
+    """Sync confidence, counted only when attached to a real evidence claim.
+
+    A prediction demoted below the action floor keeps its stored confidence
+    number, but ``_normalized_evidence`` already stripped its claim. Counting
+    that orphaned number would let a weak prediction outrank an unknown
+    candidate purely on a score the system itself refused to trust, so
+    availability ``unknown`` (or missing) always ranks at the floor (-1.0).
+    """
+    if availability is None or availability == "unknown":
+        return -1.0
+    return _sync_confidence_of(item)
+
+
 def comparison_key(item: Any) -> tuple:
     """Full sort key. Exposed so the ordering is directly testable.
 
     Precedence: user language preference, sync state, evidence availability,
-    the matcher's own rank, same-video identity, sync confidence, compatibility
+    sync confidence, the matcher's own rank, same-video identity, compatibility
     score, then stable identity tie-breakers.
 
     Same-video identity sits deliberately BELOW synchronization state and
     evidence, so a hash-exact subtitle with unverified timing never outranks a
-    hashless subtitle the verifier actually confirmed. It sits ABOVE sync
-    confidence, the compatibility percentage and provider/release, because among
-    candidates with comparable timing evidence, proof that the subtitle belongs
-    to THIS video is the next strongest discriminator.
+    hashless subtitle the verifier actually confirmed. Sync confidence sits
+    ABOVE compatibility so that, within the same sync state, stronger measured
+    evidence outranks weaker evidence even when compatibility differs. Identity
+    then discriminates among candidates with comparable timing evidence, since
+    proof that the subtitle belongs to THIS video is the next strongest signal.
     """
     state, availability = _normalized_evidence(item)
     return (
         _lang_rank(item),
         _STATE_ORDER.get(state, _STATE_ORDER[None]),
         _AVAILABILITY_ORDER.get(availability, _AVAILABILITY_ORDER[None]),
+        -_ranked_confidence(item, availability),
         _base_rank(item),
         _identity_rank(item),
-        -_sync_confidence_of(item),
         -_score_of(item),
         *_identity(item),
     )

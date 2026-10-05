@@ -74,6 +74,31 @@ MUTATIONS: tuple[Mutation, ...] = (
         ),
     ),
     Mutation(
+        name="sync-confidence-demoted-below-compatibility",
+        file="app/services/sync/ordering.py",
+        old="""        -_ranked_confidence(item, availability),
+        _base_rank(item),""",
+        new="""        _base_rank(item),
+        -_ranked_confidence(item, availability),""",  # MUTATION
+        guards=(
+            "within the same sync state, stronger measured sync evidence must "
+            "outrank better compatibility; compatibility-first ordering buries "
+            "the best-synchronized subtitle"
+        ),
+    ),
+    Mutation(
+        name="demoted-prediction-confidence-counted",
+        file="app/services/sync/ordering.py",
+        old="""    if availability is None or availability == "unknown":
+        return -1.0
+    return _sync_confidence_of(item)""",
+        new="    return _sync_confidence_of(item)  # MUTATION",
+        guards=(
+            "a prediction demoted below the action floor must not carry its "
+            "stored confidence into ranking; the claim was refused"
+        ),
+    ),
+    Mutation(
         name="video-hash-validation-removed",
         file="app/services/ranking.py",
         old="    return candidate if _VIDEO_HASH_RE.match(candidate) else None",
