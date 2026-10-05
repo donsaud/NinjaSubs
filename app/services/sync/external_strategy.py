@@ -22,7 +22,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.services.subtitle_matcher import extract_metadata
 from app.services.sync.cache import ReferenceDiskCache
@@ -1110,12 +1110,27 @@ class ExternalExactStrategy:
         every returned candidate still has to survive the existing verification
         gates on its own merits.
         """
-        validate = update_validator
+        out: list[ResolvedReference] = []
+        async for result in self.resolve_candidates_lazy(query, update_validator=update_validator):
+            out.append(result)
+        return out
+
+    async def _ranked_release_plan(
+        self, query: ReferenceQuery
+    ) -> tuple[list[Any], dict[int, Any], int]:
+        """Gather and rank releases WITHOUT downloading anything.
+
+        Returns ``(ranked, provider_of, limit)``: the ranked release list, a
+        map from ``id(release)`` to its provider, and the pool limit. Search
+        and ranking are cheap metadata operations; every download happens
+        later, on demand, so a request that verifies on the first candidate
+        never pays for the rest of the pool.
+        """
         providers = [
             p for p in (self._subdl, self._subsource, self._opensubtitles) if p is not None
         ]
         if not providers:
-            return []
+            return [], {}, 0
 
         candidates = await self._gather_candidates(providers, query)
         if not candidates:
@@ -1123,13 +1138,13 @@ class ExternalExactStrategy:
                 "[reference] no candidates from %s",
                 [self._provider_label(p) for p in providers],
             )
-            return []
+            return [], {}, 0
 
         provider_of = {id(rel): provider for rel, provider in candidates}
         ranked = _select_candidates_ranked([rel for rel, _ in candidates], query)
         if not ranked:
             logger.warning("[reference] resolve_all: no season/episode-matched reference")
-            return []
+            return [], {}, 0
 
         try:
             from app.config import settings as _settings
@@ -1137,77 +1152,149 @@ class ExternalExactStrategy:
             limit = max(1, int(getattr(_settings, "REFERENCE_POOL_LIMIT", 6) or 6))
         except Exception:  # pragma: no cover
             limit = 6
+        return ranked, provider_of, limit
 
-        out: list[ResolvedReference] = []
-        seen_digests: set[str] = set()
+    def _pool_limit(self) -> int:
+        try:
+            from app.config import settings as _settings
+
+            return max(1, int(getattr(_settings, "REFERENCE_POOL_LIMIT", 6) or 6))
+        except Exception:  # pragma: no cover
+            return 6
+
+    async def plan_candidates(
+        self, query: ReferenceQuery
+    ) -> list[tuple[Any, Any]]:
+        """Ranked ``(release, provider)`` pairs with NO downloads performed.
+
+        The orchestrator wraps each pair in a lazy adapter so the existing
+        verification loop downloads a candidate only when it actually reaches
+        it. A request that verifies on the first candidate therefore performs
+        exactly one download instead of filling the whole pool upfront.
+        Previously-rejected releases (for this query's cache stem) are filtered
+        here since that check needs no network; breaker and quota state is
+        re-checked at download time, when it is freshest.
+        """
+        ranked, provider_of, limit = await self._ranked_release_plan(query)
         stem = query.cache_stem
-        downloaded = 0
-
+        plan: list[tuple[Any, Any]] = []
         for cand in ranked:
-            if len(out) >= limit:
+            if len(plan) >= limit:
                 break
             cand_provider = provider_of.get(id(cand))
             if cand_provider is None:
                 continue
             if self._is_rejected(stem, cand):
                 continue
-            if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
-                continue
-            # Preserve the existing quota rule exactly: a non-hash OpenSubtitles
-            # download spends the account's metered daily allowance, so it stays
-            # reserved for MovieHash-exact references.
-            if (
-                cand_provider is self._opensubtitles
-                and reference_tier(query.target_filename, cand) != TIER_HASH
-            ):
-                continue
+            plan.append((cand, cand_provider))
+        return plan
 
-            # Pace consecutive downloads so one request cannot burst a provider
-            # into a 429 / circuit break. Skipped for the first download so the
-            # common single-candidate case pays no latency.
-            if downloaded:
-                await asyncio.sleep(_REFERENCE_DOWNLOAD_MIN_INTERVAL_SECONDS)
+    async def download_planned_candidate(
+        self,
+        cand: Any,
+        cand_provider: Any,
+        query: ReferenceQuery,
+        validate: Callable[[str], bool] | None,
+        shared: dict[str, Any],
+    ) -> ResolvedReference:
+        """Download ONE planned candidate, honouring pool-wide guards.
 
-            downloaded += 1
-            result = await self._download_candidate(cand, cand_provider, query)
-            text = result.text
-            if not text:
-                continue
-            if validate is not None and not validate(text):
-                # The validator only returns a bool, so re-measure here purely
-                # to attribute the verdict to a NAMED candidate. Without this
-                # the log cannot say which release was dropped or why.
-                # Name the candidate so the orchestrator's adjacent
-                # cue-sanity diagnostic (which carries the measured delta and
-                # first-dialogue offsets) can be attributed to a release.
-                logger.info(
-                    "[reference] resolve_all: candidate SKIPPED name=%r lang=%s cues=%d",
-                    getattr(cand, "release_name", "?"),
-                    getattr(cand, "lang", "?"),
-                    text.count(" --> "),
-                )
-                continue
+        ``shared`` carries ``{"downloaded": int, "seen": set[str]}`` across the
+        candidates of one request so pacing, the pool limit accounting, and
+        content-dedup behave exactly as they did under eager resolution.
+        Returns ``ResolvedReference(None)`` when this candidate is unusable, in
+        which case the caller simply advances to the next planned candidate.
+        """
+        if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
+            return ResolvedReference(None)
+        # Preserve the existing quota rule exactly: a non-hash OpenSubtitles
+        # download spends the account's metered daily allowance, so it stays
+        # reserved for MovieHash-exact references.
+        if (
+            cand_provider is self._opensubtitles
+            and reference_tier(query.target_filename, cand) != TIER_HASH
+        ):
+            return ResolvedReference(None)
 
-            digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
-            if digest in seen_digests:
-                logger.info(
-                    "[reference] resolve_all: candidate %r has duplicate content (%s); skipping",
-                    getattr(cand, "release_name", "?"),
-                    digest[:12],
-                )
+        # Pace consecutive downloads so one request cannot burst a provider
+        # into a 429 / circuit break. Skipped for the first download so the
+        # common single-candidate case pays no latency.
+        if shared.get("downloaded"):
+            await asyncio.sleep(_REFERENCE_DOWNLOAD_MIN_INTERVAL_SECONDS)
+        shared["downloaded"] = int(shared.get("downloaded") or 0) + 1
+
+        result = await self._download_candidate(cand, cand_provider, query)
+        text = result.text
+        if not text:
+            return ResolvedReference(None)
+        if validate is not None and not validate(text):
+            # The validator only returns a bool, so re-measure here purely
+            # to attribute the verdict to a NAMED candidate. Without this
+            # the log cannot say which release was dropped or why.
+            # Name the candidate so the orchestrator's adjacent
+            # cue-sanity diagnostic (which carries the measured delta and
+            # first-dialogue offsets) can be attributed to a release.
+            logger.info(
+                "[reference] resolve_all: candidate SKIPPED name=%r lang=%s cues=%d",
+                getattr(cand, "release_name", "?"),
+                getattr(cand, "lang", "?"),
+                text.count(" --> "),
+            )
+            return ResolvedReference(None)
+
+        seen: set[str] = shared.setdefault("seen", set())
+        digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+        if digest in seen:
+            logger.info(
+                "[reference] resolve_all: candidate %r has duplicate content (%s); skipping",
+                getattr(cand, "release_name", "?"),
+                digest[:12],
+            )
+            return ResolvedReference(None)
+        seen.add(digest)
+        return result
+
+    async def resolve_candidates_lazy(
+        self,
+        query: ReferenceQuery,
+        *,
+        update_validator: Callable[[str], bool] | None = None,
+    ) -> Any:
+        """Yield DISTINCT usable references one at a time, best-ranked first.
+
+        Async generator: each ``__anext__`` performs at most one download, so a
+        consumer that stops early (because a candidate verified) never pays for
+        the rest of the pool. All guards from eager resolution apply unchanged
+        per candidate: breaker, quota, pacing, validation, content-dedup.
+        """
+        ranked, provider_of, limit = await self._ranked_release_plan(query)
+        stem = query.cache_stem
+        shared: dict[str, Any] = {"downloaded": 0, "seen": set()}
+        yielded = 0
+        for cand in ranked:
+            if yielded >= limit:
+                break
+            cand_provider = provider_of.get(id(cand))
+            if cand_provider is None:
                 continue
-            seen_digests.add(digest)
-            out.append(result)
+            if self._is_rejected(stem, cand):
+                continue
+            result = await self.download_planned_candidate(
+                cand, cand_provider, query, update_validator, shared
+            )
+            if not result.text:
+                continue
+            yielded += 1
+            yield result
 
         logger.info(
             "[reference] resolve_all: %d distinct candidate(s) from %d ranked release(s) "
             "(limit=%d) digests=%s",
-            len(out),
-            downloaded,
+            yielded,
+            shared.get("downloaded") or 0,
             limit,
-            sorted(d[:12] for d in seen_digests),
+            sorted(d[:12] for d in shared.get("seen") or ()),
         )
-        return out
 
     async def _download_candidate(
         self, best, provider, query: ReferenceQuery

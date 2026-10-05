@@ -94,6 +94,58 @@ class _PreResolvedReference:
         return self._resolved
 
 
+class _LazyCandidate:
+    """Downloads ONE planned reference the first time the loop reaches it.
+
+    Holds a ``(release, provider)`` pair from
+    `ExternalExactStrategy.plan_candidates` plus the request-scoped ``shared``
+    state (``{"downloaded": int, "seen": set[str]}``). The download -- with the
+    strategy's breaker, quota, pacing, cue-sanity validation and content-dedup
+    guards -- happens inside `resolve_with_provenance`, i.e. only when the
+    verification loop actually reaches this candidate. When an earlier candidate
+    verifies, the loop returns and the remaining adapters never download, so a
+    request that succeeds on the first candidate performs exactly one download
+    instead of filling the whole pool upfront.
+
+    Every guarantee of the eager path applies unchanged: the same per-candidate
+    guards run (at download time, when breaker/quota state is freshest), and
+    the loop's own cue-sanity gate, disc-track skip, ALASS budget and verifier
+    still judge every downloaded candidate independently.
+    """
+
+    validates_target = False
+
+    def __init__(
+        self,
+        strategy: Any,
+        release: Any,
+        provider: Any,
+        query: Any,
+        shared: dict[str, Any],
+        validate: Any | None,
+    ) -> None:
+        self._strategy = strategy
+        self._release = release
+        self._provider = provider
+        self._query = query
+        self._shared = shared
+        self._validate = validate
+
+    async def resolve_with_provenance(self, query: Any, **kwargs: Any) -> Any:
+        validate = kwargs.get("update_validator", self._validate)
+        try:
+            return await self._strategy.download_planned_candidate(
+                self._release,
+                self._provider,
+                self._query,
+                validate,
+                self._shared,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[sync] lazy candidate download failed: %s -> next", exc)
+            return ResolvedReference(None)
+
+
 def decision_kind_is_name_based(kind: str | None) -> bool:
     """True when a reference's provenance is similarity, not exact identity.
 
@@ -909,8 +961,9 @@ class SyncOrchestrator:
         # identity for guesswork.
         expanded_attempts: list[tuple[str, Any]] = []
         for _name, _obj in attempts:
+            _plan = getattr(_obj, "plan_candidates", None)
             _multi = getattr(_obj, "resolve_all_with_provenance", None)
-            if not callable(_multi):
+            if not callable(_plan) and not callable(_multi):
                 expanded_attempts.append((_name, _obj))
                 continue
             # Preserve the strategy cache-hit shortcut BEFORE any fan-out. A
@@ -928,38 +981,85 @@ class SyncOrchestrator:
             # i.e. exactly the Whiplash case, where a cached `subdl_edition`
             # reference meant one ALASS run and no alternative was ever tried.
             # The proven reference stays FIRST (it is still the best-informed
-            # candidate); the fan-out then supplies genuine alternatives.
-            try:
-                _cands = await _multi(query, update_validator=_passes_cue_sanity)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(
-                    "[sync] %s multi-candidate expansion failed: %s -> single reference",
-                    _name, exc,
-                )
-                _cands = []
+            # candidate); the planned releases then supply genuine alternatives,
+            # each downloaded only if the loop actually reaches it.
+            _shared: dict[str, Any] = {"downloaded": 0, "seen": set()}
+            _planned: list[tuple[Any, Any]] = []
+            if callable(_plan):
+                try:
+                    _planned = await _plan(query)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "[sync] %s candidate planning failed: %s -> single reference",
+                        _name, exc,
+                    )
+                    _planned = []
+            elif callable(_multi):
+                try:
+                    _cands = await _multi(query, update_validator=_passes_cue_sanity)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "[sync] %s multi-candidate expansion failed: %s -> single reference",
+                        _name, exc,
+                    )
+                    _cands = []
+                for _i, _c in enumerate(_cands):
+                    expanded_attempts.append(
+                        (f"{_name}#candidate{_i + 1}", _PreResolvedReference(_c))
+                    )
+                if _cands:
+                    logger.info(
+                        "[sync] %s offered %d distinct candidate(s); each will be verified independently",
+                        _name, len(_cands),
+                    )
+                else:
+                    # The fan-out already ran and found nothing usable. Calling the
+                    # strategy again here would repeat the identical provider search
+                    # and reach the identical empty result, so the request simply
+                    # proceeds with no reference and serves the original.
+                    logger.info(
+                        "[sync] %s produced no usable reference candidate; serving original",
+                        _name,
+                    )
+                continue
             if _hit is not None and getattr(_hit, "text", None):
-                # Keep the cached reference first, and do not re-offer it if the
-                # fan-out already returned identical content.
-                _hit_text = _hit.text
-                if not any(getattr(c, "text", None) == _hit_text for c in _cands):
-                    _cands = [_hit, *_cands]
-            if not _cands:
-                # The fan-out already ran and found nothing usable. Calling the
-                # strategy again here would repeat the identical provider search
-                # and reach the identical empty result, so the request simply
-                # proceeds with no reference and serves the original.
+                # Keep the cached reference first. Seed the shared digest set
+                # with its content so the planned releases cannot re-offer
+                # identical bytes under a different release name.
+                _shared["seen"].add(
+                    hashlib.sha256(
+                        str(_hit.text).encode("utf-8", "replace")
+                    ).hexdigest()
+                )
+                expanded_attempts.append(
+                    (f"{_name}#cache", _PreResolvedReference(_hit))
+                )
+            if not _planned and not (
+                _hit is not None and getattr(_hit, "text", None)
+            ):
+                # No plan and no cache hit: nothing to try for this strategy.
+                # (When a plan exists, emptiness after download failures is
+                # discovered per candidate by the loop itself, each skip
+                # carrying its own reason.)
                 logger.info(
                     "[sync] %s produced no usable reference candidate; serving original",
                     _name,
                 )
                 continue
             logger.info(
-                "[sync] %s offered %d distinct candidate(s); each will be verified independently",
-                _name, len(_cands),
+                "[sync] %s planned %d candidate(s); each downloads only if reached "
+                "and is verified independently",
+                _name, len(_planned),
             )
-            for _i, _c in enumerate(_cands):
+            for _i, (_rel, _prov) in enumerate(_planned):
                 expanded_attempts.append(
-                    (f"{_name}#candidate{_i + 1}", _PreResolvedReference(_c))
+                    (
+                        f"{_name}#candidate{_i + 1}",
+                        _LazyCandidate(
+                            _obj, _rel, _prov, query, _shared,
+                            _passes_cue_sanity,
+                        ),
+                    )
                 )
         attempts = expanded_attempts
 
