@@ -576,3 +576,16 @@ def test_shadow_metadata_count_in_telemetry_log(caplog):
     ]
     assert counts and all(c >= 1 for c in counts)
     assert not any("ترجمة" in line for line in shadow_lines)
+
+
+def test_shadow_non_srt_input_fails_safe():
+    ass_text = (
+        "[Script Info]\nTitle: episode\nScriptType: v4.00+\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default,Arial\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Text\n"
+    )
+    result = run_shadow_evaluation(
+        ass_text, ass_text, alass_state_value="unverified", alass_verified=False
+    )
+    assert result.classification == INSUFFICIENT_EVIDENCE
+    assert result.eligible_for_future_serving is False

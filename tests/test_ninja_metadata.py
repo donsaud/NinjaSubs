@@ -235,6 +235,35 @@ def test_linear_fit_refuses_metadata_contaminated_set():
     assert model.intercept_ms == pytest.approx(2000.0, abs=1.0)
 
 
+def test_long_markup_credit_cannot_shift_fit_despite_evading_classifier():
+    """Real-world shape (Dexter d010faffc7142fdb cue 0): a 94-char markup-heavy
+    credit block that the classifier does NOT catch (length cap, handle
+    preceded by markup). Placed at divergent timing (+35s vs +2s dialogue), it
+    must still not move the fit: the offset window and corroboration gates
+    contain what the classifier missed. Defense in depth, pinned."""
+    # Shape mirrors the real Dexter cue: markup-heavy, handle glued directly
+    # to a tag close (so the handle pattern, which needs whitespace or
+    # start-of-line before @, cannot see it), and over the length cap.
+    credit = (
+        "== Translated by ABCDEFGHIJKLMNOPQRST ==<font color=#00FFFF>@ghijklmnopqrs</font>=="
+    )
+    assert len(credit) > 80
+    assert _is_metadata_cue(credit) is False  # documents the known classifier gap
+    target = [(5000, 7000, credit)] + [
+        (60000 + i * 4000, 62000 + i * 4000, "dialogue line number %d here" % i)
+        for i in range(14)
+    ]
+    reference = [(40000, 42000, credit)] + [
+        (60000 + i * 4000 + 2000, 62000 + i * 4000 + 2000, "dialogue line number %d here" % i)
+        for i in range(14)
+    ]
+    anchors = AnchorDetector().detect(target, reference)
+    assert not any("ranslated" in (a.source_text or "") for a in anchors)
+    model = AnchorFitter().fit_constant(anchors)
+    assert model is not None
+    assert model.offset_ms == pytest.approx(2000.0, abs=250.0)
+
+
 def test_detector_stats_report_metadata_refusals():
     stats: dict = {}
     target = [_cue(1000, "ترجمة فلان"), _cue(60000, "dialogue line one here"),
