@@ -42,6 +42,83 @@ class Mutation:
 
 
 MUTATIONS: tuple[Mutation, ...] = (
+    Mutation(
+        name="timeline-affine-edition-promoted",
+        file="app/services/sync/orchestrator.py",
+        old='"reference_kind": resolved.kind,',
+        new='"reference_kind": "hash",',
+        guards="verified timing must preserve heuristic edition provenance",
+    ),
+    Mutation(
+        name="timeline-affine-moviehash-proof-removed",
+        file="app/providers/opensubtitles.py",
+        old='bool(params.get("moviehash")) and attributes.get("moviehash_match") is True',
+        new='bool(params.get("moviehash"))',
+        guards="only the API's explicit boolean confirmation proves exact MovieHash identity",
+    ),
+    Mutation(
+        name="timeline-affine-select-worst",
+        file="app/services/sync/timeline_affine.py",
+        old="                    reverse=True)",
+        new="                    reverse=False)",
+        guards="best temporal agreement must win the bounded hypothesis search",
+    ),
+    Mutation(
+        name="timeline-affine-no-improvement",
+        file="app/services/sync/timeline_affine.py",
+        old="    if report.after - report.before < MIN_IMPROVEMENT:",
+        new="    if False:",
+        guards="an absolute good score without improvement cannot justify transformation",
+    ),
+    Mutation(
+        name="timeline-affine-cue-count-rejection",
+        file="app/services/sync/timeline_affine.py",
+        old="    models = hypotheses(target, reference)",
+        new="    if len(target_cues) != len(reference_cues):\n        return result\n    models = hypotheses(target, reference)",
+        guards="split and merged occupancy must not require raw cue count equality",
+    ),
+    Mutation(
+        name="timeline-affine-endpoints-only",
+        file="app/services/sync/timeline_affine.py",
+        old="    if min(report.windows) < MIN_WINDOW_SCORE:",
+        new="    if False:",
+        guards="the movie middle must be measured independently of endpoint agreement",
+    ),
+    Mutation(
+        name="timeline-affine-ignore-discontinuity",
+        file="app/services/sync/timeline_affine.py",
+        old="    if any(abs(d) > 1500 for d in report.local_offsets_ms):",
+        new="    if False:",
+        guards="a local offset step must not be accepted as global drift",
+    ),
+    Mutation(
+        name="timeline-affine-metadata-endpoint",
+        file="app/services/sync/timeline_affine.py",
+        old="_is_usable_dialogue(c[2])",
+        new="bool(c[2])",
+        guards="metadata must be removed from temporal evidence and reliable endpoints",
+    ),
+    Mutation(
+        name="timeline-affine-alter-text",
+        file="app/services/sync/timeline_affine.py",
+        old="    return _TIMING.sub(replace, text)",
+        new="    return _TIMING.sub(replace, text).replace('Speaker', 'Changed')",
+        guards="output must preserve target text exactly",
+    ),
+    Mutation(
+        name="timeline-affine-bypass-verification",
+        file="app/services/sync/timeline_affine.py",
+        old="    report.accepted = not report.reasons",
+        new="    report.accepted = True",
+        guards="no failed distributed verification may produce a served artifact",
+    ),
+    Mutation(
+        name="timeline-affine-bypass-serving-gate",
+        file="app/services/sync/orchestrator.py",
+        old="or not may_serve_synchronized(evaluation.sync_state, evaluation.verification)",
+        new="or False",
+        guards="accepted flag alone must never bypass measured-verdict delivery checks",
+    ),
     # --- Reference tier strictness ----------------------------------------
     #
     # Same-group references (e.g. the Dexter d3g match) must be exhausted
@@ -382,11 +459,11 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         name="pal-fabricate-missing-endpoints",
         file="app/services/sync/pal_two_point.py",
-        old="    if t_first is None or r_first is None or t_last is None or r_last is None:\n        return None",
-        new="    if t_first is None or r_first is None or t_last is None or r_last is None:\n        return (EndpointAnchor(target_ms=0, reference_ms=0, kind=\"first\"), EndpointAnchor(target_ms=1, reference_ms=1, kind=\"last\"))  # MUTATION",
+        old="    if not pairs:\n        return PalTwoPointResult(accepted=False, reason_codes=[\"no_endpoints\"])",
+        new="    if not pairs:\n        pairs = [(EndpointAnchor(target_ms=0, reference_ms=0, kind=\"first\"), EndpointAnchor(target_ms=1, reference_ms=1, kind=\"last\"))]  # MUTATION",
         guards=(
-            "a missing first or last anchor must abort the attempt; fabricated "
-            "zero correspondences must never reach slope fitting"
+            "with no endpoint pairs the attempt must abort as no_endpoints; "
+            "fabricated zero correspondences must never reach slope fitting"
         ),
     ),
     Mutation(
@@ -407,6 +484,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         guards=(
             "PAL results must carry distinct provenance through cache and "
             "logs; masquerading as a generic edition destroys auditability"
+        ),
+    ),
+    Mutation(
+        name="pal-select-worst-pair",
+        file="app/services/sync/pal_two_point.py",
+        old="        if best is None or key < best[0]:",
+        new="        if best is None or key > best[0]:  # MUTATION",
+        guards=(
+            "the minimal residual p95 must win among PAL-class pairs; "
+            "selecting the worst pair serves the poorest alignment available"
         ),
     ),
     Mutation(

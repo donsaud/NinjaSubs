@@ -89,6 +89,15 @@ MIN_STRUCTURAL_SIMILARITY = LARGE_OFFSET_MIN_STRUCTURAL_SIMILARITY
 _ENDPOINT_RUN_LENGTH = 2
 _ENDPOINT_MAX_GAP_MS = 20_000
 
+#: Bounded endpoint search: the first N dialogue runs and the last M runs on
+#: each side, paired positionally (i-th opening run with i-th opening run).
+#: 3x3 = 9 pairs maximum, each evaluated independently. A single fixed pair
+#: can miss the best alignment when releases open/close with different bonus
+#: scenes; the bound keeps the search cheap (one verifier evaluation per
+#: PAL-class pair, ~200 ms each) and deterministic.
+_MAX_BEGIN_RUNS = 3
+_MAX_END_RUNS = 3
+
 Cue = tuple[int, int, str]
 
 
@@ -113,6 +122,10 @@ class PalTwoPointResult:
     transformed_text: str | None = None
     evaluation: Any | None = None
     reason_codes: list[str] = field(default_factory=list)
+    #: Number of candidate pairs that reached verifier evaluation. Zero means
+    #: the attempt ended before any verification ran (no pairs, or every pair
+    #: filtered by span/slope gates).
+    pairs_evaluated: int = 0
 
 
 def _is_usable_dialogue(text: str) -> bool:
@@ -205,6 +218,73 @@ def is_pal_slope(slope: float) -> bool:
     return abs(slope - PAL_SLOPE) <= PAL_SLOPE_TOLERANCE
 
 
+def _dialogue_runs(cues: list[Cue]) -> list[list[int]]:
+    """All maximal usable-dialogue runs, as lists of cue indices, in order.
+
+    Shares the run semantics of the run logic inside ``find_endpoint_anchors``
+    (2+ consecutive usable-dialogue cues, gaps bounded), so both agree on what
+    counts as dialogue. Runs are maximal: a gap or a non-dialogue cue ends the
+    current run rather than merely pausing it.
+    """
+    runs: list[list[int]] = []
+    run: list[int] = []
+    prev_end: int | None = None
+    for index, (start, end, text) in enumerate(cues):
+        if not _is_usable_dialogue(text):
+            if len(run) >= _ENDPOINT_RUN_LENGTH:
+                runs.append(run)
+            run = []
+            prev_end = None
+            continue
+        if run and prev_end is not None and start - prev_end > _ENDPOINT_MAX_GAP_MS:
+            if len(run) >= _ENDPOINT_RUN_LENGTH:
+                runs.append(run)
+            run = []
+        run.append(index)
+        prev_end = end
+    if len(run) >= _ENDPOINT_RUN_LENGTH:
+        runs.append(run)
+    return runs
+
+
+def _candidate_endpoint_pairs(
+    target_cues: list[Cue], reference_cues: list[Cue]
+) -> list[tuple[EndpointAnchor, EndpointAnchor]]:
+    """Bounded positional endpoint pairs, in deterministic evaluation order.
+
+    The i-th opening dialogue run pairs with the i-th opening run, and the
+    j-th closing run with the j-th closing run -- the same positional
+    hypothesis as ``find_endpoint_anchors``, extended to neighboring runs so a
+    single mismatched opening/closing scene cannot hide the best alignment.
+    Degenerate pairs (non-increasing timestamps) are dropped, never repaired.
+    """
+    t_runs = _dialogue_runs(target_cues)
+    r_runs = _dialogue_runs(reference_cues)
+    if not t_runs or not r_runs:
+        return []
+    pairs: list[tuple[EndpointAnchor, EndpointAnchor]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    n_begin = min(_MAX_BEGIN_RUNS, len(t_runs), len(r_runs))
+    n_end = min(_MAX_END_RUNS, len(t_runs), len(r_runs))
+    for i in range(n_begin):
+        t1 = target_cues[t_runs[i][0]][0]
+        r1 = reference_cues[r_runs[i][0]][0]
+        for j in range(1, n_end + 1):
+            t2 = target_cues[t_runs[-j][-1]][0]
+            r2 = reference_cues[r_runs[-j][-1]][0]
+            if t2 <= t1 or r2 <= r1:
+                continue
+            key = (t1, r1, t2, r2)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append((
+                EndpointAnchor(target_ms=t1, reference_ms=r1, kind="first"),
+                EndpointAnchor(target_ms=t2, reference_ms=r2, kind="last"),
+            ))
+    return pairs
+
+
 def attempt_pal_two_point(
     target_text: str,
     reference_text: str,
@@ -228,47 +308,69 @@ def attempt_pal_two_point(
     except Exception as exc:
         return PalTwoPointResult(accepted=False, reason_codes=[f"parse_failed:{type(exc).__name__}"])
 
-    endpoints = find_endpoint_anchors(target_cues, reference_cues)
-    if endpoints is None:
+    pairs = _candidate_endpoint_pairs(target_cues, reference_cues)
+    if not pairs:
         return PalTwoPointResult(accepted=False, reason_codes=["no_endpoints"])
-    first, last = endpoints
 
-    span_ms = last.target_ms - first.target_ms
-    if span_ms < MIN_ANCHOR_SPAN_MS:
+    # Evaluate every PAL-class pair and keep the minimal residual p95. A
+    # single fixed pair can miss the best alignment when releases open or
+    # close with different bonus scenes; the bound (<=9 pairs) keeps the
+    # search cheap while the verifier still judges every candidate.
+    pair_notes: list[str] = []
+    best: tuple | None = None
+    n_evaluated = 0
+    for (first, last) in pairs:
+        span_ms = last.target_ms - first.target_ms
+        if span_ms < MIN_ANCHOR_SPAN_MS:
+            pair_notes.append("span_too_short")
+            continue
+        slope = (last.reference_ms - first.reference_ms) / span_ms
+        intercept = first.reference_ms - slope * first.target_ms
+        if not (MIN_SLOPE <= slope <= MAX_SLOPE):
+            pair_notes.append("slope_out_of_bounds")
+            continue
+        if not is_pal_slope(slope):
+            pair_notes.append("not_pal_class")
+            continue
+        model = LinearSyncModel(slope=slope, intercept_ms=intercept, inliers=2)
+        transformed = render_srt(model.apply([(s, e, t) for s, e, t in target_cues]))
+        analyzer = analyzer or AlignmentAnalyzer()
+        try:
+            evaluation = analyzer.analyze(
+                target_cues,
+                transformed,
+                reference_text,
+                alass_applied=True,
+                alass_successful=True,
+                max_plausible_offset_ms=max_plausible_offset_ms,
+            )
+        except Exception as exc:
+            pair_notes.append(f"verification_raised:{type(exc).__name__}")
+            continue
+        n_evaluated += 1
+        p95_seen = evaluation.p95_offset_ms
+        key = (p95_seen is None, p95_seen if p95_seen is not None else 0.0)
+        logger.info(
+            "[pal-two-point] pair T1=%d R1=%d T2=%d R2=%d slope=%.6f "
+            "p95=%s struct=%s coverage=%s state=%s",
+            first.target_ms,
+            first.reference_ms,
+            last.target_ms,
+            last.reference_ms,
+            slope,
+            evaluation.p95_offset_ms,
+            evaluation.structural_similarity,
+            evaluation.coverage_score,
+            getattr(getattr(evaluation, "sync_state", None), "value", None),
+        )
+        if best is None or key < best[0]:
+            best = (key, first, last, slope, intercept, transformed, evaluation)
+    if best is None:
         return PalTwoPointResult(
-            accepted=False, first=first, last=last,
-            reason_codes=["span_too_short"],
+            accepted=False, reason_codes=sorted(set(pair_notes)) or ["no_verifiable_pair"],
+            pairs_evaluated=n_evaluated,
         )
-    slope = (last.reference_ms - first.reference_ms) / span_ms
-    intercept = first.reference_ms - slope * first.target_ms
-    if not (MIN_SLOPE <= slope <= MAX_SLOPE):
-        return PalTwoPointResult(
-            accepted=False, first=first, last=last,
-            reason_codes=["slope_out_of_bounds"],
-        )
-    if not is_pal_slope(slope):
-        return PalTwoPointResult(
-            accepted=False, first=first, last=last,
-            reason_codes=["not_pal_class"],
-        )
-
-    model = LinearSyncModel(slope=slope, intercept_ms=intercept, inliers=2)
-    transformed = render_srt(model.apply([(s, e, t) for s, e, t in target_cues]))
-    analyzer = analyzer or AlignmentAnalyzer()
-    try:
-        evaluation = analyzer.analyze(
-            target_cues,
-            transformed,
-            reference_text,
-            alass_applied=True,
-            alass_successful=True,
-            max_plausible_offset_ms=max_plausible_offset_ms,
-        )
-    except Exception as exc:
-        return PalTwoPointResult(
-            accepted=False, first=first, last=last,
-            reason_codes=[f"verification_raised:{type(exc).__name__}"],
-        )
+    _, first, last, slope, intercept, transformed, evaluation = best
 
     # Narrow PAL policy: every gate must pass. p95/struct/coverage reuse
     # existing bounds; the slope match above is the independent corroboration
@@ -288,6 +390,7 @@ def attempt_pal_two_point(
             accepted=False, first=first, last=last, slope=slope,
             intercept_ms=intercept, transformed_text=transformed,
             evaluation=evaluation, reason_codes=reasons,
+            pairs_evaluated=n_evaluated,
         )
     evaluation.reasons.append(
         f"{STRATEGY_ID}: PAL-speedup two-point transform "
@@ -298,4 +401,5 @@ def attempt_pal_two_point(
         intercept_ms=intercept, transformed_text=transformed,
         evaluation=evaluation,
         reason_codes=["pal_accepted"],
+        pairs_evaluated=n_evaluated,
     )

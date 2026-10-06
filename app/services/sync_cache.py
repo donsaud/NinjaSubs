@@ -34,7 +34,7 @@ _DEFAULT_TTL = 86_400  # 24 hours
 _NEGATIVE_TTL = 300  # 5 minutes
 # Bump when the verification/ordering logic changes so stale verdicts written by
 # an older engine are never reused. Mirrors ReferenceDiskCache's engine_version.
-SYNC_VERDICT_ENGINE_VERSION = 1
+SYNC_VERDICT_ENGINE_VERSION = 3
 # Verdict TTL. Shorter than the payload TTL: a positive synchronization claim
 # should be re-derived reasonably often rather than trusted for a full day.
 _VERDICT_TTL = 7 * 86_400  # 7 days

@@ -307,7 +307,7 @@ def test_the_decision_is_recorded_on_the_investigation():
 # --------------------------------------------------------------------------- #
 
 
-def test_orchestrator_override_requires_the_full_decision(caplog):
+def test_orchestrator_override_requires_the_full_decision(caplog, monkeypatch):
     """The dangerous wiring mistake: overriding because the large-offset path
     ran at all, instead of because the decision passed.
 
@@ -385,6 +385,12 @@ def test_orchestrator_override_requires_the_full_decision(caplog):
     orchestrator = SyncOrchestrator(
         external_strategy=strategy, sync_service=_StubSyncService()
     )
+    # Exercise the ALASS investigation specifically. The pristine target is
+    # actually a perfect constant-offset case, which the affine strategy can
+    # now independently verify before this deliberately broken ALASS output.
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(orchestrator, "_try_timeline_affine", AsyncMock(return_value=None))
     import logging as _logging
 
     with caplog.at_level(_logging.INFO, logger="app.services.sync.orchestrator"):

@@ -489,7 +489,7 @@ class SyncOrchestrator:
             str(meta.get("video_size") or ""), meta.get("lang"),
         ], ensure_ascii=False).encode()).hexdigest()[:16]
         strict = bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True))
-        return f"{key}:v4:{strict}:{context_digest}:{auth_digest}"
+        return f"{key}:v6-timeline-affine-v2:{strict}:{context_digest}:{auth_digest}"
 
     @staticmethod
     def _verdict_key(meta: dict, subtitle_hash: str) -> str | None:
@@ -871,6 +871,11 @@ class SyncOrchestrator:
             )
             if verdict["ok"]:
                 return True
+            from app.services.sync.timeline_affine import plausible_affine_reference
+
+            if plausible_affine_reference(target_text, reference_text):
+                # Admission to independent verification, never identity proof.
+                return True
             # Beyond the normal window the reference is not rejected
             # outright any more: it becomes a Large Offset Candidate and
             # has to earn an alass attempt from the evidence gate. Reusing
@@ -1154,6 +1159,14 @@ class SyncOrchestrator:
             decision_kind = resolved.kind
             if pal_first_reference is None and reference:
                 pal_first_reference = reference
+            # Cheap global candidate on pristine input, independently verified
+            # per reference. Never promotes edition provenance to MovieHash.
+            affine_served = await self._try_timeline_affine(
+                pal_target_snapshot, resolved, meta, target_id, content_hash,
+                resolution_key, verdict_key,
+            )
+            if affine_served is not None:
+                return affine_served
             # This only means a reference is now IN HAND. Alass may still not
             # run: the already-aligned shortcut below returns the original
             # subtitle before any subprocess is spawned. Claiming "invoking
@@ -1849,6 +1862,72 @@ class SyncOrchestrator:
         )
         return sub_bytes
 
+    async def _try_timeline_affine(
+        self,
+        target_text: str | None,
+        resolved: ResolvedReference,
+        meta: dict,
+        target_id: str,
+        content_hash: str,
+        resolution_key: str,
+        verdict_key: str | None,
+    ) -> bytes | None:
+        """Serve/cache only an independently verified affine artifact."""
+        from app.services.sync.timeline_affine import (
+            MODEL_VERSION,
+            STRATEGY_ID,
+            attempt_timeline_affine,
+        )
+
+        if not target_text or not resolved.text or resolved.partial:
+            return None
+        try:
+            result = await asyncio.to_thread(attempt_timeline_affine, target_text, resolved.text)
+        except Exception as exc:
+            logger.info("[timeline-affine] accepted=false reason=exception:%s", type(exc).__name__)
+            return None
+        evaluation = result.evaluation
+        if (not result.accepted or not result.transformed_text or evaluation is None
+                or not may_serve_synchronized(evaluation.sync_state, evaluation.verification)):
+            return None
+        evaluation.reference_trust = resolved.reference_trust
+        transformed = result.transformed_text.encode("utf-8")
+        key = build_synced_cache_key(
+            meta, target_id, content_hash=content_hash, decision=f"{STRATEGY_ID}-{MODEL_VERSION}"
+        )
+        self._last_evaluation = evaluation
+        await self._store_verdict(
+            verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key
+        )
+        self._audit_serve(evaluation, meta, target_id, from_cache=False, resolved=resolved)
+        self._metrics["candidates_verified"] += 1
+        if self._sync_cache is not None:
+            await self._sync_cache.clear_failed(resolution_key)
+            outcome_meta = {
+                "sync_state": evaluation.sync_state.value,
+                "verification": evaluation.verification.value,
+                "sync_confidence": evaluation.sync_confidence,
+                "decision": STRATEGY_ID,
+                "model_version": MODEL_VERSION,
+                "reference_kind": resolved.kind,
+                "reference_sha": hashlib.sha256(resolved.text.encode()).hexdigest(),
+                "slope": result.slope,
+                "intercept_ms": result.intercept_ms,
+            }
+            await self._sync_cache.set(key, transformed)
+            await self._sync_cache.set_meta(key, outcome_meta)
+            await self._sync_cache.set(resolution_key, transformed)
+            await self._sync_cache.set_meta(resolution_key, outcome_meta)
+        self._record_outcome(meta, classify_outcome(True, STRATEGY_ID, False))
+        logger.info(
+            "[sync] delivery sub=%s strategy=%s reference_sha=%s reference_provenance=%s "
+            "verification=%s serving_state=synchronized served_is_transformed=True "
+            "slope=%s intercept_ms=%s",
+            target_id, STRATEGY_ID, hashlib.sha256(resolved.text.encode()).hexdigest()[:16],
+            resolved.kind, evaluation.verification.value, result.slope, result.intercept_ms,
+        )
+        return transformed
+
     async def _try_pal_two_point_fallback(
         self,
         target_text: str | None,
@@ -1899,10 +1978,17 @@ class SyncOrchestrator:
         # showed ALASS rejections and then silence.
         first_ms = result.first.target_ms if result.first else None
         last_ms = result.last.target_ms if result.last else None
+        # first_ms/last_ms above are the SELECTED anchors' target-side
+        # timestamps (not subtitle bounds); r1_ms/r2_ms are their reference
+        # counterparts, and pairs_evaluated counts pairs that reached the
+        # verifier, so a future trace shows exactly what was tried and won.
+        r1_ms = result.first.reference_ms if result.first else None
+        r2_ms = result.last.reference_ms if result.last else None
         evaluation = result.evaluation
         logger.info(
             "[pal-two-point] sub=%s evaluated=true accepted=%s slope=%s "
-            "intercept_ms=%s first_ms=%s last_ms=%s p95=%s struct=%s "
+            "intercept_ms=%s first_ms=%s last_ms=%s r1_ms=%s r2_ms=%s "
+            "pairs_evaluated=%d p95=%s struct=%s "
             "coverage=%s reasons=%s",
             target_id,
             result.accepted,
@@ -1910,6 +1996,9 @@ class SyncOrchestrator:
             f"{result.intercept_ms:.0f}" if result.intercept_ms is not None else "n/a",
             first_ms if first_ms is not None else "n/a",
             last_ms if last_ms is not None else "n/a",
+            r1_ms if r1_ms is not None else "n/a",
+            r2_ms if r2_ms is not None else "n/a",
+            result.pairs_evaluated,
             evaluation.p95_offset_ms if evaluation is not None else "n/a",
             evaluation.structural_similarity if evaluation is not None else "n/a",
             evaluation.coverage_score if evaluation is not None else "n/a",

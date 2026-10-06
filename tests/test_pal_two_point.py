@@ -162,7 +162,11 @@ def test_metadata_never_becomes_an_endpoint():
     from app.services.sync.ninja_points import _is_metadata_cue
 
     assert _is_metadata_cue("Translated by XYZ") is True
-    credit = "Translated by XYZ www.example.com"
+    # "Ripped by GOLD" is the discriminating fixture: the matcher's own
+    # dialogue check accepts it, so ONLY the metadata clause refuses it. A
+    # credit the dialogue check already rejects would prove nothing about
+    # this gate.
+    credit = "Ripped by GOLD"
     assert _is_metadata_cue(credit) is True
     target = [(1000, 3000, credit)] + _film(1100, start_ms=5000)
     t_text, r_text = _srt(target), _srt(_drift(_film(1100), PAL_SLOPE, 500.0))
@@ -272,12 +276,14 @@ def test_endpoint_anchors_are_real_dialogue():
     assert last.target_ms > first.target_ms
 
 
-SUBTEST_DIR = os.environ.get("NINJASUBS_SUBTEST_DIR", r"C:\Users\Saud\Desktop\SubTEST")
+SUBTEST_DIR = os.environ.get("NINJASUBS_SUBTEST_DIR", "")
 
 
 def _subtest_paths():
     import pathlib
 
+    if not SUBTEST_DIR:
+        pytest.skip("SubTEST fixtures absent (NINJASUBS_SUBTEST_DIR unset or missing files)")
     root = pathlib.Path(SUBTEST_DIR)
     target = root / "Whiplash (2014) WEBRip.iTunes.ar.srt"
     reference = root / "Whiplash.2014.1080p.REMUX.BluRay.AVC.DTS.HD.MA.5.1-HDA.srt"
@@ -295,8 +301,61 @@ def test_whiplash_pal_two_point_regression():
     assert result.accepted is True
     assert result.slope == pytest.approx(1.042748, abs=0.001)
     assert result.first is not None and result.first.target_ms == 142640
+    # Min-p95 selection picks the end run that fits best, not the fixed last
+    # run: the previous single-pair code always used 5333360 (p95 2286,
+    # rejected); the best pair ends at 5110680 (p95 1868, accepted).
+    assert result.last is not None and result.last.target_ms == 5110680
     assert result.transformed_text is not None
     assert "two_point_linear_pal" in STRATEGY_ID
+
+def test_best_pair_wins_by_minimum_p95():
+    """Multi-pair selection: the minimal residual p95 wins, not the first pair.
+
+    Three PAL-class pairs are evaluated with stubbed p95 values where the
+    FIRST evaluated pair is the worst. Min-selection must pick the second
+    pair (p95 1500) and accept it; first-pair-wins would select p95 2500 and
+    reject on p95_too_high instead.
+    """
+
+    class _SequencedAnalyzer(_StubAnalyzer):
+        def __init__(self, p95_values):
+            super().__init__()
+            self._sequence = list(p95_values)
+
+        def analyze(self, target_cues, transformed, reference_text, **kwargs):
+            value = self._sequence.pop(0) if self._sequence else 100.0
+            self.seen.append((target_cues, transformed, reference_text, kwargs))
+            return _StubEvaluation(value, 0.9, 1.0)
+
+    block_a = _film(1100, tag="alpha", start_ms=1000)
+    gap_end = block_a[-1][1] + 30000
+    block_b = _film(1100, tag="beta", start_ms=gap_end)
+    target_cues = block_a + block_b
+    ref_cues = _drift(target_cues, PAL_SLOPE, 500.0)
+    target, reference = _texts(target_cues, ref_cues)
+
+    analyzer = _SequencedAnalyzer([2500.0, 1500.0, 1800.0])
+    result = attempt_pal_two_point(target, reference, analyzer)
+    assert len(analyzer.seen) == 3
+    assert result.accepted is True
+    # Second evaluated pair wins: its end anchor is block A's end, not B's.
+    block_a_end = block_a[-1][0]
+    assert result.last is not None and result.last.target_ms == block_a_end
+    assert result.reason_codes == ["pal_accepted"]
+
+
+def test_candidate_pair_count_is_bounded():
+    """The endpoint search never explodes: <=9 pairs regardless of run count."""
+    from app.services.sync.pal_two_point import _candidate_endpoint_pairs
+
+    many_runs = []
+    start = 1000
+    for block in range(8):
+        many_runs.extend(_film(50, tag=f"b{block}", start_ms=start))
+        start += 50 * 3000 + 30000
+    pairs = _candidate_endpoint_pairs(many_runs, many_runs)
+    assert 0 < len(pairs) <= 9
+
 
 async def test_pal_rejection_emits_structured_outcome_log(caplog):
     """Regression: a PAL rejection must be diagnosable from logs.
@@ -324,3 +383,56 @@ async def test_pal_rejection_emits_structured_outcome_log(caplog):
     line = hits[0].message
     assert "evaluated=true" in line and "accepted=False" in line
     assert "slope=" in line and "reasons=" in line
+
+
+def test_pair_enumeration_is_visible_in_logs(caplog):
+    """Regression for the live Whiplash discrepancy investigation: a single
+    outcome line cannot prove multi-pair enumeration ran, nor which pair won.
+    Every pair reaching verification must emit its own line, and the outcome
+    line must carry the evaluated count plus the selected R1/R2.
+    """
+    import logging
+
+    block_a = _film(1100, tag="alpha", start_ms=1000)
+    gap_end = block_a[-1][1] + 30000
+    block_b = _film(1100, tag="beta", start_ms=gap_end)
+    target_cues = block_a + block_b
+    ref_cues = _drift(target_cues, PAL_SLOPE, 500.0)
+    target, reference = _texts(target_cues, ref_cues)
+
+    with caplog.at_level(logging.INFO, logger="app.services.sync.pal_two_point"):
+        result = attempt_pal_two_point(target, reference)
+    assert result.accepted is True
+    pair_lines = [
+        r.message for r in caplog.records if "pal-two-point] pair " in r.message
+    ]
+    # 2 begin runs x 2 end runs, minus degenerate combos: every surviving
+    # pair that reaches the verifier leaves exactly one line.
+    assert len(pair_lines) == result.pairs_evaluated
+    assert result.pairs_evaluated >= 2
+    for line in pair_lines:
+        for field in ("T1=", "R1=", "T2=", "R2=", "slope=", "p95=", "state="):
+            assert field in line, f"pair line missing {field}: {line}"
+
+
+async def test_outcome_reports_selected_reference_anchors(caplog):
+    """first_ms/last_ms alone are ambiguous (target side only); the outcome
+    must also expose the selected reference-side anchors and pair count."""
+    import logging
+
+    from app.services.sync.orchestrator import SyncOrchestrator
+
+    target = _srt(_film(200))
+    shifted = [(s + 2000, e + 2000, t) for s, e, t in _film(200)]
+    reference = _srt(shifted)
+    orch = SyncOrchestrator(sync_cache=None, external_strategy=None, sync_service=None)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.orchestrator"):
+        out = await orch._try_pal_two_point_fallback(
+            target, reference, {}, "test-sub", b"x", "ch", "rk", None
+        )
+    assert out is None
+    lines = [r.message for r in caplog.records if "evaluated=true" in r.message]
+    assert lines, "outcome line must be emitted"
+    line = lines[0]
+    for field in ("pairs_evaluated=", "r1_ms=", "r2_ms="):
+        assert field in line, f"outcome line missing {field}: {line}"
