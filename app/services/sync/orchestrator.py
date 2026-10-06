@@ -1881,16 +1881,40 @@ class SyncOrchestrator:
         )
 
         if not bool(getattr(settings, "PAL_TWO_POINT_ENABLED", True)):
+            logger.debug("[pal-two-point] sub=%s evaluated=false reason=disabled", target_id)
             return None
         if not target_text or not reference_text:
+            logger.debug("[pal-two-point] sub=%s evaluated=false reason=missing_input", target_id)
             return None
         try:
             result = attempt_pal_two_point(
                 target_text, reference_text, self._analyzer
             )
         except Exception as exc:  # fail closed, always
-            logger.debug("[pal-two-point] attempt raised: %s", exc)
+            logger.info("[pal-two-point] sub=%s evaluated=false error=%s", target_id, type(exc).__name__)
             return None
+        # One structured outcome line per tail-reached request. Without this a
+        # rejection is indistinguishable from the path never running, which is
+        # exactly what made a live Whiplash fallback undiagnosable: the logs
+        # showed ALASS rejections and then silence.
+        first_ms = result.first.target_ms if result.first else None
+        last_ms = result.last.target_ms if result.last else None
+        evaluation = result.evaluation
+        logger.info(
+            "[pal-two-point] sub=%s evaluated=true accepted=%s slope=%s "
+            "intercept_ms=%s first_ms=%s last_ms=%s p95=%s struct=%s "
+            "coverage=%s reasons=%s",
+            target_id,
+            result.accepted,
+            f"{result.slope:.6f}" if result.slope is not None else "n/a",
+            f"{result.intercept_ms:.0f}" if result.intercept_ms is not None else "n/a",
+            first_ms if first_ms is not None else "n/a",
+            last_ms if last_ms is not None else "n/a",
+            evaluation.p95_offset_ms if evaluation is not None else "n/a",
+            evaluation.structural_similarity if evaluation is not None else "n/a",
+            evaluation.coverage_score if evaluation is not None else "n/a",
+            ",".join(result.reason_codes) or "none",
+        )
         if not result.accepted or not result.transformed_text:
             return None
         evaluation = result.evaluation

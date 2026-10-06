@@ -297,3 +297,30 @@ def test_whiplash_pal_two_point_regression():
     assert result.first is not None and result.first.target_ms == 142640
     assert result.transformed_text is not None
     assert "two_point_linear_pal" in STRATEGY_ID
+
+async def test_pal_rejection_emits_structured_outcome_log(caplog):
+    """Regression: a PAL rejection must be diagnosable from logs.
+
+    A live Whiplash fallback once produced ALASS rejections followed by
+    silence -- rejection emitted no log line, making "ran and rejected"
+    indistinguishable from "never ran".
+    """
+    import logging
+
+    from app.services.sync.orchestrator import SyncOrchestrator
+
+    target = _srt(_film(200))
+    # Constant shift: valid anchors, non-PAL slope -> policy rejection.
+    shifted = [(s + 2000, e + 2000, t) for s, e, t in _film(200)]
+    reference = _srt(shifted)
+    orch = SyncOrchestrator(sync_cache=None, external_strategy=None, sync_service=None)
+    with caplog.at_level(logging.INFO, logger="app.services.sync.orchestrator"):
+        out = await orch._try_pal_two_point_fallback(
+            target, reference, {}, "test-sub", b"x", "ch", "rk", None
+        )
+    assert out is None
+    hits = [r for r in caplog.records if "pal-two-point" in r.message]
+    assert hits, "rejection must leave a structured outcome line"
+    line = hits[0].message
+    assert "evaluated=true" in line and "accepted=False" in line
+    assert "slope=" in line and "reasons=" in line
