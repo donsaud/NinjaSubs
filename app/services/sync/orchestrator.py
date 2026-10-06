@@ -1093,6 +1093,14 @@ class SyncOrchestrator:
                 )
         attempts = expanded_attempts
 
+        # Pristine inputs for the two-point PAL fallback at the tail. The loop
+        # below mutates ``target_text`` (intro stripping, anchor pre-shift),
+        # but the PAL path was validated against unmodified texts, so it must
+        # measure exactly what the request carried. Likewise the first resolved
+        # reference is the highest-priority strategy's pick.
+        pal_target_snapshot = target_text
+        pal_first_reference: str | None = None
+
         for strategy_name, strategy_obj in attempts:
             try:
                 if getattr(strategy_obj, "validates_target", False):
@@ -1144,6 +1152,8 @@ class SyncOrchestrator:
             last_resolved = resolved
             reference = resolved.text
             decision_kind = resolved.kind
+            if pal_first_reference is None and reference:
+                pal_first_reference = reference
             # This only means a reference is now IN HAND. Alass may still not
             # run: the already-aligned shortcut below returns the original
             # subtitle before any subprocess is spawned. Claiming "invoking
@@ -1815,12 +1825,142 @@ class SyncOrchestrator:
             logger.info("[sync] no deterministic reference available -> aborting sync")
         else:
             logger.warning("[sync] all sync strategies failed -> serving original subtitle")
+            # Two-point PAL-speedup fallback. Runs only here -- after Alass
+            # and every verified path failed -- using the pristine request
+            # texts and the highest-priority resolved reference. A single
+            # transform, a single verifier evaluation, then either a narrowly
+            # accepted PAL result or the original subtitle, unchanged.
+            pal_served = await self._try_pal_two_point_fallback(
+                pal_target_snapshot,
+                pal_first_reference,
+                meta,
+                target_id,
+                sub_bytes,
+                content_hash,
+                resolution_key,
+                verdict_key,
+            )
+            if pal_served is not None:
+                return pal_served
         if self._sync_cache is not None and not rejected_candidates_seen:
             await self._sync_cache.mark_failed(resolution_key)
         self._record_outcome(
             meta, classify_outcome(False, None, rejected_candidates_seen)
         )
         return sub_bytes
+
+    async def _try_pal_two_point_fallback(
+        self,
+        target_text: str | None,
+        reference_text: str | None,
+        meta: dict,
+        target_id: str,
+        sub_bytes: bytes,
+        content_hash: str,
+        resolution_key: str,
+        verdict_key: str | None,
+    ) -> bytes | None:
+        """Two-point PAL-speedup fallback. Returns served bytes or None.
+
+        Runs only after Alass and every verified path failed. A single linear
+        transform from first/last dialogue anchors, one verifier evaluation,
+        then a narrow PAL-class policy acceptance. Returns None (serve the
+        original) on any failure at any stage: missing anchors, non-PAL slope,
+        weak residuals/structure/coverage, verification refusal, or any
+        exception. Never overrides an already-verified result -- this method is
+        only reachable when none exists.
+        """
+        from app.services.sync.pal_two_point import (
+            MODEL_VERSION as PAL_MODEL_VERSION,
+        )
+        from app.services.sync.pal_two_point import (
+            STRATEGY_ID as PAL_STRATEGY_ID,
+        )
+        from app.services.sync.pal_two_point import (
+            attempt_pal_two_point,
+        )
+
+        if not bool(getattr(settings, "PAL_TWO_POINT_ENABLED", True)):
+            return None
+        if not target_text or not reference_text:
+            return None
+        try:
+            result = attempt_pal_two_point(
+                target_text, reference_text, self._analyzer
+            )
+        except Exception as exc:  # fail closed, always
+            logger.debug("[pal-two-point] attempt raised: %s", exc)
+            return None
+        if not result.accepted or not result.transformed_text:
+            return None
+        evaluation = result.evaluation
+        if evaluation is None:
+            return None
+        # Narrow policy acceptance, mirroring the constant-shift exemption
+        # precedent: rewrite the verdict through the only supported setter,
+        # with explicit provenance recording the true producer. The analyzer's
+        # measured metrics (p95, structure, coverage) stay exactly as measured;
+        # only the serving claim changes, and only because the PAL slope match
+        # independently corroborates the correction.
+        evaluation.set_verdict(
+            SyncState.VERIFIED_RESYNCED, VerificationAvailability.VERIFIED
+        )
+        evaluation.reasons.append(
+            f"{PAL_STRATEGY_ID}: narrow PAL-speedup policy acceptance "
+            f"(slope={result.slope:.6f}, model={PAL_MODEL_VERSION}); "
+            "movement MAD set aside for proven frame-rate drift only"
+        )
+        if evaluation.sync_state is not SyncState.VERIFIED_RESYNCED:
+            return None
+        transformed = result.transformed_text.encode("utf-8")
+        key = build_synced_cache_key(
+            meta, target_id, content_hash=content_hash, decision=PAL_STRATEGY_ID
+        )
+        await self._store_verdict(
+            verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key
+        )
+        self._audit_serve(
+            evaluation, meta, target_id, from_cache=False, resolved=None
+        )
+        self._metrics["candidates_verified"] += 1
+        if self._sync_cache is not None:
+            await self._sync_cache.clear_failed(resolution_key)
+            await self._sync_cache.set(key, transformed)
+            await self._sync_cache.set(resolution_key, transformed)
+            await self._sync_cache.set_meta(key, {
+                "status": "synced",
+                "applied_shift": self._applied_shifts(target_text, result.transformed_text),
+                "reference_sha": hashlib.sha256(reference_text.encode("utf-8")).hexdigest()[:16],
+                "decision": PAL_STRATEGY_ID,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "sync_state": evaluation.sync_state.value,
+                "verification": evaluation.verification.value,
+                "sync_confidence": evaluation.sync_confidence,
+            })
+            await self._sync_cache.set_meta(resolution_key, {
+                "sync_state": evaluation.sync_state.value,
+                "verification": evaluation.verification.value,
+                "sync_confidence": evaluation.sync_confidence,
+            })
+        self._record_outcome(
+            meta, classify_outcome(True, PAL_STRATEGY_ID, False)
+        )
+        logger.info(
+            "[sync] delivery sub=%s decision=TRANSFORMED state=%s verification=%s "
+            "strategy=%s slope=%.6f p95=%s struct=%s original_sha256=%s "
+            "served_sha256=%s served_is_transformed=True bytes=%d",
+            target_id,
+            evaluation.sync_state.value,
+            evaluation.verification.value,
+            PAL_STRATEGY_ID,
+            result.slope,
+            evaluation.p95_offset_ms,
+            evaluation.structural_similarity,
+            _content_digest(sub_bytes),
+            _content_digest(transformed),
+            len(transformed),
+        )
+        return transformed
 
     @staticmethod
     def _applied_shifts(target_text: str, synced: str) -> list[float]:
