@@ -197,6 +197,71 @@ MUTATIONS: tuple[Mutation, ...] = (
         ),
     ),
     Mutation(
+        name="ninja-shadow-skips-alass-authority-check",
+        file="app/services/sync/ninja_shadow.py",
+        old="""        if alass_verified:
+            return finish(ALASS_WINS)""",
+        new="""        if alass_verified and False:  # MUTATION
+            return finish(ALASS_WINS)""",
+        guards=(
+            "a verified Alass result ends the question; running fallback models "
+            "afterward wastes budget and risks a weaker candidate displacing it"
+        ),
+    ),
+    Mutation(
+        name="ninja-shadow-marks-unverified-eligible",
+        file="app/services/sync/ninja_shadow.py",
+        old="            eligible_for_future_serving=eligible,",
+        new="            eligible_for_future_serving=True,  # MUTATION",
+        guards=(
+            "eligibility must follow verification, never precede it; an eligible "
+            "flag on an unverified result is a serving decision waiting to happen"
+        ),
+    ),
+    Mutation(
+        name="ninja-shadow-error-propagates",
+        file="app/services/sync/ninja_shadow.py",
+        old="""    except Exception as exc:  # fail closed: shadow errors are telemetry
+        message = str(exc)
+        return finish(SHADOW_ERROR, error=message[:200] or type(exc).__name__)""",
+        new="""    except Exception as exc:  # MUTATION
+        raise""",
+        guards=(
+            "a shadow failure must stay telemetry; propagating it turns an "
+            "observability path into a production failure"
+        ),
+    ),
+    Mutation(
+        name="ninja-shadow-mislabels-model",
+        file="app/services/sync/ninja_shadow.py",
+        old="""            classification = (
+                NINJA_POINTS_CONSTANT_VERIFIED
+                if strategy == "ninja_points_constant"
+                else NINJA_POINTS_LINEAR_VERIFIED
+            )""",
+        new="""            classification = (
+                NINJA_POINTS_LINEAR_VERIFIED
+                if strategy == "ninja_points_constant"
+                else NINJA_POINTS_CONSTANT_VERIFIED
+            )  # MUTATION""",
+        guards=(
+            "producer provenance must stay exact; swapped labels would credit "
+            "the wrong model in every downstream comparison"
+        ),
+    ),
+    Mutation(
+        name="ninja-shadow-hook-removed",
+        file="app/services/sync/orchestrator.py",
+        old="""                    if bool(getattr(settings, "NINJA_SHADOW_ENABLED", True)) and (
+                        shadow_spent_ms < shadow_budget
+                    ):""",
+        new="""                    if False:  # MUTATION""",
+        guards=(
+            "the shadow hook must actually run on rejection; a silently dead "
+            "hook collects no evidence while appearing integrated"
+        ),
+    ),
+    Mutation(
         name="demoted-prediction-confidence-counted",
         file="app/services/sync/ordering.py",
         old="""    if availability is None or availability == "unknown":
