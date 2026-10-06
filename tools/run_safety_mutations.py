@@ -111,6 +111,92 @@ MUTATIONS: tuple[Mutation, ...] = (
         ),
     ),
     Mutation(
+        name="ninja-anchor-corroboration-removed",
+        file="app/services/sync/ninja_points.py",
+        old="""            if support >= self.min_support:
+                corroborated.append(""",
+        new="""            if support >= 0:
+                corroborated.append(""",
+        guards=(
+            "an uncorroborated anchor is a coincidence, not evidence; without "
+            "the support gate a lone matching line can anchor a whole fit"
+        ),
+    ),
+    Mutation(
+        name="ninja-constant-single-anchor-accepted",
+        file="app/services/sync/ninja_points.py",
+        old="MIN_CONSTANT_ANCHORS = 2",
+        new="MIN_CONSTANT_ANCHORS = 1  # MUTATION",
+        guards=(
+            "one anchor cannot distinguish a real shift from a coincidence; a "
+            "single-anchor fit would synchronize on noise"
+        ),
+    ),
+    Mutation(
+        name="ninja-linear-underdetermined-accepted",
+        file="app/services/sync/ninja_points.py",
+        old="MIN_LINEAR_ANCHORS = 3",
+        new="MIN_LINEAR_ANCHORS = 1  # MUTATION",
+        guards=(
+            "two points always define a line, which is why an underdetermined "
+            "linear fit must be refused: span, slope, and residuals carry the "
+            "actual evidentiary weight"
+        ),
+    ),
+    Mutation(
+        name="ninja-unverified-accepted-as-best",
+        file="app/services/sync/ninja_points.py",
+        old="""    @property
+    def verified(self) -> bool:""",
+        new="""    @property
+    def verified(self) -> bool:  # MUTATION
+        return True""",
+        guards=(
+            "only a verifier-measured VERIFIED_* candidate may be accepted; an "
+            "always-true gate would promote untrusted output"
+        ),
+    ),
+    Mutation(
+        name="ninja-model-version-changed",
+        file="app/services/sync/ninja_points.py",
+        old='MODEL_VERSION = "ninja-points-v1"',
+        new='MODEL_VERSION = "ninja-points-v9"  # MUTATION',
+        guards=(
+            "strategy ids and model version must be stable provenance; silent "
+            "drift would let future caches confuse algorithm generations"
+        ),
+    ),
+    Mutation(
+        name="ninja-provenance-reason-removed",
+        file="app/services/sync/ninja_points.py",
+        old="""        if evaluation is not None:
+            evaluation.reasons.append(""",
+        new="""        if evaluation is None:
+            evaluation.reasons.append(""",
+        guards=(
+            "every ninja candidate must record its true producer; without the "
+            "reason the flags read as if alass ran"
+        ),
+    ),
+    Mutation(
+        name="ninja-alass-override-allowed",
+        file="app/services/sync/ninja_points.py",
+        old="""            best_alass = next((c for c in candidates if c.verified), None)
+            if best_alass is not None:
+                # A verified Alass result is authoritative. Ninja models are
+                # not even attempted: there is nothing left to prove.
+                return HybridResult(best=best_alass, candidates=candidates)""",
+        new="""            best_alass = next((c for c in candidates if c.verified), None)
+            if best_alass is not None and False:  # MUTATION
+                # A verified Alass result is authoritative. Ninja models are
+                # not even attempted: there is nothing left to prove.
+                return HybridResult(best=best_alass, candidates=candidates)""",
+        guards=(
+            "a verified Alass result is authoritative; ninja models must not "
+            "displace it"
+        ),
+    ),
+    Mutation(
         name="demoted-prediction-confidence-counted",
         file="app/services/sync/ordering.py",
         old="""    if availability is None or availability == "unknown":
