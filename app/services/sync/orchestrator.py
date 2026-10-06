@@ -958,6 +958,11 @@ class SyncOrchestrator:
         alass_completed = 0
         alass_deferred = 0
         candidates_rejected = 0
+        # Shadow-evaluation wall clock consumed so far this request. The shadow
+        # path must never starve the response: once the budget is spent, later
+        # rejected candidates skip shadow measurement (serving is unaffected;
+        # the original is served either way).
+        shadow_spent_ms = 0.0
         # True once a reference was resolved, aligned, and REJECTED. The tail
         # must not then mark_failed: that flag means "no usable reference",
         # and overloading it with "the reference did not verify" would
@@ -1706,6 +1711,38 @@ class SyncOrchestrator:
                         evaluation.verification.value,
                         serving_state.value,
                     )
+                    # NinjaSync Points SHADOW evaluation. Observational only:
+                    # runs the offline engine on this exact (target, reference)
+                    # pair, logs bounded telemetry, and changes nothing about
+                    # what is served, cached, or ranked. This branch is only
+                    # reached when Alass did not verify, so alass_verified is
+                    # always False here by construction.
+                    try:
+                        shadow_budget = float(
+                            getattr(settings, "NINJA_SHADOW_BUDGET_MS", 5000.0) or 5000.0
+                        )
+                    except (TypeError, ValueError):
+                        shadow_budget = 5000.0
+                    if bool(getattr(settings, "NINJA_SHADOW_ENABLED", True)) and (
+                        shadow_spent_ms < shadow_budget
+                    ):
+                        try:
+                            from app.services.sync.ninja_shadow import (
+                                run_shadow_evaluation,
+                            )
+
+                            shadow_result = run_shadow_evaluation(
+                                target_text,
+                                reference,
+                                alass_state_value=evaluation.sync_state.value,
+                                alass_verified=False,
+                                analyzer=self._analyzer,
+                            )
+                            shadow_spent_ms += max(
+                                0.0, shadow_result.duration_ms
+                            )
+                        except Exception as exc:  # fail closed, always
+                            logger.debug("[ninja-shadow] skipped: %s", exc)
                     served = sub_bytes
                 # One line that answers "which bytes went out?" without ever
                 # logging subtitle text. Digests only, so this is safe to keep in

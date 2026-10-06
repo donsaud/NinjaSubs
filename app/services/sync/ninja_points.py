@@ -394,6 +394,8 @@ class HybridCandidate:
     description: str
     transformed_text: str
     evaluation: Any = None
+    offset_ms: float | None = None
+    slope: float | None = None
 
     @property
     def verified(self) -> bool:
@@ -416,6 +418,7 @@ class HybridResult:
 
     best: HybridCandidate | None
     candidates: list[HybridCandidate] = field(default_factory=list)
+    anchor_count: int = 0
 
 
 class HybridSyncEngine:
@@ -464,12 +467,14 @@ class HybridSyncEngine:
             if best_alass is not None:
                 # A verified Alass result is authoritative. Ninja models are
                 # not even attempted: there is nothing left to prove.
-                return HybridResult(best=best_alass, candidates=candidates)
+                return HybridResult(best=best_alass, candidates=candidates,
+                                    anchor_count=0)
 
         anchors = AnchorDetector().detect(
             [(s, e, t) for s, e, t in target_cues],
             parse_srt_cues(reference_text),
         )
+        anchor_count = len(anchors)
         if len(anchors) >= MIN_CONSTANT_ANCHORS:
             model: ConstantSyncModel | LinearSyncModel | None = self._fitter.fit_constant(anchors)
             if model is not None:
@@ -485,11 +490,16 @@ class HybridSyncEngine:
                         description=model.describe(),
                         transformed_text=transformed,
                         evaluation=evaluation,
+                        offset_ms=model.offset_ms
+                        if isinstance(model, ConstantSyncModel) else None,
+                        slope=model.slope
+                        if isinstance(model, LinearSyncModel) else None,
                     )
                 )
                 best_constant = next((c for c in candidates if c.verified), None)
                 if best_constant is not None:
-                    return HybridResult(best=best_constant, candidates=candidates)
+                    return HybridResult(best=best_constant, candidates=candidates,
+                                        anchor_count=anchor_count)
 
         if len(anchors) >= MIN_LINEAR_ANCHORS:
             model = self._fitter.fit_linear(anchors)
@@ -506,13 +516,19 @@ class HybridSyncEngine:
                         description=model.describe(),
                         transformed_text=transformed,
                         evaluation=evaluation,
+                        offset_ms=model.offset_ms
+                        if isinstance(model, ConstantSyncModel) else None,
+                        slope=model.slope
+                        if isinstance(model, LinearSyncModel) else None,
                     )
                 )
                 best_linear = next((c for c in candidates if c.verified), None)
                 if best_linear is not None:
-                    return HybridResult(best=best_linear, candidates=candidates)
+                    return HybridResult(best=best_linear, candidates=candidates,
+                                        anchor_count=anchor_count)
 
-        return HybridResult(best=None, candidates=candidates)
+        return HybridResult(best=None, candidates=candidates,
+                            anchor_count=anchor_count)
 
     def _verify(
         self,

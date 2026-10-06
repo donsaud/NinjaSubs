@@ -68,7 +68,6 @@ def test_constant_small_noise_verifies():
 def test_constant_outlier_does_not_move_the_median():
     target = _cues(30)
     # 29 cues at +2000ms, one wild anchor far away.
-    reference = _shifted(target, 2000)
     fitter = AnchorFitter()
     anchors = AnchorSet(
         anchors=tuple(
@@ -80,7 +79,6 @@ def test_constant_outlier_does_not_move_the_median():
     model = fitter.fit_constant(anchors)
     assert model is not None
     assert model.offset_ms == pytest.approx(2000.0)
-    assert reference  # silence unused-variable linters if any
 
 
 def test_single_anchor_never_fits():

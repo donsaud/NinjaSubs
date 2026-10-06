@@ -143,6 +143,15 @@ class Settings(BaseSettings):
     SYNC_AUDIT_PATH: str | None = None
     SYNC_AUDIT_MAX_RECORDS: int = 2000
 
+    # --- NinjaSync Points shadow evaluation (observability only) --------- #
+    # When True, a rejected Alass candidate additionally runs the offline
+    # NinjaSync Points engine for measurement. Shadow results are logged and
+    # counted only: they never serve, cache, rank, or otherwise alter the
+    # response. Per-request wall-clock cap below; the engine itself is pure
+    # Python on at most MAX_ANCHORS anchors, so typical cost is milliseconds.
+    NINJA_SHADOW_ENABLED: bool = True
+    NINJA_SHADOW_BUDGET_MS: float = 5000.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
