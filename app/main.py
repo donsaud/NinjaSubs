@@ -2185,6 +2185,7 @@ async def _maybe_sync_subtitle(
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=budget)
     except TimeoutError:
+        logger.info("[sync-latency] result=timeout served=original")
         logger.warning(
             "[sync] request budget %.1fs exceeded -> serving original; "
             "sync continues in background to warm the cache",

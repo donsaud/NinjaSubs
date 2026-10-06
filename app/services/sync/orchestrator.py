@@ -14,7 +14,9 @@ import hashlib
 import json
 import logging
 import re
+import time
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -71,6 +73,7 @@ from app.services.sync.outcomes import (
 )
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync.reference import is_dialogue_cue
+from app.services.sync.telemetry import SyncTiming, current_sync_timing
 from app.services.sync_cache import SyncCache
 from app.utils.cleaners import strip_intro_credits
 
@@ -451,7 +454,7 @@ class SyncOrchestrator:
             future = self._inflight.get(flight_key)
             if future is None:
                 future = asyncio.ensure_future(
-                    self._execute(sub_bytes, meta, target_id, auto_sync)
+                    self._execute_job(sub_bytes, meta, target_id, auto_sync)
                 )
                 self._inflight[flight_key] = future
                 future.add_done_callback(lambda done: self._finish_flight(flight_key, done))
@@ -636,10 +639,163 @@ class SyncOrchestrator:
             verdict_key, payload, alias_key=alias_key
         )
 
+    async def _reference_attempts(
+        self, attempts: list[tuple[str, Any]], query: ReferenceQuery,
+        _passes_cue_sanity: Any, timing: SyncTiming,
+    ) -> AsyncIterator[tuple[str, Any]]:
+        """Expand each strategy only when execution reaches it; cache precedes planning."""
+        # Baseline read these cache entries before executing MovieHash. Keep that
+        # snapshot: hash resolution may write the shared disk cache even if sync fails.
+        cache_hits: dict[int, Any] = {}
+        for _, strategy in attempts:
+            if id(strategy) in cache_hits:
+                continue
+            if not (callable(getattr(strategy, "plan_candidates", None))
+                    or callable(getattr(strategy, "resolve_all_with_provenance", None))):
+                continue
+            cache_hits[id(strategy)] = None
+            cache = getattr(strategy, "cache", None)
+            if cache is not None:
+                try:
+                    cache_hits[id(strategy)] = cache.get(query)
+                except Exception:  # pragma: no cover - cache must not break sync
+                    pass
+            hit = cache_hits[id(strategy)]
+            timing.cached_reference_present |= bool(hit is not None and getattr(hit, "text", None))
+
+        expanded: set[int] = set()
+        for _name, _obj in attempts:
+            _plan = getattr(_obj, "plan_candidates", None)
+            _multi = getattr(_obj, "resolve_all_with_provenance", None)
+            if not callable(_plan) and not callable(_multi):
+                yield _name, _obj
+                continue
+            if id(_obj) in expanded:
+                continue
+            expanded.add(id(_obj))
+            # Preserve the strategy cache-hit shortcut BEFORE any fan-out. A
+            # previously proven reference must still be reused without asking a
+            # provider again, exactly as the single-reference path did.
+            _hit = cache_hits.get(id(_obj))
+            # A cache hit is NOT an exit. It used to be, which silently
+            # disabled multi-candidate expansion for every repeat request --
+            # i.e. exactly the Whiplash case, where a cached `subdl_edition`
+            # reference meant one ALASS run and no alternative was ever tried.
+            # The proven reference stays FIRST (it is still the best-informed
+            # candidate); the planned releases then supply genuine alternatives,
+            # each downloaded only if the loop actually reaches it.
+            _shared: dict[str, Any] = {"downloaded": 0, "seen": set()}
+            _planned: list[tuple[Any, Any]] = []
+            if callable(_plan):
+                if _hit is not None and getattr(_hit, "text", None):
+                    # Keep the cached reference first. Seed the shared digest set
+                    # with its content so the planned releases cannot re-offer
+                    # identical bytes under a different release name.
+                    _shared["seen"].add(
+                        hashlib.sha256(
+                            str(_hit.text).encode("utf-8", "replace")
+                        ).hexdigest()
+                    )
+                    timing.cached_reference_attempted = True
+                    yield f"{_name}#cache", _PreResolvedReference(_hit)
+            if callable(_plan):
+                timing.external_plan_started = True
+                started = time.monotonic()
+                try:
+                    _planned = await _plan(query)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "[sync] %s candidate planning failed: %s -> single reference",
+                        _name, type(exc).__name__,
+                    )
+                    _planned = []
+                finally:
+                    timing.external_plan_ms = (time.monotonic() - started) * 1000
+                timing.candidate_count_planned += len(_planned)
+            elif callable(_multi):
+                try:
+                    _cands = await _multi(query, update_validator=_passes_cue_sanity)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "[sync] %s multi-candidate expansion failed: %s -> single reference",
+                        _name, exc,
+                    )
+                    _cands = []
+                for _i, _c in enumerate(_cands):
+                    yield f"{_name}#candidate{_i + 1}", _PreResolvedReference(_c)
+                if _cands:
+                    logger.info(
+                        "[sync] %s offered %d distinct candidate(s); each will be verified independently",
+                        _name, len(_cands),
+                    )
+                else:
+                    # The fan-out already ran and found nothing usable. Calling the
+                    # strategy again here would repeat the identical provider search
+                    # and reach the identical empty result, so the request simply
+                    # proceeds with no reference and serves the original.
+                    logger.info(
+                        "[sync] %s produced no usable reference candidate; serving original",
+                        _name,
+                    )
+                continue
+            if not _planned and not (
+                _hit is not None and getattr(_hit, "text", None)
+            ):
+                # No plan and no cache hit: nothing to try for this strategy.
+                # (When a plan exists, emptiness after download failures is
+                # discovered per candidate by the loop itself, each skip
+                # carrying its own reason.)
+                logger.info(
+                    "[sync] %s produced no usable reference candidate; serving original",
+                    _name,
+                )
+                continue
+            logger.info(
+                "[sync] %s planned %d candidate(s); each downloads only if reached "
+                "and is verified independently",
+                _name, len(_planned),
+            )
+            for _i, (_rel, _prov) in enumerate(_planned):
+                yield (
+                    f"{_name}#candidate{_i + 1}",
+                    _LazyCandidate(_obj, _rel, _prov, query, _shared, _passes_cue_sanity),
+                )
+
+    async def _execute_job(
+        self, sub_bytes: bytes, meta: dict, target_id: str, auto_sync: bool
+    ) -> bytes:
+        """Account once per owned single-flight job, including early cache returns."""
+        timing = SyncTiming(
+            external_plan_available=callable(getattr(self._external_strategy, "plan_candidates", None))
+        )
+        token = current_sync_timing.set(timing)
+        started = time.monotonic()
+        result = "error"
+        try:
+            output = await self._execute(sub_bytes, meta, target_id, auto_sync)
+            result = "cached" if timing.cache_hit else (
+                "transformed" if output != sub_bytes else "original"
+            )
+            if result == "transformed":
+                if timing.winning_sync_strategy != "two_point_linear_pal":
+                    timing.winning_candidate_index = timing.candidates_considered
+                if timing.winning_sync_strategy is None:
+                    timing.winning_sync_strategy = "alass"
+            return output
+        except asyncio.CancelledError:
+            result = "cancelled"
+            raise
+        finally:
+            timing.log(result, (time.monotonic() - started) * 1000)
+            current_sync_timing.reset(token)
+
     async def _execute(
         self, sub_bytes: bytes, meta: dict, target_id: str, auto_sync: bool
     ) -> bytes:
         """The expensive pipeline body: strategies, cache, alass (see evaluate_and_sync)."""
+        timing = current_sync_timing.get()
+        if timing is None:
+            timing = SyncTiming()
         content_hash = hashlib.sha256(sub_bytes).hexdigest()[:16]
         # Positive cache: serve an already-synced subtitle without any work.
         resolution_key = self._flight_key(meta, target_id, sub_bytes)
@@ -698,6 +854,7 @@ class SyncOrchestrator:
                         target_id,
                     )
                     self._metrics["verification_cache_hits"] += 1
+                    timing.cache_hit = True
                     return cached
                 logger.info(
                     "[sync-cache] layer=payload result=miss sub_id=%s process=%s "
@@ -801,6 +958,7 @@ class SyncOrchestrator:
                         },
                     )
                 self._record_outcome(meta, VERIFIED)
+                timing.cache_hit = True
                 return reused_bytes
 
             # Negative cache for a MEASURED rejection. The verified fast path
@@ -974,130 +1132,6 @@ class SyncOrchestrator:
         # suppress the very retry this multi-candidate loop exists to perform.
         rejected_candidates_seen = False
 
-        # --- Multi-candidate expansion -------------------------------------
-        #
-        # `attempts` is a list of STRATEGIES, so the existing retry loop only
-        # ever advanced between providers. A strategy returned exactly one
-        # reference, which meant a wrong-cut first pick ended the request even
-        # when other candidate releases for the same film were sitting in the
-        # pool unused (Whiplash: 922-cue reference vs 825-cue target, one
-        # attempt, no alternative).
-        #
-        # Rather than re-indent the ~600-line execution body, each distinct
-        # candidate is wrapped in a tiny adapter that replays it through the
-        # SAME loop. Every existing guarantee therefore applies unchanged to
-        # every candidate: the cue-sanity gate, the disc-track skip, the ALASS
-        # budget, and -- critically -- the verifier, which runs independently on
-        # each one. A candidate is served only if it passes on its own merits.
-        #
-        # The MovieHash strategy is deliberately NOT expanded. Its single
-        # reference is exact-identity evidence (`moviehash_match is True`);
-        # spending that on a ranked list of weaker candidates would trade proven
-        # identity for guesswork.
-        expanded_attempts: list[tuple[str, Any]] = []
-        for _name, _obj in attempts:
-            _plan = getattr(_obj, "plan_candidates", None)
-            _multi = getattr(_obj, "resolve_all_with_provenance", None)
-            if not callable(_plan) and not callable(_multi):
-                expanded_attempts.append((_name, _obj))
-                continue
-            # Preserve the strategy cache-hit shortcut BEFORE any fan-out. A
-            # previously proven reference must still be reused without asking a
-            # provider again, exactly as the single-reference path did.
-            _cache = getattr(_obj, "cache", None)
-            _hit = None
-            if _cache is not None:
-                try:
-                    _hit = _cache.get(query)
-                except Exception:  # pragma: no cover - cache must not break sync
-                    _hit = None
-            # A cache hit is NOT an exit. It used to be, which silently
-            # disabled multi-candidate expansion for every repeat request --
-            # i.e. exactly the Whiplash case, where a cached `subdl_edition`
-            # reference meant one ALASS run and no alternative was ever tried.
-            # The proven reference stays FIRST (it is still the best-informed
-            # candidate); the planned releases then supply genuine alternatives,
-            # each downloaded only if the loop actually reaches it.
-            _shared: dict[str, Any] = {"downloaded": 0, "seen": set()}
-            _planned: list[tuple[Any, Any]] = []
-            if callable(_plan):
-                try:
-                    _planned = await _plan(query)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning(
-                        "[sync] %s candidate planning failed: %s -> single reference",
-                        _name, exc,
-                    )
-                    _planned = []
-            elif callable(_multi):
-                try:
-                    _cands = await _multi(query, update_validator=_passes_cue_sanity)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning(
-                        "[sync] %s multi-candidate expansion failed: %s -> single reference",
-                        _name, exc,
-                    )
-                    _cands = []
-                for _i, _c in enumerate(_cands):
-                    expanded_attempts.append(
-                        (f"{_name}#candidate{_i + 1}", _PreResolvedReference(_c))
-                    )
-                if _cands:
-                    logger.info(
-                        "[sync] %s offered %d distinct candidate(s); each will be verified independently",
-                        _name, len(_cands),
-                    )
-                else:
-                    # The fan-out already ran and found nothing usable. Calling the
-                    # strategy again here would repeat the identical provider search
-                    # and reach the identical empty result, so the request simply
-                    # proceeds with no reference and serves the original.
-                    logger.info(
-                        "[sync] %s produced no usable reference candidate; serving original",
-                        _name,
-                    )
-                continue
-            if _hit is not None and getattr(_hit, "text", None):
-                # Keep the cached reference first. Seed the shared digest set
-                # with its content so the planned releases cannot re-offer
-                # identical bytes under a different release name.
-                _shared["seen"].add(
-                    hashlib.sha256(
-                        str(_hit.text).encode("utf-8", "replace")
-                    ).hexdigest()
-                )
-                expanded_attempts.append(
-                    (f"{_name}#cache", _PreResolvedReference(_hit))
-                )
-            if not _planned and not (
-                _hit is not None and getattr(_hit, "text", None)
-            ):
-                # No plan and no cache hit: nothing to try for this strategy.
-                # (When a plan exists, emptiness after download failures is
-                # discovered per candidate by the loop itself, each skip
-                # carrying its own reason.)
-                logger.info(
-                    "[sync] %s produced no usable reference candidate; serving original",
-                    _name,
-                )
-                continue
-            logger.info(
-                "[sync] %s planned %d candidate(s); each downloads only if reached "
-                "and is verified independently",
-                _name, len(_planned),
-            )
-            for _i, (_rel, _prov) in enumerate(_planned):
-                expanded_attempts.append(
-                    (
-                        f"{_name}#candidate{_i + 1}",
-                        _LazyCandidate(
-                            _obj, _rel, _prov, query, _shared,
-                            _passes_cue_sanity,
-                        ),
-                    )
-                )
-        attempts = expanded_attempts
-
         # Pristine inputs for the two-point PAL fallback at the tail. The loop
         # below mutates ``target_text`` (intro stripping, anchor pre-shift),
         # but the PAL path was validated against unmodified texts, so it must
@@ -1106,7 +1140,10 @@ class SyncOrchestrator:
         pal_target_snapshot = target_text
         pal_first_reference: str | None = None
 
-        for strategy_name, strategy_obj in attempts:
+        async for strategy_name, strategy_obj in self._reference_attempts(
+            attempts, query, _passes_cue_sanity, timing
+        ):
+            timing.candidates_considered += 1
             try:
                 if getattr(strategy_obj, "validates_target", False):
                     resolved = await strategy_obj.resolve_with_provenance(
@@ -1154,11 +1191,14 @@ class SyncOrchestrator:
                 )
                 continue
 
+            timing.reference_kind = resolved.kind
             last_resolved = resolved
             reference = resolved.text
             decision_kind = resolved.kind
             if pal_first_reference is None and reference:
                 pal_first_reference = reference
+                timing.pal_reference_kind = resolved.kind
+                timing.pal_reference_index = timing.candidates_considered
             # Cheap global candidate on pristine input, independently verified
             # per reference. Never promotes edition provenance to MovieHash.
             affine_served = await self._try_timeline_affine(
@@ -1390,6 +1430,8 @@ class SyncOrchestrator:
                     if str(evaluation.sync_state.value).startswith("verified")
                     else REJECTED,
                 )
+                timing.winning_sync_strategy = "already_aligned"
+                timing.winning_candidate_index = timing.candidates_considered
                 return sub_bytes
 
             # "Relaxed" means the target name carries no edition signal, so the
@@ -1926,6 +1968,9 @@ class SyncOrchestrator:
             target_id, STRATEGY_ID, hashlib.sha256(resolved.text.encode()).hexdigest()[:16],
             resolved.kind, evaluation.verification.value, result.slope, result.intercept_ms,
         )
+        timing = current_sync_timing.get()
+        if timing is not None:
+            timing.winning_sync_strategy = STRATEGY_ID
         return transformed
 
     async def _try_pal_two_point_fallback(
@@ -2073,6 +2118,11 @@ class SyncOrchestrator:
             _content_digest(transformed),
             len(transformed),
         )
+        timing = current_sync_timing.get()
+        if timing is not None:
+            timing.winning_sync_strategy = PAL_STRATEGY_ID
+            timing.reference_kind = timing.pal_reference_kind
+            timing.winning_candidate_index = timing.pal_reference_index
         return transformed
 
     @staticmethod

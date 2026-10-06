@@ -23,6 +23,7 @@ from app.services.subtitle_matcher import (
     parse_srt_cues,
     strip_intro_nonspeech,
 )
+from app.services.sync.telemetry import current_sync_timing
 
 logger = logging.getLogger(__name__)
 
@@ -643,11 +644,21 @@ class SubtitleSyncService:
             )
             logger.info("[sync] executing: %s", " ".join(command))
             started = time.monotonic()
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                timeout=effective_timeout,
-            )
+            timing = current_sync_timing.get()
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    timeout=effective_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                # A timed-out child did launch; a spawn error did not.
+                if timing is not None:
+                    timing.alass_processes_launched += 1
+                raise
+            else:
+                if timing is not None:
+                    timing.alass_processes_launched += 1
             elapsed = time.monotonic() - started
             logger.info(
                 "[sync] alass finished in %.2fs with exit code %s",

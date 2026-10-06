@@ -43,6 +43,7 @@ from app.services.sync.matching import (
 )
 from app.services.sync.query import ResolvedReference
 from app.services.sync.reference_v2 import release_family_key as _release_family_key
+from app.services.sync.telemetry import current_sync_timing
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.sync.query import ReferenceQuery
@@ -1227,6 +1228,9 @@ class ExternalExactStrategy:
         text = result.text
         if not text:
             return ResolvedReference(None)
+        timing = current_sync_timing.get()
+        if timing is not None:
+            timing.references_downloaded += 1
         if validate is not None and not validate(text):
             # The validator only returns a bool, so re-measure here purely
             # to attribute the verdict to a NAMED candidate. Without this
@@ -1245,6 +1249,8 @@ class ExternalExactStrategy:
         seen: set[str] = shared.setdefault("seen", set())
         digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
         if digest in seen:
+            if timing is not None:
+                timing.references_deduplicated += 1
             logger.info(
                 "[reference] resolve_all: candidate %r has duplicate content (%s); skipping",
                 getattr(cand, "release_name", "?"),

@@ -36,6 +36,7 @@ from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.decode import decode_payload, looks_like_cumulative_pack
 from app.services.sync.query import ReferenceQuery, ResolvedReference
 from app.services.sync.reference import ReferenceTrust
+from app.services.sync.telemetry import current_sync_timing
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -258,6 +259,9 @@ class OpenSubtitlesHashReferenceStrategy:
         # The reference is a timing input only. It is stored exactly as decoded:
         # no Arabic processing, no numeral conversion, no dialogue rewriting.
         # Format normalisation for ALASS already happens in the sync service.
+        timing = current_sync_timing.get()
+        if timing is not None:
+            timing.references_downloaded += 1
         text = decoded.decode("utf-8", "replace")
         if query.season is not None and query.episode is not None:
             if looks_like_cumulative_pack(text):
