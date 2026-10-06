@@ -408,3 +408,171 @@ async def test_shadow_verified_candidate_is_recorded_not_served(monkeypatch):
     # The sync service returns scrambled output, so production rejects and the
     # original is served -- regardless of what shadow measured.
     assert out == bytes(sub)
+
+
+# ===========================================================================
+# Shadow matrix M-W: translator metadata cases (real credit text)
+# ===========================================================================
+
+
+def _credit_srt(entries) -> str:
+    entries = list(entries)
+    out = []
+    for i, (s, text) in enumerate(entries):
+        out.append(f"{i + 1}\n{_ts(s)} --> {_ts(s + 2000)}\n{text}")
+    return "\n\n".join(out) + "\n"
+
+
+def _dialogue_entries(n, start_ms=60000, step_ms=4000, offset_ms=0):
+    return [
+        (start_ms + i * step_ms + offset_ms, f"dialogue line number {i} here")
+        for i in range(n)
+    ]
+
+
+def test_shadow_arabic_translator_credit():
+    """Matrix M: credit filtered, dialogue verifies, telemetry counts it."""
+    target = _credit_srt([(1000, "\u062a\u0631\u062c\u0645\u0629 \u0641\u0644\u0627\u0646")] + _dialogue_entries(14))
+    reference = _credit_srt([(1000, "\u062a\u0631\u062c\u0645\u0629 \u0641\u0644\u0627\u0646")] + _dialogue_entries(14, offset_ms=2000))
+    result = run_shadow_evaluation(
+        target, reference, alass_state_value="unverified", alass_verified=False
+    )
+    assert result.classification == NINJA_POINTS_CONSTANT_VERIFIED
+    assert result.metadata_skipped >= 1
+    assert result.eligible_for_future_serving is True
+
+
+def test_shadow_english_and_timing_credits():
+    """Matrix N/O: English and timing attribution filtered the same way."""
+    target = _credit_srt(
+        [(2000, "Translated by XYZ"), (5000, "\u062a\u0639\u062f\u064a\u0644 \u0627\u0644\u062a\u0648\u0642\u064a\u062a: XYZ")]
+        + _dialogue_entries(14)
+    )
+    reference = _credit_srt(
+        [(2000, "Translated by XYZ"), (5000, "\u062a\u0639\u062f\u064a\u0644 \u0627\u0644\u062a\u0648\u0642\u064a\u062a: XYZ")]
+        + _dialogue_entries(14, offset_ms=2000)
+    )
+    result = run_shadow_evaluation(
+        target, reference, alass_state_value="unverified", alass_verified=False
+    )
+    assert result.classification == NINJA_POINTS_CONSTANT_VERIFIED
+    assert result.metadata_skipped >= 2
+
+
+def test_shadow_url_and_social_handles():
+    """Matrix P/Q: website and social metadata never anchor."""
+    target = _credit_srt(
+        [(1500, "Translated by XYZ www.example.com"), (4000, "Telegram: @example")]
+        + _dialogue_entries(14)
+    )
+    reference = _credit_srt(
+        [(1500, "Translated by XYZ www.example.com"), (4000, "Telegram: @example")]
+        + _dialogue_entries(14, offset_ms=2000)
+    )
+    result = run_shadow_evaluation(
+        target, reference, alass_state_value="unverified", alass_verified=False
+    )
+    assert result.classification == NINJA_POINTS_CONSTANT_VERIFIED
+    assert result.metadata_skipped >= 2
+
+
+def test_shadow_release_group_credit():
+    """Matrix R: release-group credit lines are metadata, not dialogue."""
+    target = _credit_srt([(1000, "Synced by XYZ")] + _dialogue_entries(14))
+    reference = _credit_srt([(1000, "Synced by XYZ")] + _dialogue_entries(14, offset_ms=2000))
+    result = run_shadow_evaluation(
+        target, reference, alass_state_value="unverified", alass_verified=False
+    )
+    assert result.classification == NINJA_POINTS_CONSTANT_VERIFIED
+    assert result.metadata_skipped >= 1
+
+
+def test_shadow_misleading_credit_timestamp():
+    """Matrix S: the strongest false-anchor scenario. Credit at +35s, dialogue
+    at +2s. The shadow result must follow the dialogue, never the credit."""
+    target = _credit_srt([(5000, "\u062a\u0631\u062c\u0645\u0629 \u0641\u0644\u0627\u0646")] + _dialogue_entries(14))
+    reference = _credit_srt([(40000, "\u062a\u0631\u062c\u0645\u0629 \u0641\u0644\u0627\u0646")] + _dialogue_entries(14, offset_ms=2000))
+    result = run_shadow_evaluation(
+        target, reference, alass_state_value="unverified", alass_verified=False
+    )
+    assert result.classification == NINJA_POINTS_CONSTANT_VERIFIED
+    assert result.offset_ms == pytest.approx(2000.0, abs=250.0)
+    assert abs((result.offset_ms or 0) - 35000.0) > 20000.0
+    assert result.metadata_skipped >= 1
+
+
+def test_shadow_legitimate_first_dialogue():
+    """Matrix T: a real first cue (Run!) stays eligible as an anchor."""
+    target = _credit_srt([(2000, "Run!"), (8000, "Stop right there now")])
+    reference = _credit_srt([(4000, "Run!"), (10000, "Stop right there now")])
+    result = run_shadow_evaluation(
+        target, reference, alass_state_value="unverified", alass_verified=False
+    )
+    # Two cues cannot verify through the analyzer, but the run must attempt
+    # (or reject on verification) -- never report the cues as metadata.
+    assert result.metadata_skipped == 0
+    assert result.classification in (NINJA_POINTS_REJECTED, INSUFFICIENT_EVIDENCE)
+
+
+def test_shadow_mixed_metadata_and_dialogue():
+    """Matrix U: dialogue carries the fit while credits sit alongside."""
+    target = _credit_srt(
+        [(1000, "\u062a\u0631\u062c\u0645\u0629 \u0648\u062a\u0639\u062f\u064a\u0644: \u0641\u0644\u0627\u0646"), (3000, "Synced by XYZ")]
+        + _dialogue_entries(14)
+    )
+    reference = _credit_srt(
+        [(1000, "\u062a\u0631\u062c\u0645\u0629 \u0648\u062a\u0639\u062f\u064a\u0644: \u0641\u0644\u0627\u0646"), (3000, "Synced by XYZ")]
+        + _dialogue_entries(14, offset_ms=2000)
+    )
+    result = run_shadow_evaluation(
+        target, reference, alass_state_value="unverified", alass_verified=False
+    )
+    assert result.classification == NINJA_POINTS_CONSTANT_VERIFIED
+    assert result.metadata_skipped >= 2
+
+
+def test_shadow_metadata_both_sides_different_timing():
+    """Matrix V: shared credit, divergent timing, too little dialogue to
+    verify. Must fail safe and stay ineligible."""
+    target = _credit_srt([(5000, "\u062a\u0631\u062c\u0645\u0629 \u0641\u0644\u0627\u0646"), (60000, "only dialogue here")])
+    reference = _credit_srt([(40000, "\u062a\u0631\u062c\u0645\u0629 \u0641\u0644\u0627\u0646"), (62000, "only dialogue here")])
+    result = run_shadow_evaluation(
+        target, reference, alass_state_value="unverified", alass_verified=False
+    )
+    assert result.eligible_for_future_serving is False
+    assert result.metadata_skipped >= 1
+
+
+def test_shadow_metadata_one_side_only():
+    """Matrix W: an unmatched credit cannot anchor by construction."""
+    target = _credit_srt([(1000, "\u062a\u0631\u062c\u0645\u0629 \u0641\u0644\u0627\u0646"), (60000, "dialogue line one here")])
+    reference = _credit_srt([(62000, "dialogue line one here")])
+    result = run_shadow_evaluation(
+        target, reference, alass_state_value="unverified", alass_verified=False
+    )
+    assert result.eligible_for_future_serving is False
+    assert result.metadata_skipped >= 1
+
+
+def test_shadow_metadata_count_in_telemetry_log(caplog):
+    """The bounded log line reports the refusal count, never cue text."""
+    import logging
+
+    target = _credit_srt([(1000, "\u062a\u0631\u062c\u0645\u0629 \u0641\u0644\u0627\u0646")] + _dialogue_entries(6))
+    reference = _credit_srt([(1000, "\u062a\u0631\u062c\u0645\u0629 \u0641\u0644\u0627\u0646")] + _dialogue_entries(6, offset_ms=2000))
+    with caplog.at_level(logging.INFO, logger="app.services.sync.ninja_shadow"):
+        run_shadow_evaluation(
+            target, reference, alass_state_value="unverified", alass_verified=False
+        )
+    import re
+
+    shadow_lines = [r.message for r in caplog.records if r.message.startswith("[ninja-shadow]")]
+    assert shadow_lines, "shadow evaluation must log exactly one structured line"
+    counts = [
+        int(m.group(1))
+        for line in shadow_lines
+        for m in [re.search(r"metadata_skipped=(\d+)", line)]
+        if m
+    ]
+    assert counts and all(c >= 1 for c in counts)
+    assert not any("ترجمة" in line for line in shadow_lines)

@@ -62,6 +62,9 @@ class ShadowEvaluation:
     duration_ms: float
     eligible_for_future_serving: bool
     error: str | None = None
+    # Cues refused as translator/uploader metadata during detection. A count
+    # only -- never cue text, URLs, or handles.
+    metadata_skipped: int = 0
 
 
 _counters_lock = threading.Lock()
@@ -120,6 +123,7 @@ def run_shadow_evaluation(
         *,
         ninja_best_strategy: str | None = None,
         anchor_count: int = 0,
+        metadata_skipped: int = 0,
         offset_ms: float | None = None,
         slope: float | None = None,
         median_residual_ms: float | None = None,
@@ -146,16 +150,19 @@ def run_shadow_evaluation(
             duration_ms=duration_ms,
             eligible_for_future_serving=eligible,
             error=error,
+            metadata_skipped=metadata_skipped,
         )
         _record_counters(classification, duration_ms)
         logger.info(
             "[ninja-shadow] classification=%s alass_state=%s ninja_best=%s "
-            "anchors=%d offset_ms=%s slope=%s median_residual_ms=%s mad_ms=%s "
+            "anchors=%d metadata_skipped=%d offset_ms=%s slope=%s "
+            "median_residual_ms=%s mad_ms=%s "
             "p95_ms=%s structural=%s rejection=%s duration_ms=%.1f eligible=%s",
             evaluation.classification,
             evaluation.alass_state,
             evaluation.ninja_best_strategy,
             evaluation.anchor_count,
+            evaluation.metadata_skipped,
             evaluation.offset_ms,
             evaluation.slope,
             evaluation.median_residual_ms,
@@ -177,6 +184,7 @@ def run_shadow_evaluation(
         engine = HybridSyncEngine(analyzer=analyzer)
         result = engine.run(target_text, reference_text)
         anchor_count = result.anchor_count
+        skipped = result.metadata_skipped
         best = result.best
         if best is not None and best.verified:
             evaluation = best.evaluation
@@ -197,11 +205,13 @@ def run_shadow_evaluation(
                 p95_ms=getattr(evaluation, "p95_offset_ms", None),
                 structural_similarity=getattr(evaluation, "structural_similarity", None),
                 eligible=True,
+                metadata_skipped=skipped,
             )
 
         # Nothing verified. Distinguish why, honestly.
         if anchor_count == 0:
-            return finish(INSUFFICIENT_EVIDENCE, anchor_count=0)
+            return finish(INSUFFICIENT_EVIDENCE, anchor_count=0,
+                metadata_skipped=skipped)
         cuts = {
             _cut_of(c.evaluation)
             for c in result.candidates
@@ -211,6 +221,7 @@ def run_shadow_evaluation(
             return finish(
                 UNSUPPORTED_STRUCTURE,
                 anchor_count=anchor_count,
+                metadata_skipped=skipped,
                 rejection_reason="different_cut",
             )
         if not result.candidates:
@@ -219,6 +230,7 @@ def run_shadow_evaluation(
             return finish(
                 REFERENCE_REJECTED,
                 anchor_count=anchor_count,
+                metadata_skipped=skipped,
                 rejection_reason="no_model_fitted",
             )
         reasons: list[str] = []
@@ -230,6 +242,7 @@ def run_shadow_evaluation(
         return finish(
             NINJA_POINTS_REJECTED,
             anchor_count=anchor_count,
+            metadata_skipped=skipped,
             rejection_reason=",".join(sorted(set(reasons))) or "unverified",
         )
     except Exception as exc:  # fail closed: shadow errors are telemetry

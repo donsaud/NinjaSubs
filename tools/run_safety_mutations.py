@@ -197,6 +197,73 @@ MUTATIONS: tuple[Mutation, ...] = (
         ),
     ),
     Mutation(
+        name="ninja-metadata-index-filter-removed",
+        file="app/services/sync/ninja_points.py",
+        old="""        for i, (_, _, text) in enumerate(cues):
+            if _is_metadata_cue(text):
+                if stats is not None:
+                    stats["metadata_skipped"] = stats.get("metadata_skipped", 0) + 1
+                continue""",
+        new="""        for i, (_, _, text) in enumerate(cues):
+            if False:  # MUTATION: metadata enters the anchor index
+                if stats is not None:
+                    stats["metadata_skipped"] = stats.get("metadata_skipped", 0) + 1
+                continue""",
+        guards=(
+            "a translator credit matching on both sides looks exactly like a "
+            "legitimate anchor; it must never enter the anchor index"
+        ),
+    ),
+    Mutation(
+        name="ninja-metadata-classifier-disabled",
+        file="app/services/sync/ninja_points.py",
+        old="""    if not text or not text.strip():
+        return False
+    raw = text.strip()""",
+        new="""    return False  # MUTATION: nothing is ever metadata
+    if not text or not text.strip():
+        return False
+    raw = text.strip()""",
+        guards=(
+            "disabling the classifier admits URLs, handles, and attribution "
+            "lines as synchronization evidence"
+        ),
+    ),
+    Mutation(
+        name="ninja-metadata-constant-refilter-removed",
+        file="app/services/sync/ninja_points.py",
+        old="""        anchors = self._without_metadata(list(anchor_set.anchors))
+        if len(anchors) < MIN_CONSTANT_ANCHORS:""",
+        new="""        anchors = list(anchor_set.anchors)  # MUTATION
+        if len(anchors) < MIN_CONSTANT_ANCHORS:""",
+        guards=(
+            "a smuggled metadata anchor must not reach the offset cluster; "
+            "without the recheck a +35s credit shifts the median"
+        ),
+    ),
+    Mutation(
+        name="ninja-metadata-linear-refilter-removed",
+        file="app/services/sync/ninja_points.py",
+        old="""        anchors = self._without_metadata(list(anchor_set.anchors))
+        if len(anchors) < MIN_LINEAR_ANCHORS:""",
+        new="""        anchors = list(anchor_set.anchors)  # MUTATION
+        if len(anchors) < MIN_LINEAR_ANCHORS:""",
+        guards=(
+            "a smuggled metadata anchor must not reach the slope estimate; "
+            "one misleading timestamp distorts least-squares drift"
+        ),
+    ),
+    Mutation(
+        name="ninja-corroboration-threshold-lowered",
+        file="app/services/sync/ninja_points.py",
+        old="""        min_support: int = 2,""",
+        new="""        min_support: int = 1,  # MUTATION""",
+        guards=(
+            "a lone coincidence is not evidence; support below two admits "
+            "single matching lines -- including lone credits -- as anchors"
+        ),
+    ),
+    Mutation(
         name="ninja-shadow-skips-alass-authority-check",
         file="app/services/sync/ninja_shadow.py",
         old="""        if alass_verified:
