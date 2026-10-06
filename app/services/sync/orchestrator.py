@@ -41,6 +41,7 @@ from app.services.sync.anchor_preshift import (
     decide_anchor_preshift,
     preshift_text,
 )
+from app.services.sync.boundary_verifier import BoundaryShadow
 from app.services.sync.constant_shift_exemption import (
     ConstantShiftExemptionState,
     apply_exemption_to_evaluation,
@@ -313,6 +314,7 @@ class SyncOrchestrator:
         self._inflight_lock = asyncio.Lock()
         # Verification layer: measures alass output instead of trusting exit 0.
         self._analyzer = AlignmentAnalyzer()
+        self._boundary_shadow = BoundaryShadow()
         # Most expensive runs allowed per request, so one subtitle request can
         # never fan out into dozens of alass subprocesses.
         try:
@@ -477,6 +479,7 @@ class SyncOrchestrator:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self._boundary_shadow.close()
 
     @staticmethod
     def _flight_key(meta: dict, target_id: str, sub_bytes: bytes) -> str:
@@ -900,6 +903,7 @@ class SyncOrchestrator:
         from app.extractor import decode_subtitle_bytes
 
         target_text = decode_subtitle_bytes(sub_bytes, lang=meta.get("lang"))
+        pristine_shadow_target = target_text
         query = self._build_query(meta, target_id=target_id, target_text=target_text)
 
         # Measured-verdict cache: reuse a previous *verified* result for this
@@ -1612,6 +1616,7 @@ class SyncOrchestrator:
                 # verdict above stays authoritative for ``sync_state`` and for
                 # cache reuse -- this decision only gates delivery of the bytes.
                 serving_state = LargeOffsetServingState.ORIGINAL
+                self._boundary_shadow.schedule(pristine_shadow_target, reference, synced, evaluation)
                 if large_offset_inv is not None:
                     alass_validation = validate_alass_output(
                         target_text, synced, reference
