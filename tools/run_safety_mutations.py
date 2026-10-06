@@ -329,6 +329,101 @@ MUTATIONS: tuple[Mutation, ...] = (
         ),
     ),
     Mutation(
+        name="pal-slope-restriction-removed",
+        file="app/services/sync/pal_two_point.py",
+        old="    if not is_pal_slope(slope):",
+        new="    if False:  # MUTATION",
+        guards=(
+            "only slopes within tolerance of 25/23.976 may use the PAL path; "
+            "without the gate any constant shift could claim speedup evidence"
+        ),
+    ),
+    Mutation(
+        name="pal-tolerance-widened-excessively",
+        file="app/services/sync/pal_two_point.py",
+        old="PAL_SLOPE_TOLERANCE = 0.001",
+        new="PAL_SLOPE_TOLERANCE = 0.1  # MUTATION",
+        guards=(
+            "the tolerance must exclude the 1.0 no-op and near ratios like "
+            "25/24; a wide band admits arbitrary slopes as PAL"
+        ),
+    ),
+    Mutation(
+        name="pal-p95-requirement-removed",
+        file="app/services/sync/pal_two_point.py",
+        old="    if p95 is None or p95 > MAX_RESIDUAL_P95_MS:",
+        new="    if False:  # MUTATION",
+        guards=(
+            "high residual spread must fail the narrow policy even with PAL "
+            "slope; p95 is the measurement that distinguishes correction "
+            "from coincidence"
+        ),
+    ),
+    Mutation(
+        name="pal-structural-requirement-removed",
+        file="app/services/sync/pal_two_point.py",
+        old="    if struct is None or struct < MIN_STRUCTURAL_SIMILARITY:",
+        new="    if False:  # MUTATION",
+        guards=(
+            "weak structural agreement must fail the narrow policy; timing "
+            "numbers without structural agreement describe different cuts"
+        ),
+    ),
+    Mutation(
+        name="pal-coverage-requirement-removed",
+        file="app/services/sync/pal_two_point.py",
+        old="    if coverage is None or coverage < MIN_COVERAGE:",
+        new="    if False:  # MUTATION",
+        guards=(
+            "thin coverage must fail the narrow policy; a PAL slope over a "
+            "fragment of the timeline proves nothing about the whole"
+        ),
+    ),
+    Mutation(
+        name="pal-fabricate-missing-endpoints",
+        file="app/services/sync/pal_two_point.py",
+        old="    if t_first is None or r_first is None or t_last is None or r_last is None:\n        return None",
+        new="    if t_first is None or r_first is None or t_last is None or r_last is None:\n        return (EndpointAnchor(target_ms=0, reference_ms=0, kind=\"first\"), EndpointAnchor(target_ms=1, reference_ms=1, kind=\"last\"))  # MUTATION",
+        guards=(
+            "a missing first or last anchor must abort the attempt; fabricated "
+            "zero correspondences must never reach slope fitting"
+        ),
+    ),
+    Mutation(
+        name="pal-allow-metadata-anchor",
+        file="app/services/sync/pal_two_point.py",
+        old="    return bool(text and text.strip()) and _is_dialogue_text(text) and not _is_metadata_cue(text)",
+        new="    return bool(text and text.strip()) and _is_dialogue_text(text)  # MUTATION",
+        guards=(
+            "credits, URLs and handles must never anchor the transform; a "
+            "metadata endpoint poisons slope and intercept together"
+        ),
+    ),
+    Mutation(
+        name="pal-bypass-provenance",
+        file="app/services/sync/pal_two_point.py",
+        old='STRATEGY_ID = "two_point_linear_pal"',
+        new='STRATEGY_ID = "edition"  # MUTATION',
+        guards=(
+            "PAL results must carry distinct provenance through cache and "
+            "logs; masquerading as a generic edition destroys auditability"
+        ),
+    ),
+    Mutation(
+        name="pal-serve-rejected-candidate",
+        file="app/services/sync/pal_two_point.py",
+        old="""    if reasons:
+        return PalTwoPointResult(
+            accepted=False, first=first, last=last, slope=slope,""",
+        new="""    if reasons:
+        return PalTwoPointResult(
+            accepted=True, first=first, last=last, slope=slope,  # MUTATION""",
+        guards=(
+            "a candidate the narrow policy refused must never be marked "
+            "accepted; acceptance is the only path toward serving"
+        ),
+    ),
+    Mutation(
         name="demoted-prediction-confidence-counted",
         file="app/services/sync/ordering.py",
         old="""    if availability is None or availability == "unknown":
