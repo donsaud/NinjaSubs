@@ -604,6 +604,60 @@
         "expected_boundary_run": true,
         "expected_classification": "UNSUPPORTED"
       }
+    },
+    {
+      "boundary_should_run": true,
+      "capture_v2": {
+        "attempt": "attempt-01",
+        "metadata_sha256": "744c053eee0c9b0adf49d3772dd39833656d8f89e376e78810854f4ee1c7720e",
+        "path": "tests/replay/cases/dexter-s08e09-afg-negative-live-3fe17"
+      },
+      "case_id": "dexter-s08e09-afg-negative-live-3fe17",
+      "case_type": "INSUFFICIENT_EVIDENCE_REJECT",
+      "expected_model": "UNSUPPORTED",
+      "expected_reason": "unsupported_boundary",
+      "expected_shadow_outcome": false,
+      "independence_identity": [
+        "3fe17ddf9b4bb2716b088926d00992de9048cb47654a8215b8352a0ae0b7758e",
+        "080f2788d3a527020cce61550ab19176ec5b958583a5d5636c2870af478e50a1"
+      ],
+      "independent_outcome_confirmed": true,
+      "live_origin_confirmed": true,
+      "meaningful_negative": true,
+      "media_identity": [
+        "tt0773262",
+        8,
+        9
+      ],
+      "provenance": "real",
+      "source_case_id": null
+    },
+    {
+      "boundary_should_run": true,
+      "capture_v2": {
+        "attempt": "attempt-01",
+        "metadata_sha256": "b179c3fa30bc26e70361693f9eddf699da7f8f710366d9391c78d8cd69370f6f",
+        "path": "tests/replay/cases/dexter-s08e08-afg-live-25820"
+      },
+      "case_id": "dexter-s08e08-afg-live-25820",
+      "case_type": "INSUFFICIENT_EVIDENCE_REJECT",
+      "expected_model": "UNSUPPORTED",
+      "expected_reason": "unsupported_landmarks",
+      "expected_shadow_outcome": false,
+      "independence_identity": [
+        "258201e78a039124157abe1f8e76d88ca78ab1da07d1b11a997f95f73c152126",
+        "585e14783e5016d6a45b098c620b40a921203fb42250f6cdbb848eef70c327c1"
+      ],
+      "independent_outcome_confirmed": true,
+      "live_origin_confirmed": true,
+      "meaningful_negative": true,
+      "media_identity": [
+        "tt0773262",
+        8,
+        8
+      ],
+      "provenance": "real",
+      "source_case_id": null
     }
   ]
 }

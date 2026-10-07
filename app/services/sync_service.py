@@ -23,6 +23,7 @@ from app.services.subtitle_matcher import (
     parse_srt_cues,
     strip_intro_nonspeech,
 )
+from app.services.sync.case_capture import capture_alass_bytes, capture_enabled
 from app.services.sync.telemetry import current_sync_timing
 
 logger = logging.getLogger(__name__)
@@ -680,8 +681,16 @@ class SubtitleSyncService:
                 logger.warning("[sync] alass produced an empty output file -> fallback")
                 return None
 
-            with open(out_file, encoding="utf-8") as handle:
-                synced = handle.read()
+            if capture_enabled():
+                # Read once, retaining exact producer bytes. Match TextIOWrapper's
+                # existing UTF-8/universal-newline return representation exactly.
+                with open(out_file, "rb") as raw_handle:
+                    raw = raw_handle.read()
+                synced = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+                capture_alass_bytes(raw, reference_srt, reference, target_srt)
+            else:
+                with open(out_file, encoding="utf-8") as handle:
+                    synced = handle.read()
             if not synced:
                 logger.warning("[sync] alass output was empty text -> fallback")
                 return None

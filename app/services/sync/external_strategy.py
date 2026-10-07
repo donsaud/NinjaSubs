@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.services.subtitle_matcher import extract_metadata
 from app.services.sync.cache import ReferenceDiskCache
+from app.services.sync.case_capture import capture_provider
 from app.services.sync.decode import (
     decode_payload,
     looks_like_cumulative_pack,
@@ -1366,6 +1367,7 @@ class ExternalExactStrategy:
         bluray_match = is_retail_disc_source(
             _source_kind(query.target_filename)
         ) and is_retail_disc_source(_source_kind(best_name))
+        capture_provider(text, self._provider_label(provider))
         return ResolvedReference(
             text,
             kind=decision_kind,

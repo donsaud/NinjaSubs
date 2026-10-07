@@ -114,6 +114,9 @@ def derive(text: str, operations: list[dict[str, Any]]) -> str:
 
 
 def replay_case(case: dict[str, Any], root: Path = ROOT) -> dict[str, Any]:
+    if "capture_v2" in case:
+        from tools.capture_v2 import replay_v2
+        return replay_v2(case, root)
     started = time.perf_counter()
     texts = {role: derive(load_text(spec, root), spec.get("operations", []))
              for role, spec in case["fixtures"].items()}

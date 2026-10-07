@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "historical_positive": {
+    "case_id": "dexter_real",
+    "fixture_sha256": "e220f02ef3bc52dd1c340e5060347a2febb382b7594b808a94ecc6b5eddcedaa",
+    "identity": [
+      "4b5982977c7f94a6017416ea457c8df1d999de08fd66dcefc6e664a677233b87",
+      "fdc11b789123173d9ea2db4e153ee1918d1ae42320d862113ea268c0715b1f34"
+    ]
+  },
+  "supporting_live": [
+    {
+      "case_id": "dexter-s08e02-asap-live-9c91",
+      "identity": [
+        "9c91e8716604dbf11220664d52cc7bf6b93ea944df48329c64c278a1614b8422",
+        "7bccee47514f6722e57981ce729435c766c6d9c5296f82f821bf85d70a46e182"
+      ],
+      "raw_sha256": "52aed0f836ddad476b1ce51790daea1b3878b2799e5c681821fb6c66909a07d5"
+    },
+    {
+      "case_id": "dexter-s08e03-asap-negative-live-0ef9",
+      "identity": [
+        "0ef9bae38eb9e70d2e519f664cafacc1871c4e043a39415992033446faa5a1a7",
+        "2b48eebc9b0c55183c2636598396cf7082550c6ebaf279c3e6102015fbb55c95"
+      ],
+      "raw_sha256": "b974c320868618376ecdd4706d57530532e527f85f4dfed408cf91dc01701dde"
+    }
+  ],
+  "historical_global_control": {
+    "case_id": "whiplash_real",
+    "fixture_sha256": {
+      "target": "4dd84bcaeda8f6da65364bfcad127aafe8fd89fa51409d823a2a5e4c63350cf3",
+      "reference": "4b7fbb79eaae3161b421e2e6d70e85bb6b1cba553ebc91367fbfd0a10acab6e1",
+      "transformed": "22fb946234be10893cfd0537c2105db42164eecd9f46ea1060a99f972add7fcc"
+    }
+  }
+}

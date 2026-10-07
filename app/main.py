@@ -48,6 +48,12 @@ from app.services.subtitle_matcher import extract_metadata
 from app.services.sync.alignment import SubtitleEvaluation
 from app.services.sync.audit import AUDIT_LOG as sync_audit
 from app.services.sync.audit import record_for_evaluation
+from app.services.sync.case_capture import (
+    begin_capture,
+    capture_final,
+    capture_response_input,
+    close_captures,
+)
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.hash_reference import OpenSubtitlesHashReferenceStrategy
 from app.services.sync.matching import (
@@ -160,12 +166,15 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        if _app_orchestrator is not None:
-            await _app_orchestrator.close()
-        logger.info("Closing httpx.AsyncClient...")
-        if _http_client:
-            await _http_client.aclose()
-        await _sync_cache.close()
+        try:
+            if _app_orchestrator is not None:
+                await _app_orchestrator.close()
+            logger.info("Closing httpx.AsyncClient...")
+            if _http_client:
+                await _http_client.aclose()
+            await _sync_cache.close()
+        finally:
+            await close_captures()
 
 
 app = FastAPI(
@@ -2083,14 +2092,15 @@ async def _sync_subtitle_for_response(
     * the user opted into ASS->SRT conversion -> convert here, *before* sync,
       so the pipeline receives something it can read.
     """
+    begin_capture(b"", {}, False)
     if is_ass_subtitle(payload):
         if not convert_ass:
             # alass emits SRT; keep the user's native ASS styling preference.
             return payload
         payload = convert_ass_to_srt_bytes(payload, apply_rtl=False)
-    synced = await _maybe_sync_subtitle(
-        payload, _sync_meta_for_user(meta, context, prefs), target_id, auto_sync
-    )
+    sync_meta = _sync_meta_for_user(meta, context, prefs)
+    begin_capture(payload, sync_meta, auto_sync)
+    synced = await _maybe_sync_subtitle(payload, sync_meta, target_id, auto_sync)
     # ENABLE_AUTOSYNC_TEST_OVERRIDE -- development/test only, off by default.
     #
     # Substitutes an already-validated Alass artifact for an allowlisted subtitle
@@ -2251,6 +2261,7 @@ def _build_subtitle_response(
     auto_sync: bool = False,
 ) -> Response:
     """Construct HTTP response preserving exact original subtitle format (pass-through)."""
+    capture_response_input(sub_bytes)
     # 1. Ingestion/normalization: legacy encoding first, then convert ASS/SSA into a
     #    standard intermediate SRT so all later (SRT-only) optimizations apply.
     options = clean_options or CleanOptions()
@@ -2286,6 +2297,7 @@ def _build_subtitle_response(
     # 3. Native ASS / SSA detection (raw passthrough only when conversion is off)
     if (not converted_from_ass) and (is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa")):
         ext = "ssa" if req_format == "ssa" else "ass"
+        capture_final(sub_bytes, ext)
         return Response(
             content=sub_bytes,
             media_type="text/x-ssa; charset=utf-8",
@@ -2299,6 +2311,7 @@ def _build_subtitle_response(
     # 2. Native WebVTT detection or requested VTT
     elif is_vtt_subtitle(sub_bytes) or req_format == "vtt":
         vtt_bytes = sub_bytes if is_vtt_subtitle(sub_bytes) else srt_to_vtt(sub_bytes)
+        capture_final(vtt_bytes, "vtt")
         return Response(
             content=vtt_bytes,
             media_type="text/vtt; charset=utf-8",
@@ -2311,6 +2324,7 @@ def _build_subtitle_response(
         )
     # 3. Native SubRip (SRT) default
     else:
+        capture_final(sub_bytes, "srt")
         return Response(
             content=sub_bytes,
             media_type="application/x-subrip; charset=utf-8",

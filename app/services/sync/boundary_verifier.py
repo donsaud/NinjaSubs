@@ -21,6 +21,7 @@ from functools import partial
 
 from app.services.subtitle_matcher import parse_srt_cues
 from app.services.sync.alignment import SubtitleEvaluation
+from app.services.sync.case_capture import capture_boundary, capture_shadow_status
 from app.services.sync.pal_two_point import _is_usable_dialogue
 from app.services.sync.timeline_affine import clip, duration, intersection, occupancy_score, union
 
@@ -292,8 +293,10 @@ class BoundaryShadow:
                     or not evaluation.alass_successful
                     or not (evaluation.cut_verdict == "piecewise"
                             or evaluation.rejection_reason == "low_confidence")):
+                capture_shadow_status(reference, transformed, "not_scheduled")
                 return
             if max(map(len, (target, reference, transformed))) > MAX_CHARS:
+                capture_shadow_status(reference, transformed, "input_limit_skip")
                 return
             loop = asyncio.get_running_loop()
             job = self._run(target, reference, transformed)
@@ -304,9 +307,11 @@ class BoundaryShadow:
                 raise
             self.tasks.add(task)
             task.add_done_callback(self._finished)
+            capture_shadow_status(reference, transformed, "scheduled")
         except Exception:
             # No exception value: it could contain private input or configuration.
             logger.debug("[boundary-shadow] accepted=false reason=scheduling_failed")
+            capture_shadow_status(reference, transformed, "scheduling_failed")
 
     async def _run(self, target: str, reference: str, transformed: str) -> None:
         cancelled = threading.Event()
@@ -318,6 +323,7 @@ class BoundaryShadow:
             try:
                 result = await asyncio.shield(worker)
             except asyncio.CancelledError:
+                capture_shadow_status(reference, transformed, "cancelled")
                 cancelled.set()
                 # Cancellation must not free the owner's slot while a worker is
                 # still running. Repeated cancellation also cannot orphan it.
@@ -332,6 +338,7 @@ class BoundaryShadow:
                     worker.exception()
                 raise
             a, b = result.segments if len(result.segments) == 2 else (None, None)
+            capture_boundary(reference, transformed, result, target)
             logger.info(
                 "[boundary-shadow] accepted=%s classification=%s artifact=%s segments=%d "
                 "boundary_ms=%s offset_a_ms=%s offset_b_ms=%s jump_ms=%s "
@@ -351,6 +358,7 @@ class BoundaryShadow:
             )
         except Exception:
             logger.info("[boundary-shadow] accepted=false reason=evaluation_failed")
+            capture_shadow_status(reference, transformed, "evaluation_failed")
         finally:
             # The worker has completed (including cancellation drain) before
             # releasing its private thread. No shared ALASS semaphore is touched.

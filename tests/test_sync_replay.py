@@ -22,7 +22,7 @@ def corpus():
 def test_confusion_matrix(corpus):
     assert corpus["aggregate"] == {
         "expected_positives": 1, "true_positives": 1, "false_positives": 0,
-        "expected_negatives": 12, "true_negatives": 12, "false_negatives": 0,
+        "expected_negatives": 14, "true_negatives": 14, "false_negatives": 0,
         "unnecessary_escalations": 0,
     }
 
@@ -59,7 +59,11 @@ def test_all_declared_negative_controls(corpus):
             assert not result["evidence"]["shadow"]["accepted"], case["case_id"]
             assert not result["evidence"]["ungated_shadow"]["accepted"], case["case_id"]
             assert case["expected_reason"] in result["evidence"]["shadow"]["reasons"]
-        assert result["observations"]["shadow_duration_ms"] >= 0
+        if "capture_v2" in case:
+            # V2 replay keeps deterministic projection evidence without timing observations.
+            assert result["observations"] == {}
+        else:
+            assert result["observations"]["shadow_duration_ms"] >= 0
 
 
 def test_global_reference_fit_cannot_hide_wrong_fixed_artifact():

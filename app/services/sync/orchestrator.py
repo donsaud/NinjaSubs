@@ -42,6 +42,15 @@ from app.services.sync.anchor_preshift import (
     preshift_text,
 )
 from app.services.sync.boundary_verifier import BoundaryShadow
+from app.services.sync.case_capture import (
+    capture_affine,
+    capture_output,
+    capture_provider,
+    capture_reference,
+    capture_selected,
+    capture_transformed,
+    capture_verifier,
+)
 from app.services.sync.constant_shift_exemption import (
     ConstantShiftExemptionState,
     apply_exemption_to_evaluation,
@@ -784,6 +793,7 @@ class SyncOrchestrator:
                     timing.winning_candidate_index = timing.candidates_considered
                 if timing.winning_sync_strategy is None:
                     timing.winning_sync_strategy = "alass"
+            capture_output(output, timing.winning_sync_strategy, timing.cache_hit)
             return output
         except asyncio.CancelledError:
             result = "cancelled"
@@ -1198,6 +1208,9 @@ class SyncOrchestrator:
             timing.reference_kind = resolved.kind
             last_resolved = resolved
             reference = resolved.text
+            if resolved.kind == "hash":
+                capture_provider(reference, "opensubtitles")
+            capture_reference(reference, resolved.candidate, resolved.kind)
             decision_kind = resolved.kind
             if pal_first_reference is None and reference:
                 pal_first_reference = reference
@@ -1568,6 +1581,7 @@ class SyncOrchestrator:
                 alass_completed += 1
 
             if synced:
+                capture_transformed(reference, synced, "alass", alignment_input=target_text)
                 # Independent verification: alass exiting 0 is not proof of
                 # synchronization. Measure what it actually produced and record
                 # an explainable verdict.
@@ -1666,6 +1680,7 @@ class SyncOrchestrator:
                         apply_exemption_to_evaluation(evaluation)
                         self._last_evaluation = evaluation
 
+                capture_verifier(reference, synced, evaluation)
                 self._metrics["candidates_verified"] += 1
                 # Computed before the verdict is stored: a resync verdict records
                 # where its transformed artifact lives, so a later reuse can
@@ -1846,6 +1861,7 @@ class SyncOrchestrator:
                     evaluation.verification.value,
                 )
                 if serve_synchronized:
+                    capture_selected(reference, synced, "alass")
                     self._record_outcome(
                         meta,
                         classify_outcome(True, serving_state.value, False),
@@ -1933,12 +1949,14 @@ class SyncOrchestrator:
         except Exception as exc:
             logger.info("[timeline-affine] accepted=false reason=exception:%s", type(exc).__name__)
             return None
+        capture_affine(resolved.text, result)
         evaluation = result.evaluation
         if (not result.accepted or not result.transformed_text or evaluation is None
                 or not may_serve_synchronized(evaluation.sync_state, evaluation.verification)):
             return None
         evaluation.reference_trust = resolved.reference_trust
         transformed = result.transformed_text.encode("utf-8")
+        capture_transformed(resolved.text, result.transformed_text, STRATEGY_ID, evaluation)
         key = build_synced_cache_key(
             meta, target_id, content_hash=content_hash, decision=f"{STRATEGY_ID}-{MODEL_VERSION}"
         )
@@ -1976,6 +1994,7 @@ class SyncOrchestrator:
         timing = current_sync_timing.get()
         if timing is not None:
             timing.winning_sync_strategy = STRATEGY_ID
+        capture_selected(resolved.text, result.transformed_text, STRATEGY_ID)
         return transformed
 
     async def _try_pal_two_point_fallback(
@@ -2076,6 +2095,7 @@ class SyncOrchestrator:
         if evaluation.sync_state is not SyncState.VERIFIED_RESYNCED:
             return None
         transformed = result.transformed_text.encode("utf-8")
+        capture_transformed(reference_text, result.transformed_text, PAL_STRATEGY_ID, evaluation)
         key = build_synced_cache_key(
             meta, target_id, content_hash=content_hash, decision=PAL_STRATEGY_ID
         )
@@ -2128,6 +2148,7 @@ class SyncOrchestrator:
             timing.winning_sync_strategy = PAL_STRATEGY_ID
             timing.reference_kind = timing.pal_reference_kind
             timing.winning_candidate_index = timing.pal_reference_index
+        capture_selected(reference_text, result.transformed_text, PAL_STRATEGY_ID)
         return transformed
 
     @staticmethod
