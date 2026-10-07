@@ -1,0 +1,502 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "dexter_real",
+      "media_type": "series",
+      "target_release_family": "HDTV EVOLVE",
+      "reference_release_family": "BluRay DEMAND",
+      "expected_model": "EDGE_DISCONTINUITY",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": true,
+      "expected_reason": "",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "target"
+        },
+        "reference": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "reference"
+        },
+        "transformed": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "transformed"
+        },
+        "served": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "served"
+        }
+      },
+      "notes": "Known real capture timings; synthetic dialogue flags retained; includes final served artifact.",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "whiplash_real",
+      "media_type": "movie",
+      "target_release_family": "Whiplash target fixture",
+      "reference_release_family": "Whiplash reference fixture",
+      "expected_model": "PAL_LIKE_AFFINE",
+      "boundary_should_run": false,
+      "expected_shadow_outcome": false,
+      "expected_reason": "simpler_verified_model",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/whiplash/target.srt"
+        },
+        "reference": {
+          "path": "tests/fixtures/whiplash/reference.srt"
+        },
+        "transformed": {
+          "path": "tests/fixtures/whiplash/expected.srt"
+        }
+      },
+      "notes": "Known offline real fixture; transformed is Subtitle Edit ground truth.",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "dexter_wrong_reference",
+      "media_type": "series",
+      "target_release_family": "HDTV EVOLVE",
+      "reference_release_family": "BluRay DEMAND",
+      "expected_model": "UNSUPPORTED",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": false,
+      "expected_reason": "unsupported_boundary",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "target"
+        },
+        "reference": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "reference",
+          "operations": [
+            {
+              "kind": "shift",
+              "ms": 17000
+            }
+          ]
+        },
+        "transformed": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "transformed"
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "dexter_sparse",
+      "media_type": "series",
+      "target_release_family": "HDTV EVOLVE",
+      "reference_release_family": "BluRay DEMAND",
+      "expected_model": "UNSUPPORTED",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": false,
+      "expected_reason": "sparse_evidence",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "target",
+          "operations": [
+            {
+              "kind": "slice",
+              "stop": 8
+            }
+          ]
+        },
+        "reference": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "reference",
+          "operations": [
+            {
+              "kind": "slice",
+              "stop": 8
+            }
+          ]
+        },
+        "transformed": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "transformed",
+          "operations": [
+            {
+              "kind": "slice",
+              "stop": 8
+            }
+          ]
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "dexter_tiny_segment",
+      "media_type": "series",
+      "target_release_family": "HDTV EVOLVE",
+      "reference_release_family": "BluRay DEMAND",
+      "expected_model": "UNSUPPORTED",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": false,
+      "expected_reason": "tiny_segment",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "target",
+          "operations": [
+            {
+              "kind": "slice",
+              "start": 35
+            }
+          ]
+        },
+        "reference": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "reference"
+        },
+        "transformed": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "transformed",
+          "operations": [
+            {
+              "kind": "slice",
+              "start": 35
+            }
+          ]
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "dexter_unsupported_boundary",
+      "media_type": "series",
+      "target_release_family": "HDTV EVOLVE",
+      "reference_release_family": "BluRay DEMAND",
+      "expected_model": "UNSUPPORTED",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": false,
+      "expected_reason": "unsupported_boundary",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "target"
+        },
+        "reference": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "reference",
+          "operations": [
+            {
+              "kind": "end",
+              "start": 30,
+              "ms": 190000
+            }
+          ]
+        },
+        "transformed": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "transformed"
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "dexter_three_regimes",
+      "media_type": "series",
+      "target_release_family": "HDTV EVOLVE",
+      "reference_release_family": "BluRay DEMAND",
+      "expected_model": "UNSUPPORTED",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": false,
+      "expected_reason": "not_exactly_one_boundary",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "target"
+        },
+        "reference": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "reference"
+        },
+        "transformed": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "transformed",
+          "operations": [
+            {
+              "kind": "shift",
+              "start": 400,
+              "ms": 10000
+            }
+          ]
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "dexter_nonmonotonic",
+      "media_type": "series",
+      "target_release_family": "HDTV EVOLVE",
+      "reference_release_family": "BluRay DEMAND",
+      "expected_model": "UNSUPPORTED",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": false,
+      "expected_reason": "ordering_violation",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "target"
+        },
+        "reference": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "reference"
+        },
+        "transformed": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "transformed",
+          "operations": [
+            {
+              "kind": "swap",
+              "start": 50,
+              "stop": 51
+            }
+          ]
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "dexter_crossing",
+      "media_type": "series",
+      "target_release_family": "HDTV EVOLVE",
+      "reference_release_family": "BluRay DEMAND",
+      "expected_model": "UNSUPPORTED",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": false,
+      "expected_reason": "ordering_violation",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "target",
+          "operations": [
+            {
+              "kind": "end",
+              "start": 38,
+              "ms": 210000
+            }
+          ]
+        },
+        "reference": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "reference"
+        },
+        "transformed": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "transformed"
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "dexter_unsupported_interval",
+      "media_type": "series",
+      "target_release_family": "HDTV EVOLVE",
+      "reference_release_family": "BluRay DEMAND",
+      "expected_model": "UNSUPPORTED",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": false,
+      "expected_reason": "poor_reference_agreement",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "target"
+        },
+        "reference": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "reference",
+          "operations": [
+            {
+              "kind": "drop",
+              "start": 100,
+              "stop": 150
+            }
+          ]
+        },
+        "transformed": {
+          "path": "tests/fixtures/boundary/dexter_s08e04_timings.json",
+          "role": "transformed"
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "normal_constant",
+      "media_type": "movie",
+      "target_release_family": "Whiplash target fixture",
+      "reference_release_family": "Whiplash reference fixture",
+      "expected_model": "CONSTANT_OFFSET",
+      "boundary_should_run": false,
+      "expected_shadow_outcome": false,
+      "expected_reason": "simpler_verified_model",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/whiplash/expected.srt"
+        },
+        "reference": {
+          "path": "tests/fixtures/whiplash/expected.srt",
+          "operations": [
+            {
+              "kind": "shift",
+              "ms": 5000
+            }
+          ]
+        },
+        "transformed": {
+          "path": "tests/fixtures/whiplash/expected.srt",
+          "operations": [
+            {
+              "kind": "shift",
+              "ms": 5000
+            }
+          ]
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "normal_affine",
+      "media_type": "movie",
+      "target_release_family": "Whiplash target fixture",
+      "reference_release_family": "Whiplash reference fixture",
+      "expected_model": "GLOBAL_AFFINE",
+      "boundary_should_run": false,
+      "expected_shadow_outcome": false,
+      "expected_reason": "simpler_verified_model",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/whiplash/expected.srt"
+        },
+        "reference": {
+          "path": "tests/fixtures/whiplash/expected.srt",
+          "operations": [
+            {
+              "kind": "scale",
+              "slope": 1.0123,
+              "intercept": 5000
+            }
+          ]
+        },
+        "transformed": {
+          "path": "tests/fixtures/whiplash/expected.srt",
+          "operations": [
+            {
+              "kind": "scale",
+              "slope": 1.0123,
+              "intercept": 5000
+            }
+          ]
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    },
+    {
+      "case_id": "segmentation_only",
+      "media_type": "movie",
+      "target_release_family": "Whiplash target fixture",
+      "reference_release_family": "Whiplash reference fixture",
+      "expected_model": "SAME_EDITION",
+      "boundary_should_run": true,
+      "expected_shadow_outcome": false,
+      "expected_reason": "not_exactly_one_boundary",
+      "fixtures": {
+        "target": {
+          "path": "tests/fixtures/whiplash/expected.srt"
+        },
+        "reference": {
+          "path": "tests/fixtures/whiplash/expected.srt",
+          "operations": [
+            {
+              "kind": "split"
+            }
+          ]
+        },
+        "transformed": {
+          "path": "tests/fixtures/whiplash/expected.srt"
+        }
+      },
+      "notes": "derived_real_timings",
+      "production_context": {
+        "alass_applied": true,
+        "alass_successful": true,
+        "reference_trust": "high",
+        "max_plausible_offset_ms": 180000
+      }
+    }
+  ]
+}
