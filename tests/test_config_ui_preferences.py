@@ -436,31 +436,32 @@ def test_uploader_preserved_through_ranking_and_badge():
 
 @pytest.mark.asyncio
 async def test_keyless_scraper_providers_queried_when_injected():
-    """YIFYSubtitles and SubtitleCat are queried when their providers are injected."""
+    """iSubtitles and Gestdown are queried when their providers are injected."""
     p_subdl = AsyncMock()
     p_subdl.search_subtitles = AsyncMock(return_value=[])
     p_subsource = AsyncMock()
     p_subsource.search_subtitles = AsyncMock(return_value=[])
-    p_yify = AsyncMock()
-    p_yify.search_subtitles = AsyncMock(return_value=[])
-    p_cat = AsyncMock()
-    p_cat.search_subtitles = AsyncMock(return_value=[])
+    p_isub = AsyncMock()
+    p_isub.search_subtitles = AsyncMock(return_value=[])
+    p_gest = AsyncMock()
+    p_gest.search_subtitles = AsyncMock(return_value=[])
 
     await aggregate_subtitles(
         imdb_id="tt0111161",
-        media_type="movie",
+        media_type="series",
+        season=1, episode=1,
         title="Gladiator",
         year=2000,
-        user_preferences=UserPreferences(),
+        user_preferences=UserPreferences(enable_isubtitles=True, enable_gestdown=True),
         subdl_provider=p_subdl,
         subsource_provider=p_subsource,
-        yifysubtitles_provider=p_yify,
-        subtitlecat_provider=p_cat,
+        isubtitles_provider=p_isub,
+        gestdown_provider=p_gest,
         use_cache=False,
     )
 
-    assert p_yify.search_subtitles.await_count == 1
-    assert p_cat.search_subtitles.await_count == 1
+    assert p_isub.search_subtitles.await_count == 1
+    assert p_gest.search_subtitles.await_count == 1
 
 
 def test_badge_parts_encode_parse_roundtrip():
@@ -661,22 +662,24 @@ def test_configure_page_shows_provider_icons(client):
         "subdl.png",
         "subsource.png",
         "opensubtitles.png",
-        "yifysubtitles.png",
-        "subtitlecat.png",
+        "isubtitles.svg",
+        "gestdown.svg",
     ):
         assert f'/static/{icon}' in body
         assert client.get(f"/static/{icon}").status_code == 200
 
 
 def test_configure_page_shows_keyless_provider_toggles(client):
-    """YIFYSubtitles and SubtitleCat appear with enable/disable toggles."""
+    """iSubtitles and Gestdown appear with enable/disable toggles."""
     body = client.get("/configure").text
-    assert "YIFYSubtitles" in body
-    assert "SubtitleCat" in body
-    assert 'id="enableYifysubtitles"' in body
-    assert 'id="enableSubtitlecat"' in body
+    assert "iSubtitles" in body
+    assert "Gestdown" in body
+    assert 'id="enableIsubtitles"' in body
+    assert 'id="enableGestdown"' in body
     assert "Free / No Key" in body
-    assert "Machine Translated" in body
+    assert "Machine Translated" not in body
+    assert "YIFYSubtitles" not in body
+    assert "SubtitleCat" not in body
 
 
 def test_configure_page_shows_unified_provider_rows(client):
@@ -687,8 +690,8 @@ def test_configure_page_shows_unified_provider_rows(client):
         "enableSubdl",
         "enableSubsource",
         "enableOpensubtitles",
-        "enableYifysubtitles",
-        "enableSubtitlecat",
+        "enableIsubtitles",
+        "enableGestdown",
     ):
         assert f'id="{toggle}"' in body
     assert body.count("Requires Key") == 3
@@ -738,7 +741,7 @@ async def test_disabled_scraper_pref_skips_provider(monkeypatch):
         )
 
     assert yify_mock.await_count == 0
-    assert cat_mock.await_count == 1
+    assert cat_mock.await_count == 0
 
 
 def test_configure_page_contains_phase2_controls(client):

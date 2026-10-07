@@ -39,6 +39,8 @@ def encode_user_config(
     enable_opensubtitles: bool = True,
     enable_yifysubtitles: bool = False,
     enable_subtitlecat: bool = False,
+    enable_gestdown: bool = False,
+    enable_isubtitles: bool = False,
     enable_rtl_fix: bool = True,
     enable_ad_removal: bool = True,
     keep_translator_credits: bool = True,
@@ -97,6 +99,10 @@ def encode_user_config(
         payload["enable_opensubtitles"] = False
     if enable_yifysubtitles:
         payload["enable_yifysubtitles"] = True
+    if enable_gestdown:
+        payload["enable_gestdown"] = True
+    if enable_isubtitles:
+        payload["enable_isubtitles"] = True
     if enable_subtitlecat:
         payload["enable_subtitlecat"] = True
     if enable_rtl_fix is False:
@@ -175,6 +181,8 @@ def parse_user_config(
     enable_opensubtitles: bool = True
     enable_yifysubtitles: bool = False
     enable_subtitlecat: bool = False
+    enable_gestdown: bool = False
+    enable_isubtitles: bool = False
     enable_rtl_fix: bool = True
     enable_ad_removal: bool = True
     keep_translator_credits: bool = True
@@ -279,6 +287,10 @@ def parse_user_config(
                     enable_yifysubtitles = _as_bool(
                         data.get("enable_yifysubtitles", data.get("yifysubtitles")), False
                     )
+                if "enable_gestdown" in data:
+                    enable_gestdown = _as_bool(data["enable_gestdown"], False)
+                if "enable_isubtitles" in data:
+                    enable_isubtitles = _as_bool(data["enable_isubtitles"], False)
                 if "enable_subtitlecat" in data or "subtitlecat" in data:
                     enable_subtitlecat = _as_bool(
                         data.get("enable_subtitlecat", data.get("subtitlecat")), False
@@ -421,6 +433,10 @@ def parse_user_config(
                     enable_opensubtitles = _as_bool(parsed_qs["enable_opensubtitles"][0], True)
                 if "enable_yifysubtitles" in parsed_qs:
                     enable_yifysubtitles = _as_bool(parsed_qs["enable_yifysubtitles"][0], False)
+                if "enable_gestdown" in parsed_qs:
+                    enable_gestdown = _as_bool(parsed_qs["enable_gestdown"][0], False)
+                if "enable_isubtitles" in parsed_qs:
+                    enable_isubtitles = _as_bool(parsed_qs["enable_isubtitles"][0], False)
                 if "enable_subtitlecat" in parsed_qs:
                     enable_subtitlecat = _as_bool(parsed_qs["enable_subtitlecat"][0], False)
                 if "enable_rtl_fix" in parsed_qs:
@@ -588,6 +604,8 @@ def parse_user_config(
         enable_opensubtitles=enable_opensubtitles,
         enable_yifysubtitles=enable_yifysubtitles,
         enable_subtitlecat=enable_subtitlecat,
+        enable_gestdown=enable_gestdown,
+        enable_isubtitles=enable_isubtitles,
         enable_rtl_fix=enable_rtl_fix,
         enable_ad_removal=enable_ad_removal,
         keep_translator_credits=keep_translator_credits,

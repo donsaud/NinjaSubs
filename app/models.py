@@ -217,7 +217,9 @@ class UserPreferences(BaseModel):
     enable_subsource: bool = True
     enable_opensubtitles: bool = False
     enable_yifysubtitles: bool = False
-    enable_subtitlecat: bool = False
+    enable_subtitlecat: bool = False  # Legacy configuration only.
+    enable_gestdown: bool = False
+    enable_isubtitles: bool = False
     # Arabic RTL normalization pipeline (punctuation/brackets/quotes + RLM)
     enable_rtl_fix: bool = True
     # Remove promotional/advertisement cues (websites, telegram handles, credits)

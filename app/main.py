@@ -33,12 +33,16 @@ from app.models import Manifest, SubtitleItem, SubtitlesResponse, UserPreference
 from app.playback_witness import build_witness_router, witness_enabled
 from app.providers import (
     CinemetaClient,
+    GestdownProvider,
+    IsubtitlesProvider,
     OpenSubtitlesProvider,
     SubdlProvider,
     SubsourceProvider,
-    SubtitlecatProvider,
-    YifysubtitlesProvider,
 )
+
+# Retain download compatibility for already cached legacy provider entries.
+from app.providers.subtitlecat import SubtitlecatProvider
+from app.providers.yifysubtitles import YifysubtitlesProvider
 from app.services.aggregator import (
     aggregate_subtitles,
     format_informative_badge,
@@ -310,7 +314,8 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
             "enable_subsource": prefs.enable_subsource,
             "enable_opensubtitles": prefs.enable_opensubtitles,
             "enable_yifysubtitles": prefs.enable_yifysubtitles,
-            "enable_subtitlecat": prefs.enable_subtitlecat,
+            "enable_gestdown": prefs.enable_gestdown,
+            "enable_isubtitles": prefs.enable_isubtitles,
             "enable_rtl_fix": prefs.enable_rtl_fix,
             "enable_ad_removal": prefs.enable_ad_removal,
             "keep_translator_credits": prefs.keep_translator_credits,
@@ -821,6 +826,7 @@ async def _fetch_subtitles_handler(
         user_preferences=prefs,
         title=title,
         year=year,
+        tvdb_id=(meta_info or {}).get("tvdb_id"),
         http_client=_http_client,
         subdl_provider=subdl,
         subsource_provider=subsource,
@@ -1036,6 +1042,10 @@ async def _fetch_subtitles_handler(
             source_tag = "YIFY"
         elif rel_prov == "subtitlecat":
             source_tag = "SubtitleCat"
+        elif rel_prov == "gestdown":
+            source_tag = "Gestdown"
+        elif rel_prov == "isubtitles":
+            source_tag = "iSubtitles"
         else:
             source_tag = "SubDL"
 
@@ -2541,7 +2551,7 @@ async def _serve_subtitle_handler(
 
     # 3. Instantiate appropriate provider and fetch archive
     provider: (
-        SubdlProvider | SubsourceProvider | OpenSubtitlesProvider | YifysubtitlesProvider | SubtitlecatProvider
+        SubdlProvider | SubsourceProvider | OpenSubtitlesProvider | YifysubtitlesProvider | SubtitlecatProvider | GestdownProvider | IsubtitlesProvider
     )
     if provider_name == "subdl":
         provider = SubdlProvider(_http_client)
@@ -2557,6 +2567,12 @@ async def _serve_subtitle_handler(
                 username=opensubtitles_username,
                 password=opensubtitles_password,
             )
+    elif provider_name == "gestdown":
+        provider = GestdownProvider(_http_client)
+        raw_archive = await provider.download_archive(download_url)
+    elif provider_name == "isubtitles":
+        provider = IsubtitlesProvider(_http_client)
+        raw_archive = await provider.download_archive(download_url)
     elif provider_name == "yifysubtitles":
         provider = YifysubtitlesProvider(_http_client)
         raw_archive = await provider.download_archive(download_url)

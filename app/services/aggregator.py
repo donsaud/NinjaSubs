@@ -15,11 +15,11 @@ from app.models import (
     normalize_badge_parts,
 )
 from app.providers.base import BaseSubtitleProvider
+from app.providers.gestdown import GestdownProvider
+from app.providers.isubtitles import IsubtitlesProvider
 from app.providers.opensubtitles import OpenSubtitlesProvider
 from app.providers.subdl import SubdlProvider
 from app.providers.subsource import SubsourceProvider
-from app.providers.subtitlecat import SubtitlecatProvider
-from app.providers.yifysubtitles import YifysubtitlesProvider
 from app.services.cache import (
     build_cache_key,
     get_cached_subtitles,
@@ -152,6 +152,10 @@ def format_informative_badge(
         source_provider = "YIFY"
     elif prov == "subtitlecat":
         source_provider = "SubtitleCat"
+    elif prov == "gestdown":
+        source_provider = "Gestdown"
+    elif prov == "isubtitles":
+        source_provider = "iSubtitles"
     else:
         source_provider = "SubDL"
 
@@ -214,8 +218,9 @@ async def aggregate_subtitles(
     subdl_provider: BaseSubtitleProvider | None = None,
     subsource_provider: BaseSubtitleProvider | None = None,
     opensubtitles_provider: BaseSubtitleProvider | None = None,
-    yifysubtitles_provider: BaseSubtitleProvider | None = None,
-    subtitlecat_provider: BaseSubtitleProvider | None = None,
+    gestdown_provider: BaseSubtitleProvider | None = None,
+    isubtitles_provider: BaseSubtitleProvider | None = None,
+    tvdb_id: int | str | None = None,
     use_cache: bool = True,
 ) -> list[SubtitleRelease]:
     """
@@ -293,6 +298,9 @@ async def aggregate_subtitles(
         enable_opensubtitles=bool(getattr(prefs, "enable_opensubtitles", False)),
         enable_yifysubtitles=bool(getattr(prefs, "enable_yifysubtitles", False)),
         enable_subtitlecat=bool(getattr(prefs, "enable_subtitlecat", False)),
+        enable_gestdown=prefs.enable_gestdown,
+        enable_isubtitles=prefs.enable_isubtitles,
+        tvdb_id=tvdb_id,
         enable_rtl_fix=bool(getattr(prefs, "enable_rtl_fix", True)),
         enable_ad_removal=bool(getattr(prefs, "enable_ad_removal", True)),
         keep_translator_credits=bool(getattr(prefs, "keep_translator_credits", True)),
@@ -392,46 +400,19 @@ async def aggregate_subtitles(
             )
         )
 
-    # YIFYSubtitles (no API key; movies only)
-    if yifysubtitles_provider is not None or (
-        http_client is not None
-        and getattr(settings, "ENABLE_YIFYSUBTITLES", True)
-        and bool(getattr(prefs, "enable_yifysubtitles", False))
-    ):
-        p_yify = resolve_provider(yifysubtitles_provider, YifysubtitlesProvider)
-        tasks.append(
-            p_yify.search_subtitles(
-                imdb_id=imdb_id,
-                is_series=is_series,
-                season=parsed_season,
-                episode=parsed_episode,
-                title=title,
-                year=year,
-                languages=effective_langs,
-                exclude_hi=effective_exclude_hi,
-            )
-        )
-
-    # SubtitleCat (no API key; text search by title/year or SxxExx)
-    if subtitlecat_provider is not None or (
-        http_client is not None
-        and getattr(settings, "ENABLE_SUBTITLECAT", True)
-        and bool(getattr(prefs, "enable_subtitlecat", False))
-    ):
-        p_cat = resolve_provider(subtitlecat_provider, SubtitlecatProvider)
-        tasks.append(
-            p_cat.search_subtitles(
-                imdb_id=imdb_id,
-                is_series=is_series,
-                season=parsed_season,
-                episode=parsed_episode,
-                title=title,
-                year=year,
-                languages=effective_langs,
-                exclude_hi=effective_exclude_hi,
-                target_filename=filename,
-            )
-        )
+    # Optional no-key providers. Retired config fields never enable replacements.
+    if prefs.enable_isubtitles:
+        provider = resolve_provider(isubtitles_provider, IsubtitlesProvider)
+        tasks.append(provider.search_subtitles(
+            imdb_id=imdb_id, is_series=is_series, season=parsed_season,
+            episode=parsed_episode, title=title, year=year, languages=effective_langs,
+            exclude_hi=effective_exclude_hi))
+    if prefs.enable_gestdown and is_series:
+        provider = resolve_provider(gestdown_provider, GestdownProvider)
+        tasks.append(provider.search_subtitles(
+            imdb_id=imdb_id, is_series=True, season=parsed_season,
+            episode=parsed_episode, title=title, year=year, tvdb_id=tvdb_id,
+            languages=effective_langs, exclude_hi=effective_exclude_hi))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 

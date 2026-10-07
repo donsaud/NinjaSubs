@@ -63,6 +63,10 @@ class CinemetaClient:
                 "year": year,
                 "type": target_type,
             }
+            # Preserve a real external ID when supplied; never derive one from IMDb.
+            tvdb_id = meta.get("tvdb_id", meta.get("tvdbId"))
+            if tvdb_id is not None:
+                result["tvdb_id"] = tvdb_id
             # Limit cache size to 1000 items
             if len(_CINEMETA_CACHE) > 1000:
                 _CINEMETA_CACHE.pop(next(iter(_CINEMETA_CACHE)))
