@@ -6,6 +6,12 @@ The command exits nonzero on expectation mismatches or false positives. It never
 calls providers, executes ALASS, accesses a sync cache, or invokes the serving path.
 No application module imports the harness. Production source is unchanged.
 
+For validated local artifact import, provenance contracts and collection guidance,
+see [Real shadow case collection](shadow_case_collection.md). The current corpus
+explicitly labels two real seeds and eleven derived controls; summary reporting
+separates REAL/DERIVED/SYNTHETIC counts. Run
+`python tools/sync_replay.py --corpus-summary` to inspect them without saving a report.
+
 ## Inputs and evidence
 
 `tests/replay/corpus.json` contains portable repository-relative fixture paths,

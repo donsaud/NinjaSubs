@@ -34,6 +34,15 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "real",
+      "source_case_id": null,
+      "case_type": "EDGE_DISCONTINUITY",
+      "expectations": {
+        "expected_boundary_accepted": true,
+        "expected_boundary_run": true,
+        "expected_classification": "EDGE_DISCONTINUITY",
+        "expected_parent_model_failure": true
       }
     },
     {
@@ -62,6 +71,16 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "real",
+      "source_case_id": null,
+      "case_type": "GLOBAL_AFFINE",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": false,
+        "expected_classification": "UNSUPPORTED",
+        "expected_parent_model": "PAL_LIKE_AFFINE",
+        "expected_boundary_required": false
       }
     },
     {
@@ -99,6 +118,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "dexter_real",
+      "case_type": "WRONG_REFERENCE_REJECT",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": true,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -148,6 +175,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "dexter_real",
+      "case_type": "INSUFFICIENT_EVIDENCE_REJECT",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": true,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -191,6 +226,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "dexter_real",
+      "case_type": "INSUFFICIENT_EVIDENCE_REJECT",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": true,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -229,6 +272,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "dexter_real",
+      "case_type": "DIFFERENT_CUT_REJECT",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": true,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -267,6 +318,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "dexter_real",
+      "case_type": "MULTI_DISCONTINUITY_REJECT",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": true,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -305,6 +364,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "dexter_real",
+      "case_type": "DIFFERENT_CUT_REJECT",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": true,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -343,6 +410,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "dexter_real",
+      "case_type": "DIFFERENT_CUT_REJECT",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": true,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -381,6 +456,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "dexter_real",
+      "case_type": "DIFFERENT_CUT_REJECT",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": true,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -421,6 +504,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "whiplash_real",
+      "case_type": "CONSTANT_OFFSET",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": false,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -463,6 +554,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "whiplash_real",
+      "case_type": "GLOBAL_AFFINE",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": false,
+        "expected_classification": "UNSUPPORTED"
       }
     },
     {
@@ -496,6 +595,14 @@
         "alass_successful": true,
         "reference_trust": "high",
         "max_plausible_offset_ms": 180000
+      },
+      "provenance": "derived",
+      "source_case_id": "whiplash_real",
+      "case_type": "CONSTANT_OFFSET",
+      "expectations": {
+        "expected_boundary_accepted": false,
+        "expected_boundary_run": true,
+        "expected_classification": "UNSUPPORTED"
       }
     }
   ]
