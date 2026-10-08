@@ -206,5 +206,23 @@ def test_dark_autofill_and_disabled_css_covers_all_credentials(client):
     assert ".credential-input:-webkit-autofill:focus { border-color: var(--line-h)" in html
     assert ".provider-key.credentials-disabled" in html
     assert "opacity: .45" in html
-    assert "OpenSubtitles account" in html
+    assert ">Account</div>" in html
+    assert "Optional credentials for authenticated access." in html
+    assert ">Username</label>" in html
+    assert ">Password</label>" in html
     assert re.findall(r'<span class="provider-name">([^<]+)</span>', html) == [label for _, label in PROVIDERS]
+
+
+def test_account_simplification_preserves_mobile_geometry():
+    import subprocess
+
+    before = subprocess.run(
+        ["git", "show", "HEAD:app/templates/configure.html"],
+        capture_output=True, text=True, encoding="utf-8", check=True).stdout
+    after = TEMPLATE.read_text(encoding="utf-8")
+    # Lock all responsive rules and the outer container to the accepted UI.
+    assert re.findall(r"@media[^}]+(?:}[^}]*})?", after) == re.findall(
+        r"@media[^}]+(?:}[^}]*})?", before)
+    container = 'mx-auto w-full max-w-2xl px-4 sm:px-6 py-8 sm:py-12 pb-16 overflow-x-hidden'
+    assert container in before and container in after
+    assert '.account-credentials { margin-top: 12px; padding-top: 10px;' in after

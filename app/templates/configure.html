@@ -606,9 +606,9 @@
             border-radius: 10px !important;
         }
         .credential-input:-webkit-autofill:focus { border-color: var(--line-h) !important; }
-        .account-credentials { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
-        .account-credentials-title { margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--w2); }
-        .account-credentials-note { margin-bottom: 12px; font-size: 11px; line-height: 1.5; color: var(--g2); }
+        .account-credentials { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+        .account-credentials-title { margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--w2); }
+        .account-credentials-note { margin-bottom: 8px; font-size: 11px; line-height: 1.5; color: var(--g2); }
         @media (max-width: 480px) {
             .provider-id { display: grid; grid-template-columns: 22px minmax(0, 1fr); column-gap: 10px; row-gap: 4px; }
             .provider-id img { grid-row: 1 / span 2; }
@@ -1012,14 +1012,14 @@
                                 </div>
                                 <div id="opensubtitles-status" class="mt-2"></div>
                                 <div class="account-credentials">
-                                    <div class="account-credentials-title">OpenSubtitles account</div>
-                                    <p class="account-credentials-note">Account credentials are used for authenticated OpenSubtitles access.</p>
-                                    <div class="mt-4">
-                                        <label for="opensubtitles-username" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles username</label>
+                                    <div class="account-credentials-title">Account</div>
+                                    <p class="account-credentials-note">Optional credentials for authenticated access.</p>
+                                    <div>
+                                        <label for="opensubtitles-username" class="block text-xs text-slate-400 mb-1.5">Username</label>
                                         <input type="text" id="opensubtitles-username" value="{{initial_os_username}}" placeholder="your OpenSubtitles username" class="mono-input credential-input w-full" autocomplete="username">
                                     </div>
-                                    <div class="mt-3">
-                                        <label for="opensubtitles-password" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles password</label>
+                                    <div class="mt-2">
+                                        <label for="opensubtitles-password" class="block text-xs text-slate-400 mb-1.5">Password</label>
                                         <input type="password" id="opensubtitles-password" value="" placeholder="your OpenSubtitles password" class="mono-input credential-input w-full" autocomplete="current-password">
                                     </div>
                                 </div>

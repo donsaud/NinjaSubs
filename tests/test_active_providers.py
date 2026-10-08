@@ -141,3 +141,41 @@ def test_actual_install_serializer_only_emits_the_three_active_providers(languag
     prefs = parse_user_config(token)
     assert prefs.languages == [language]
     assert all(not getattr(prefs, "enable_" + name) for name in RETIRED)
+
+
+@pytest.mark.parametrize("field", ["enable_subdl", "enable_subsource", "enable_opensubtitles"])
+def test_active_provider_defaults_and_saved_opt_out(field):
+    assert getattr(UserPreferences(), field) is True
+    assert getattr(parse_user_config(None), field) is True
+    assert getattr(UserPreferences(**{field: False}), field) is False
+    assert getattr(parse_user_config(encode_user_config(**{field: False})), field) is False
+    assert getattr(parse_user_config(field + "=false"), field) is False
+
+
+@pytest.mark.asyncio
+async def test_enabled_defaults_without_credentials_make_no_requests(monkeypatch):
+    from app.config import settings
+
+    for name in ("SUBDL_API_KEY", "SUBSOURCE_API_KEY", "OPENSUBTITLES_API_KEY"):
+        monkeypatch.setattr(settings, name, "")
+    upstream = AsyncMock(spec=httpx.AsyncClient)
+    assert await aggregator.aggregate_subtitles(
+        "tt1234567", http_client=upstream, use_cache=False) == []
+    upstream.get.assert_not_awaited()
+    upstream.post.assert_not_awaited()
+    upstream.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_one_unavailable_provider_does_not_block_enabled_peers():
+    providers = [AsyncMock() for _ in range(3)]
+    providers[0].search_subtitles.side_effect = RuntimeError("provider unavailable")
+    expected = SubtitleRelease(provider="subsource", release_name="Example.1080p.BluRay", download_url="/example")
+    providers[1].search_subtitles.return_value = [expected]
+    providers[2].search_subtitles.return_value = []
+    results = await aggregator.aggregate_subtitles(
+        "tt1234567", subdl_provider=providers[0], subsource_provider=providers[1],
+        opensubtitles_provider=providers[2], use_cache=False)
+    assert results == [expected]
+    for provider in providers:
+        provider.search_subtitles.assert_awaited_once()

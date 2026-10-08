@@ -213,11 +213,10 @@ class UserPreferences(BaseModel):
     exclude_hi: bool = False
     nuvio_mode: bool = False  # True: Clean ISO code ("ara") & Nuvio ID; False: Stremio format ("ara | ...", "AR [★ Match] | ...")
     hi_preference: str = "neutral"  # "neutral", "prefer", or "exclude"
-    # Provider enable/disable toggles (SubDL/SubSource on by default; the rest
-    # stay off until the user explicitly enables them)
+    # Active providers are opt-out; their API key requirements still apply.
     enable_subdl: bool = True
     enable_subsource: bool = True
-    enable_opensubtitles: bool = False
+    enable_opensubtitles: bool = True
     # Retained for legacy token compatibility only; never schedule providers.
     enable_yifysubtitles: bool = False
     enable_subtitlecat: bool = False

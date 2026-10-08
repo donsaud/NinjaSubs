@@ -283,7 +283,7 @@ async def aggregate_subtitles(
         hi_preference=hi_preference,
         enable_subdl=bool(getattr(prefs, "enable_subdl", True)),
         enable_subsource=bool(getattr(prefs, "enable_subsource", True)),
-        enable_opensubtitles=bool(getattr(prefs, "enable_opensubtitles", False)),
+        enable_opensubtitles=bool(getattr(prefs, "enable_opensubtitles", True)),
         enable_yifysubtitles=bool(getattr(prefs, "enable_yifysubtitles", False)),
         enable_subtitlecat=bool(getattr(prefs, "enable_subtitlecat", False)),
         enable_rtl_fix=bool(getattr(prefs, "enable_rtl_fix", True)),
@@ -364,7 +364,7 @@ async def aggregate_subtitles(
         )
 
     # Include OpenSubtitles if enabled and an API key/provider is available
-    if bool(getattr(prefs, "enable_opensubtitles", False)) and (
+    if bool(getattr(prefs, "enable_opensubtitles", True)) and (
         effective_opensubtitles_key
         or getattr(settings, "OPENSUBTITLES_API_KEY", "").strip()
         or opensubtitles_provider is not None
