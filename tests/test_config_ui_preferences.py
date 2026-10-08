@@ -650,7 +650,8 @@ def test_configure_page_shows_unified_provider_rows(client):
     assert body.count('class="provider-row"') == 3
     for retired in ("Gestdown", "iSubtitles", "YIFYSubtitles", "SubtitleCat", "Free / No Key"):
         assert retired not in body
-    assert body.count("Requires Key") == 3
+    assert body.count("Requires Key") == 2
+    assert body.count("API Key + Account") == 1
     assert 'id="subdlKey"' in body
     assert 'id="subsourceKey"' in body
     assert 'id="opensubtitlesKey"' in body

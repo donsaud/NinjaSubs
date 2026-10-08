@@ -565,7 +565,56 @@
             max-height: 520px;
         }
         .provider-key-wrap { position: relative; }
-        .provider-key-wrap .mono-input { padding-right: 118px !important; }
+        .provider-key-wrap .mono-input { padding-right: 158px !important; }
+        .provider-key.credentials-disabled {
+            max-height: 170px;
+            margin-top: 12px;
+            opacity: .45;
+        }
+        .provider-key.credentials-disabled.expanded-tall { max-height: 520px; }
+        .credentials-disabled input, .credentials-disabled button { cursor: not-allowed; }
+        .credentials-disabled .provider-key-action { pointer-events: none; cursor: not-allowed; }
+        .credential-reveal {
+            position: absolute;
+            right: 120px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 32px;
+            height: 36px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 0;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--w2);
+            cursor: pointer;
+        }
+        .credential-reveal:hover:not(:disabled) { background: rgba(255,255,255,.06); }
+        .credential-reveal:focus-visible { outline: 2px solid var(--w2); outline-offset: -2px; }
+        .credential-reveal svg { width: 18px; height: 18px; }
+        .credential-reveal .eye-slash { display: none; }
+        .credential-reveal[aria-pressed="true"] .eye-slash { display: block; }
+        .credential-input:-webkit-autofill,
+        .credential-input:-webkit-autofill:hover,
+        .credential-input:-webkit-autofill:focus,
+        .credential-input:-webkit-autofill:active {
+            -webkit-text-fill-color: var(--w) !important;
+            caret-color: var(--w);
+            -webkit-box-shadow: 0 0 0 1000px var(--card) inset !important;
+            box-shadow: 0 0 0 1000px var(--card) inset !important;
+            border-radius: 10px !important;
+        }
+        .credential-input:-webkit-autofill:focus { border-color: var(--line-h) !important; }
+        .account-credentials { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+        .account-credentials-title { margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--w2); }
+        .account-credentials-note { margin-bottom: 12px; font-size: 11px; line-height: 1.5; color: var(--g2); }
+        @media (max-width: 480px) {
+            .provider-id { display: grid; grid-template-columns: 22px minmax(0, 1fr); column-gap: 10px; row-gap: 4px; }
+            .provider-id img { grid-row: 1 / span 2; }
+            .provider-id .badge-tag { grid-column: 2; justify-self: start; }
+            .provider-name { overflow: visible; text-overflow: clip; }
+        }
         .provider-key-action {
             position: absolute;
             right: 8px;
@@ -905,7 +954,10 @@
                             </div>
                             <div id="subdlKey" class="provider-key expanded">
                                 <div class="provider-key-wrap">
-                                    <input type="text" id="subdl-key" value="{{initial_subdl}}" placeholder="Paste your SubDL API key" class="mono-input w-full" autocomplete="off">
+                                    <input type="password" id="subdl-key" aria-label="SubDL API key" value="{{initial_subdl}}" placeholder="Paste your SubDL API key" class="mono-input credential-input w-full" autocomplete="off">
+                                    <button type="button" class="credential-reveal" data-reveal="subdl-key" data-label="SubDL API key" aria-controls="subdl-key" aria-label="Show SubDL API key" title="Show SubDL API key" aria-pressed="false">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="eye-slash" d="m3 3 18 18"/></svg>
+                                    </button>
                                     <a href="https://subdl.com/panel/api" target="_blank" class="provider-key-action">Get API Key <span class="text-[10px]">&#8599;</span></a>
                                 </div>
                                 <div id="subdl-status" class="mt-2"></div>
@@ -927,7 +979,10 @@
                             </div>
                             <div id="subsourceKey" class="provider-key expanded">
                                 <div class="provider-key-wrap">
-                                    <input type="text" id="subsource-key" value="{{initial_subsource}}" placeholder="Paste your SubSource API key" class="mono-input w-full" autocomplete="off">
+                                    <input type="password" id="subsource-key" aria-label="SubSource API key" value="{{initial_subsource}}" placeholder="Paste your SubSource API key" class="mono-input credential-input w-full" autocomplete="off">
+                                    <button type="button" class="credential-reveal" data-reveal="subsource-key" data-label="SubSource API key" aria-controls="subsource-key" aria-label="Show SubSource API key" title="Show SubSource API key" aria-pressed="false">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="eye-slash" d="m3 3 18 18"/></svg>
+                                    </button>
                                     <a href="https://subsource.net/dashboard/profile" target="_blank" class="provider-key-action">Get API Key <span class="text-[10px]">&#8599;</span></a>
                                 </div>
                                 <div id="subsource-status" class="mt-2"></div>
@@ -940,7 +995,7 @@
                                 <div class="provider-id">
                                     <img src="/static/opensubtitles.png" alt="OpenSubtitles">
                                     <span class="provider-name">OpenSubtitles</span>
-                                    <span class="badge-tag bg-amber-500/10 text-amber-400 border-amber-500/20">Requires Key</span>
+                                    <span class="badge-tag bg-amber-500/10 text-amber-400 border-amber-500/20">API Key + Account</span>
                                 </div>
                                 <label class="toggle">
                                     <input type="checkbox" id="enableOpensubtitles" checked class="peer sr-only">
@@ -949,24 +1004,24 @@
                             </div>
                             <div id="opensubtitlesKey" class="provider-key expanded-tall">
                                 <div class="provider-key-wrap">
-                                    <input type="text" id="opensubtitles-key" value="{{initial_opensubtitles}}" placeholder="Paste your OpenSubtitles API key" class="mono-input w-full" autocomplete="off">
+                                    <input type="password" id="opensubtitles-key" aria-label="OpenSubtitles API key" value="{{initial_opensubtitles}}" placeholder="Paste your OpenSubtitles API key" class="mono-input credential-input w-full" autocomplete="off">
+                                    <button type="button" class="credential-reveal" data-reveal="opensubtitles-key" data-label="OpenSubtitles API key" aria-controls="opensubtitles-key" aria-label="Show OpenSubtitles API key" title="Show OpenSubtitles API key" aria-pressed="false">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="eye-slash" d="m3 3 18 18"/></svg>
+                                    </button>
                                     <a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="provider-key-action">Get API Key <span class="text-[10px]">&#8599;</span></a>
                                 </div>
                                 <div id="opensubtitles-status" class="mt-2"></div>
-                                <!-- Not `.provider-key`: that class alone is the COLLAPSED
-                                     style (max-height 0, opacity 0), so wrapping inputs in
-                                     it hides them inside the expanded card. These are plain
-                                     blocks that only need vertical spacing. Same reason
-                                     they skip `.provider-key-wrap`, whose mono-input rule
-                                     reserves 118px of padding for a "Get API Key" button
-                                     these fields do not have. -->
-                                <div class="mt-4">
-                                    <label for="opensubtitles-username" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles username</label>
-                                    <input type="text" id="opensubtitles-username" value="{{initial_os_username}}" placeholder="your OpenSubtitles username" class="mono-input w-full" autocomplete="username">
-                                </div>
-                                <div class="mt-3">
-                                    <label for="opensubtitles-password" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles password</label>
-                                    <input type="password" id="opensubtitles-password" value="" placeholder="your OpenSubtitles password" class="mono-input w-full" autocomplete="current-password">
+                                <div class="account-credentials">
+                                    <div class="account-credentials-title">OpenSubtitles account</div>
+                                    <p class="account-credentials-note">Account credentials are used for authenticated OpenSubtitles access.</p>
+                                    <div class="mt-4">
+                                        <label for="opensubtitles-username" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles username</label>
+                                        <input type="text" id="opensubtitles-username" value="{{initial_os_username}}" placeholder="your OpenSubtitles username" class="mono-input credential-input w-full" autocomplete="username">
+                                    </div>
+                                    <div class="mt-3">
+                                        <label for="opensubtitles-password" class="block text-xs text-slate-400 mb-1.5">OpenSubtitles password</label>
+                                        <input type="password" id="opensubtitles-password" value="" placeholder="your OpenSubtitles password" class="mono-input credential-input w-full" autocomplete="current-password">
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1602,6 +1657,40 @@
                 const wrapper = document.getElementById(wrapperId);
                 if (!toggle || !wrapper) return;
                 wrapper.classList.toggle("expanded", toggle.checked);
+                wrapper.classList.toggle("credentials-disabled", !toggle.checked);
+                wrapper.setAttribute("aria-disabled", String(!toggle.checked));
+                wrapper.querySelectorAll("input, button").forEach((control) => {
+                    control.disabled = !toggle.checked;
+                });
+                wrapper.querySelectorAll("a").forEach((link) => {
+                    link.setAttribute("aria-disabled", String(!toggle.checked));
+                    if (toggle.checked) link.removeAttribute("tabindex");
+                    else link.setAttribute("tabindex", "-1");
+                });
+                if (!toggle.checked) {
+                    wrapper.querySelectorAll("[data-reveal]").forEach((button) => {
+                        const input = document.getElementById(button.dataset.reveal);
+                        if (input) setCredentialVisibility(input, button, false);
+                    });
+                }
+            });
+        }
+
+        function setCredentialVisibility(input, button, visible) {
+            input.type = visible ? "text" : "password";
+            button.setAttribute("aria-pressed", String(visible));
+            const label = `${visible ? "Hide" : "Show"} ${button.dataset.label}`;
+            button.setAttribute("aria-label", label);
+            button.title = label;
+        }
+
+        function setupCredentialReveal() {
+            document.querySelectorAll("[data-reveal]").forEach((button) => {
+                button.addEventListener("click", () => {
+                    const input = document.getElementById(button.dataset.reveal);
+                    if (!input || input.disabled) return;
+                    setCredentialVisibility(input, button, input.type === "password");
+                });
             });
         }
 
@@ -1970,9 +2059,9 @@
                     curStatus.innerHTML = `
                         <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
                             ${checkIconSvg}
-                            <span class="text-xs font-semibold text-white tracking-wide">Valid API</span>
+                            <span class="text-xs font-semibold text-white tracking-wide">API verified</span>
                         </span>`;
-                    updateInstallUrls();
+                    updateUrls();
                 } else {
                     curStatus.innerHTML = `
                         <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
@@ -2029,9 +2118,9 @@
                     curStatus.innerHTML = `
                         <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
                             ${checkIconSvg}
-                            <span class="text-xs font-semibold text-white tracking-wide">Valid API</span>
+                            <span class="text-xs font-semibold text-white tracking-wide">API verified</span>
                         </span>`;
-                    updateInstallUrls();
+                    updateUrls();
                 } else {
                     curStatus.innerHTML = `
                         <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
@@ -2070,6 +2159,17 @@
         const opensubtitlesInput = getOpenSubtitlesInput();
         const opensubtitlesStatus = getOpenSubtitlesStatus();
 
+        function openSubtitlesVerificationLabel(data) {
+            if (data.valid !== true) return "API not verified";
+            if (data.account_checked === true && data.account_valid === true) {
+                return "API & account verified";
+            }
+            if (data.account_checked === true && data.account_valid === false) {
+                return "API verified; account login rejected";
+            }
+            return "API verified";
+        }
+
         async function verifyOpenSubtitlesKey(key) {
             const statusEl = getOpenSubtitlesStatus();
             const trimmedKey = (key || "").trim();
@@ -2086,25 +2186,31 @@
                 // intermediate proxy log; in the request body it does not.
                 const uEl = getOpenSubtitlesUsernameInput();
                 const pEl = getOpenSubtitlesPasswordInput();
+                const username = uEl ? uEl.value.trim() : "";
+                const password = pEl ? pEl.value : "";
                 const res = await fetch("/api/verify/opensubtitles", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         api_key: trimmedKey,
-                        username: uEl ? uEl.value.trim() : "",
-                        password: pEl ? pEl.value : "",
+                        username,
+                        password,
                     }),
                 });
                 const data = await res.json();
+                // Never apply a login verdict to credentials changed during the request.
+                if (getOpenSubtitlesInput().value.trim() !== trimmedKey ||
+                    (uEl ? uEl.value.trim() : "") !== username ||
+                    (pEl ? pEl.value : "") !== password) return;
                 const curStatus = getOpenSubtitlesStatus();
                 if (!curStatus) return;
-                if (data.valid) {
+                if (data.valid === true) {
                     curStatus.innerHTML = `
                         <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
                             ${checkIconSvg}
-                            <span class="text-xs font-semibold text-white tracking-wide">Valid API</span>
+                            <span class="text-xs font-semibold text-white tracking-wide">${openSubtitlesVerificationLabel(data)}</span>
                         </span>`;
-                    updateInstallUrls();
+                    updateUrls();
                 } else {
                     curStatus.innerHTML = `
                         <span class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1a1d21] border border-[#22262b]">
@@ -2143,6 +2249,18 @@
             });
         }
 
+        [getOpenSubtitlesUsernameInput(), getOpenSubtitlesPasswordInput()].forEach((input) => {
+            if (!input) return;
+            input.addEventListener("input", () => {
+                clearTimeout(opensubtitlesDebounceTimer);
+                updateUrls();
+                const status = getOpenSubtitlesStatus();
+                if (status) status.innerHTML = "";
+                const key = getOpenSubtitlesInput().value.trim();
+                if (key) opensubtitlesDebounceTimer = setTimeout(() => verifyOpenSubtitlesKey(key), 600);
+            });
+        });
+
         document.getElementById("excludeHi").addEventListener("change", () => {
             updateBadgePreview();
             updateUrls();
@@ -2180,6 +2298,7 @@
 
 
         applyInitialPrefs();
+        setupCredentialReveal();
         updateProviderCollapse();
         renderBadgeBuilder();
         updateBadgePreview();

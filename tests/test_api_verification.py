@@ -214,7 +214,7 @@ def test_configure_page_contains_badges_and_debounce(client):
     assert "provider-key-action" in html
 
     # Status badge labels and debounce timer
-    assert "Valid API" in html
+    assert "API verified" in html
     assert "Invalid API" in html
     assert "Checking..." in html
     assert "subdlDebounceTimer" in html

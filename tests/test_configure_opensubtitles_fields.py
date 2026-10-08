@@ -118,14 +118,15 @@ def test_each_field_has_a_visible_label(client, field):
     assert f'for="{field}"' in html
 
 
-def test_the_card_still_collapses_when_the_provider_is_disabled(client):
-    """The fix must not make the fields permanently visible. OpenSubtitles is
-    off by default, and the card is meant to stay collapsed until enabled."""
+def test_disabled_credentials_have_a_visible_dimmed_state(client):
+    """Off providers retain their credential section, dimmed and non-interactive."""
     html = client.get("/configure").text
 
     match = re.search(r'id="opensubtitlesKey"\s+class="([^"]*)"', html)
     assert match is not None
-    # No bare `expanded` in the server-rendered markup; the script adds it when
-    # the toggle is switched on.
+    # Initial preferences still determine enabled state in the existing script.
     assert "expanded" not in match.group(1).split()
     assert "expanded-tall" in match.group(1).split()
+    assert ".provider-key.credentials-disabled" in html
+    assert "opacity: .45" in html
+    assert 'control.disabled = !toggle.checked' in html
