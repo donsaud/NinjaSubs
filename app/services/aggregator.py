@@ -14,9 +14,8 @@ from app.models import (
     badge_format_to_parts,
     normalize_badge_parts,
 )
+from app.providers import RETIRED_PROVIDERS
 from app.providers.base import BaseSubtitleProvider
-from app.providers.gestdown import GestdownProvider
-from app.providers.isubtitles import IsubtitlesProvider
 from app.providers.opensubtitles import OpenSubtitlesProvider
 from app.providers.subdl import SubdlProvider
 from app.providers.subsource import SubsourceProvider
@@ -152,10 +151,6 @@ def format_informative_badge(
         source_provider = "YIFY"
     elif prov == "subtitlecat":
         source_provider = "SubtitleCat"
-    elif prov == "gestdown":
-        source_provider = "Gestdown"
-    elif prov == "isubtitles":
-        source_provider = "iSubtitles"
     else:
         source_provider = "SubDL"
 
@@ -218,9 +213,6 @@ async def aggregate_subtitles(
     subdl_provider: BaseSubtitleProvider | None = None,
     subsource_provider: BaseSubtitleProvider | None = None,
     opensubtitles_provider: BaseSubtitleProvider | None = None,
-    gestdown_provider: BaseSubtitleProvider | None = None,
-    isubtitles_provider: BaseSubtitleProvider | None = None,
-    tvdb_id: int | str | None = None,
     use_cache: bool = True,
 ) -> list[SubtitleRelease]:
     """
@@ -298,9 +290,6 @@ async def aggregate_subtitles(
         enable_opensubtitles=bool(getattr(prefs, "enable_opensubtitles", False)),
         enable_yifysubtitles=bool(getattr(prefs, "enable_yifysubtitles", False)),
         enable_subtitlecat=bool(getattr(prefs, "enable_subtitlecat", False)),
-        enable_gestdown=prefs.enable_gestdown,
-        enable_isubtitles=prefs.enable_isubtitles,
-        tvdb_id=tvdb_id,
         enable_rtl_fix=bool(getattr(prefs, "enable_rtl_fix", True)),
         enable_ad_removal=bool(getattr(prefs, "enable_ad_removal", True)),
         keep_translator_credits=bool(getattr(prefs, "keep_translator_credits", True)),
@@ -322,6 +311,9 @@ async def aggregate_subtitles(
     if use_cache:
         cached_results = get_cached_subtitles(cache_key)
         if cached_results is not None:
+            original_count = len(cached_results)
+            cached_results = [r for r in cached_results if r.provider not in RETIRED_PROVIDERS]
+        if cached_results is not None and (cached_results or original_count == 0):
             logger.info(
                 f"[Aggregator] Cache HIT for {imdb_id} (key: {cache_key[:12]}). Returning {len(cached_results)} subtitles."
             )
@@ -400,20 +392,6 @@ async def aggregate_subtitles(
             )
         )
 
-    # Optional no-key providers. Retired config fields never enable replacements.
-    if prefs.enable_isubtitles:
-        provider = resolve_provider(isubtitles_provider, IsubtitlesProvider)
-        tasks.append(provider.search_subtitles(
-            imdb_id=imdb_id, is_series=is_series, season=parsed_season,
-            episode=parsed_episode, title=title, year=year, languages=effective_langs,
-            exclude_hi=effective_exclude_hi))
-    if prefs.enable_gestdown and is_series:
-        provider = resolve_provider(gestdown_provider, GestdownProvider)
-        tasks.append(provider.search_subtitles(
-            imdb_id=imdb_id, is_series=True, season=parsed_season,
-            episode=parsed_episode, title=title, year=year, tvdb_id=tvdb_id,
-            languages=effective_langs, exclude_hi=effective_exclude_hi))
-
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_releases: list[SubtitleRelease] = []
@@ -421,7 +399,7 @@ async def aggregate_subtitles(
         if isinstance(r, list):
             all_releases.extend(r)
         elif isinstance(r, Exception):
-            logger.error(f"[Aggregator] Upstream provider query failed: {r}")
+            logger.error("[Aggregator] Upstream provider query failed: %s", type(r).__name__)
 
     # Deduplicate results based on release_name and normalized language (prioritizing hash matches)
     all_releases.sort(key=lambda r: 0 if getattr(r, "is_hash_match", False) else 1)

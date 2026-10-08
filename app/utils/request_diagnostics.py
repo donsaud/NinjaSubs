@@ -165,10 +165,6 @@ def describe_configuration(token: str) -> dict:
         "enable_subdl",
         "enable_subsource",
         "enable_opensubtitles",
-        "enable_yifysubtitles",
-        "enable_subtitlecat",
-        "enable_gestdown",
-        "enable_isubtitles",
     ):
         if flag in data:
             summary[flag] = bool(data.get(flag))

@@ -971,35 +971,6 @@
                             </div>
                         </div>
 
-                        <!-- iSubtitles -->
-                        <div class="provider-row">
-                            <div class="provider-head">
-                                <div class="provider-id">
-                                    <img src="/static/isubtitles.svg" alt="iSubtitles">
-                                    <span class="provider-name">iSubtitles</span>
-                                    <span class="badge-tag bg-emerald-500/10 text-emerald-400 border-emerald-500/20">Free / No Key</span>
-                                </div>
-                                <label class="toggle">
-                                    <input type="checkbox" id="enableIsubtitles" class="peer sr-only">
-                                    <span class="toggle-track"></span>
-                                </label>
-                            </div>
-                        </div>
-
-                        <!-- Gestdown -->
-                        <div class="provider-row">
-                            <div class="provider-head">
-                                <div class="provider-id">
-                                    <img src="/static/gestdown.svg" alt="Gestdown">
-                                    <span class="provider-name">Gestdown</span>
-                                    <span class="badge-tag bg-purple-500/10 text-purple-400 border-purple-500/20">Free / No Key</span>
-                                </div>
-                                <label class="toggle">
-                                    <input type="checkbox" id="enableGestdown" class="peer sr-only">
-                                    <span class="toggle-track"></span>
-                                </label>
-                            </div>
-                        </div>
                     </div>
                 </section>
             </div>
@@ -1556,14 +1527,6 @@
                 );
                 badgeParts = allowed.length ? allowed : [...DEFAULT_BADGE_PARTS];
             }
-            const yifyToggle = document.getElementById("enableIsubtitles");
-            if (yifyToggle && typeof initialPrefs.enable_isubtitles === "boolean") {
-                yifyToggle.checked = initialPrefs.enable_isubtitles;
-            }
-            const catToggle = document.getElementById("enableGestdown");
-            if (catToggle && typeof initialPrefs.enable_gestdown === "boolean") {
-                catToggle.checked = initialPrefs.enable_gestdown;
-            }
             const rtlToggle = document.getElementById("enableRtlFix");
             if (rtlToggle && typeof initialPrefs.enable_rtl_fix === "boolean") {
                 rtlToggle.checked = initialPrefs.enable_rtl_fix;
@@ -1768,13 +1731,6 @@
                 configObj.badge_parts = parts;
             }
 
-            const yifyToggle = document.getElementById("enableIsubtitles");
-            const catToggle = document.getElementById("enableGestdown");
-            const yifyEnabled = yifyToggle ? yifyToggle.checked : false;
-            const catEnabled = catToggle ? catToggle.checked : false;
-            if (yifyEnabled) configObj.enable_isubtitles = true;
-            if (catEnabled) configObj.enable_gestdown = true;
-
             const rtlToggle = document.getElementById("enableRtlFix");
             // Auto UTF-8 is baked into the core engine (always active), so no gating.
             const rtlEnabled = rtlToggle ? rtlToggle.checked : true;
@@ -1845,7 +1801,8 @@
 
             const hasAnyPreference =
                 subdl || subsource || opensubtitles || excludeHi || !isDefaultBadge ||
-                !yifyEnabled || !catEnabled || !rtlEnabled || !adEnabled ||
+                langs.some((lang) => lang !== "ara") ||
+                !rtlEnabled || !adEnabled ||
                 !creditsEnabled || cleanFlagsNonDefault ||
                 easternNumeralsEnabled || stripDiacriticsEnabled ||
                 stripHiEnabled || !convertAssEnabled || !autoSyncEnabled ||
@@ -2202,8 +2159,6 @@
         });
 
         [
-            "enableIsubtitles",
-            "enableGestdown",
             "enableRtlFix",
             "enableAdRemoval",
             "keepTranslatorCredits",

@@ -50,9 +50,6 @@ def build_cache_key(
     eastern_arabic_numerals: bool = False,
     strip_diacritics: bool = False,
     convert_ass_to_srt: bool = True,
-    enable_gestdown: bool = False,
-    enable_isubtitles: bool = False,
-    tvdb_id: int | str | None = None,
     **kwargs,
 ) -> str:
     """
@@ -121,12 +118,6 @@ def build_cache_key(
         "1" if strip_diacritics else "0",
         "1" if convert_ass_to_srt else "0",
     ]
-    # Keep existing keys unchanged when the new providers are disabled.
-    # Enabled provider sets/TVDB identities must not reuse another set's results.
-    if enable_gestdown:
-        parts.extend(["gestdown", str(tvdb_id or "")])
-    if enable_isubtitles:
-        parts.append("isubtitles")
     raw_key = ":".join(parts)
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 

@@ -434,36 +434,6 @@ def test_uploader_preserved_through_ranking_and_badge():
     )
 
 
-@pytest.mark.asyncio
-async def test_keyless_scraper_providers_queried_when_injected():
-    """iSubtitles and Gestdown are queried when their providers are injected."""
-    p_subdl = AsyncMock()
-    p_subdl.search_subtitles = AsyncMock(return_value=[])
-    p_subsource = AsyncMock()
-    p_subsource.search_subtitles = AsyncMock(return_value=[])
-    p_isub = AsyncMock()
-    p_isub.search_subtitles = AsyncMock(return_value=[])
-    p_gest = AsyncMock()
-    p_gest.search_subtitles = AsyncMock(return_value=[])
-
-    await aggregate_subtitles(
-        imdb_id="tt0111161",
-        media_type="series",
-        season=1, episode=1,
-        title="Gladiator",
-        year=2000,
-        user_preferences=UserPreferences(enable_isubtitles=True, enable_gestdown=True),
-        subdl_provider=p_subdl,
-        subsource_provider=p_subsource,
-        isubtitles_provider=p_isub,
-        gestdown_provider=p_gest,
-        use_cache=False,
-    )
-
-    assert p_isub.search_subtitles.await_count == 1
-    assert p_gest.search_subtitles.await_count == 1
-
-
 def test_badge_parts_encode_parse_roundtrip():
     """badge_parts serializes only when non-default and parses back in canonical order."""
     encoded = encode_user_config("k1", "k2", badge_parts=["uploader", "score"])
@@ -662,46 +632,30 @@ def test_configure_page_shows_provider_icons(client):
         "subdl.png",
         "subsource.png",
         "opensubtitles.png",
-        "isubtitles.svg",
-        "gestdown.svg",
     ):
         assert f'/static/{icon}' in body
         assert client.get(f"/static/{icon}").status_code == 200
 
 
-def test_configure_page_shows_keyless_provider_toggles(client):
-    """iSubtitles and Gestdown appear with enable/disable toggles."""
-    body = client.get("/configure").text
-    assert "iSubtitles" in body
-    assert "Gestdown" in body
-    assert 'id="enableIsubtitles"' in body
-    assert 'id="enableGestdown"' in body
-    assert "Free / No Key" in body
-    assert "Machine Translated" not in body
-    assert "YIFYSubtitles" not in body
-    assert "SubtitleCat" not in body
-
-
 def test_configure_page_shows_unified_provider_rows(client):
-    """All five providers render consistent rows with badges and toggles."""
+    """Only the three active providers render rows with badges and toggles."""
     body = client.get("/configure").text
     assert "Subtitle Providers" in body
     for toggle in (
         "enableSubdl",
         "enableSubsource",
         "enableOpensubtitles",
-        "enableIsubtitles",
-        "enableGestdown",
     ):
         assert f'id="{toggle}"' in body
+    assert body.count('class="provider-row"') == 3
+    for retired in ("Gestdown", "iSubtitles", "YIFYSubtitles", "SubtitleCat", "Free / No Key"):
+        assert retired not in body
     assert body.count("Requires Key") == 3
     assert 'id="subdlKey"' in body
     assert 'id="subsourceKey"' in body
     assert 'id="opensubtitlesKey"' in body
     # Semantic badge colors
     assert "bg-amber-500/10 text-amber-400 border-amber-500/20" in body
-    assert "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" in body
-    assert "bg-purple-500/10 text-purple-400 border-purple-500/20" in body
 
 
 @pytest.mark.asyncio

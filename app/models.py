@@ -216,8 +216,9 @@ class UserPreferences(BaseModel):
     enable_subdl: bool = True
     enable_subsource: bool = True
     enable_opensubtitles: bool = False
+    # Retained for legacy token compatibility only; never schedule providers.
     enable_yifysubtitles: bool = False
-    enable_subtitlecat: bool = False  # Legacy configuration only.
+    enable_subtitlecat: bool = False
     enable_gestdown: bool = False
     enable_isubtitles: bool = False
     # Arabic RTL normalization pipeline (punctuation/brackets/quotes + RLM)

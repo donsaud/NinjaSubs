@@ -32,17 +32,12 @@ from app.extractor import (
 from app.models import Manifest, SubtitleItem, SubtitlesResponse, UserPreferences
 from app.playback_witness import build_witness_router, witness_enabled
 from app.providers import (
+    RETIRED_PROVIDERS,
     CinemetaClient,
-    GestdownProvider,
-    IsubtitlesProvider,
     OpenSubtitlesProvider,
     SubdlProvider,
     SubsourceProvider,
 )
-
-# Retain download compatibility for already cached legacy provider entries.
-from app.providers.subtitlecat import SubtitlecatProvider
-from app.providers.yifysubtitles import YifysubtitlesProvider
 from app.services.aggregator import (
     aggregate_subtitles,
     format_informative_badge,
@@ -313,9 +308,6 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
             "enable_subdl": prefs.enable_subdl,
             "enable_subsource": prefs.enable_subsource,
             "enable_opensubtitles": prefs.enable_opensubtitles,
-            "enable_yifysubtitles": prefs.enable_yifysubtitles,
-            "enable_gestdown": prefs.enable_gestdown,
-            "enable_isubtitles": prefs.enable_isubtitles,
             "enable_rtl_fix": prefs.enable_rtl_fix,
             "enable_ad_removal": prefs.enable_ad_removal,
             "keep_translator_credits": prefs.keep_translator_credits,
@@ -826,7 +818,6 @@ async def _fetch_subtitles_handler(
         user_preferences=prefs,
         title=title,
         year=year,
-        tvdb_id=(meta_info or {}).get("tvdb_id"),
         http_client=_http_client,
         subdl_provider=subdl,
         subsource_provider=subsource,
@@ -1034,18 +1025,12 @@ async def _fetch_subtitles_handler(
 
         rel_lang = normalize_to_iso639_2(getattr(rel, "lang", "ara") or "ara")
         rel_prov = (rel.provider or "").strip().lower()
+        if rel_prov in RETIRED_PROVIDERS:
+            continue
         if rel_prov == "subsource":
             source_tag = "SubSource"
         elif rel_prov == "opensubtitles":
             source_tag = "OpenSubtitles"
-        elif rel_prov == "yifysubtitles":
-            source_tag = "YIFY"
-        elif rel_prov == "subtitlecat":
-            source_tag = "SubtitleCat"
-        elif rel_prov == "gestdown":
-            source_tag = "Gestdown"
-        elif rel_prov == "isubtitles":
-            source_tag = "iSubtitles"
         else:
             source_tag = "SubDL"
 
@@ -2426,6 +2411,8 @@ async def _serve_subtitle_handler(
     cached_content = await cache_manager.get_subtitle(target_id)
     if cached_content:
         meta = cache_manager.get_metadata(target_id)
+        if meta and str(meta.get("provider", "")).lower() in RETIRED_PROVIDERS:
+            raise HTTPException(status_code=400, detail="Provider is no longer supported")
         # Verify season/episode match if present in context (guards against legacy cache collision)
         req_season = media_context.get("season")
         req_episode = media_context.get("episode")
@@ -2550,9 +2537,7 @@ async def _serve_subtitle_handler(
         raise HTTPException(status_code=404, detail="Missing download URL for subtitle")
 
     # 3. Instantiate appropriate provider and fetch archive
-    provider: (
-        SubdlProvider | SubsourceProvider | OpenSubtitlesProvider | YifysubtitlesProvider | SubtitlecatProvider | GestdownProvider | IsubtitlesProvider
-    )
+    provider: SubdlProvider | SubsourceProvider | OpenSubtitlesProvider
     if provider_name == "subdl":
         provider = SubdlProvider(_http_client)
         raw_archive = await provider.download_archive(download_url, api_key=subdl_key)
@@ -2567,18 +2552,6 @@ async def _serve_subtitle_handler(
                 username=opensubtitles_username,
                 password=opensubtitles_password,
             )
-    elif provider_name == "gestdown":
-        provider = GestdownProvider(_http_client)
-        raw_archive = await provider.download_archive(download_url)
-    elif provider_name == "isubtitles":
-        provider = IsubtitlesProvider(_http_client)
-        raw_archive = await provider.download_archive(download_url)
-    elif provider_name == "yifysubtitles":
-        provider = YifysubtitlesProvider(_http_client)
-        raw_archive = await provider.download_archive(download_url)
-    elif provider_name == "subtitlecat":
-        provider = SubtitlecatProvider(_http_client)
-        raw_archive = await provider.download_archive(download_url)
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider_name}")
 
