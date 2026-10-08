@@ -4,12 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from pathlib import Path
 from typing import Any
 
 from app.services.subtitle_matcher import parse_srt_cues
 from app.services.sync.ninja_points import render_srt
 from app.services.sync.pal_two_point import _is_usable_dialogue
+from app.services.sync.parser_fingerprint import semantic_sha
 
 VERSION = "boundary-cues-v1"
 
@@ -19,10 +19,7 @@ def sha(raw: bytes) -> str:
 
 
 def implementation_sha() -> str:
-    root = Path(__file__).resolve().parents[2]
-    paths = (root / "extractor.py", root / "services/subtitle_matcher.py",
-             root / "services/sync/pal_two_point.py", root / "services/sync/boundary_verifier.py")
-    return sha(b"".join(p.read_bytes().replace(b"\r\n", b"\n") for p in paths))
+    return semantic_sha()
 
 
 def project(text: str) -> dict[str, Any]:

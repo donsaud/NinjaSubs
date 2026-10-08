@@ -300,6 +300,7 @@ class CaseCapture:
     def _write_projection(self, folder: str, job: ProjectionJob) -> None:
         # Runs on the bounded disk writer, never on the request/shadow event loop.
         from app.extractor import decode_subtitle_bytes
+        from app.services.sync.parser_fingerprint import FINGERPRINT_SCHEMA
         from app.services.sync.parser_projection import canonical_bytes, implementation_sha, project
         original = (self.directory / "pristine_target.srt").read_bytes()
         if len(original) > MAX_BYTES or digest(original) != self.metadata["target_sha256"]:
@@ -308,7 +309,8 @@ class CaseCapture:
         if decoded != job.target:
             raise ValueError("shadow target differs from ingress decoder")
         texts = {"target": job.target, "reference": job.reference, "transformed": job.transformed}
-        manifest = {"version": 2, "parser_implementation_sha256": implementation_sha(),
+        manifest = {"version": 2, "parser_fingerprint_schema": FINGERPRINT_SCHEMA,
+                    "parser_implementation_sha256": implementation_sha(),
                     "original_target_sha256": digest(original),
                     "projections": {role: project(text) for role, text in texts.items()},
                     "input_sha256": {role: digest(text.encode()) for role, text in texts.items()}}

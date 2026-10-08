@@ -64,6 +64,7 @@ def test_v2_preserves_original_raw_and_projection(tmp_path):
     assert artifacts["attempt-01/raw_transformed.srt"] == output.replace("\n", "\r\n").encode()
     manifest = json.loads(artifacts["attempt-01/boundary_parser_projection.json"])
     assert "Dialogue" not in artifacts["attempt-01/boundary_parser_projection.json"].decode()
+    assert manifest["parser_fingerprint_schema"] == 2
     assert manifest["projections"]["target"] == project(target)
     assert project(target) == project(target)
     assert project(render_projection(project(target))) == project(target)

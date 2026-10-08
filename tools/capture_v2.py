@@ -17,6 +17,7 @@ if __package__ in {None, ""}:
 from app.extractor import decode_subtitle_bytes  # noqa: E402
 from app.services.sync.boundary_verifier import verify_boundary  # noqa: E402
 from app.services.sync.case_capture import safe_payload  # noqa: E402
+from app.services.sync.parser_fingerprint import matches_fingerprint  # noqa: E402
 from app.services.sync.parser_projection import (  # noqa: E402
     canonical_bytes,
     implementation_sha,
@@ -93,7 +94,9 @@ def check_capture(root: Path, attempt: str) -> tuple[dict[str, bytes], dict[str,
         raise ValueError("identity SHA mismatch")
     projection = json.loads(artifacts[f"{attempt}/boundary_parser_projection.json"])
     if (projection.get("version") != 2
-            or projection.get("parser_implementation_sha256") != implementation_sha()
+            or not matches_fingerprint(projection.get("parser_implementation_sha256"),
+                                       projection.get("parser_fingerprint_schema", 1),
+                                       implementation_sha())
             or projection.get("original_target_sha256") != metadata["target_sha256"]):
         raise ValueError("parser drift or original mismatch")
     language = metadata.get("parser_language")
