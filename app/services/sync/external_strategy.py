@@ -1034,7 +1034,7 @@ class ExternalExactStrategy:
                     self._search_provider(provider, query), self.timeout
                 )
             except Exception as exc:  # noqa: BLE001 - one provider must not sink the rest
-                logger.warning("[reference] %s search failed: %s", name, exc)
+                logger.warning("[reference] %s search failed: %s", name, type(exc).__name__)
                 return []
             logger.info("[reference] %s returned %d candidate(s)", name, len(releases or []))
             return [(rel, provider) for rel in (releases or [])]
@@ -1164,6 +1164,17 @@ class ExternalExactStrategy:
         except Exception:  # pragma: no cover
             return 6
 
+    def _download_allowed(self, candidate: Any, provider: Any, query: ReferenceQuery) -> bool:
+        """Apply the existing quota policy before allocating a bounded plan slot.
+
+        Non-hash OpenSubtitles candidates cannot be downloaded. They must not
+        crowd out downloadable references. Rechecked at download time; neither
+        ranking nor reference trust is changed.
+        """
+        return provider is not self._opensubtitles or reference_tier(
+            query.target_filename, candidate
+        ) == TIER_HASH
+
     async def plan_candidates(
         self, query: ReferenceQuery
     ) -> list[tuple[Any, Any]]:
@@ -1188,6 +1199,13 @@ class ExternalExactStrategy:
                 continue
             if self._is_rejected(stem, cand):
                 continue
+            if not self._download_allowed(cand, cand_provider, query):
+                logger.info(
+                    "[reference] planning skipped provider=%s tier=%d reason=non_hash_quota",
+                    self._provider_label(cand_provider),
+                    reference_tier(query.target_filename, cand),
+                )
+                continue
             plan.append((cand, cand_provider))
         return plan
 
@@ -1207,15 +1225,18 @@ class ExternalExactStrategy:
         Returns ``ResolvedReference(None)`` when this candidate is unusable, in
         which case the caller simply advances to the next planned candidate.
         """
+        logger.info(
+            "[reference] candidate reached provider=%s tier=%d",
+            self._provider_label(cand_provider),
+            reference_tier(query.target_filename, cand),
+        )
         if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
             return ResolvedReference(None)
         # Preserve the existing quota rule exactly: a non-hash OpenSubtitles
         # download spends the account's metered daily allowance, so it stays
         # reserved for MovieHash-exact references.
-        if (
-            cand_provider is self._opensubtitles
-            and reference_tier(query.target_filename, cand) != TIER_HASH
-        ):
+        if not self._download_allowed(cand, cand_provider, query):
+            logger.info("[reference] download skipped reason=non_hash_quota")
             return ResolvedReference(None)
 
         # Pace consecutive downloads so one request cannot burst a provider
@@ -1327,7 +1348,7 @@ class ExternalExactStrategy:
         try:
             raw = await provider.download_archive(best.download_url, api_key=api_key)
         except Exception as exc:
-            logger.warning("[reference] download failed: %s", exc)
+            logger.warning("[reference] download failed: %s", type(exc).__name__)
             return ResolvedReference(None)
         if not raw:
             logger.warning("[reference] empty download payload for %r", best_name)

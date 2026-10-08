@@ -161,7 +161,7 @@ class _LazyCandidate:
                 self._shared,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("[sync] lazy candidate download failed: %s -> next", exc)
+            logger.warning("[sync] lazy candidate download failed: %s -> next", type(exc).__name__)
             return ResolvedReference(None)
 
 
@@ -730,7 +730,7 @@ class SyncOrchestrator:
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.warning(
                         "[sync] %s multi-candidate expansion failed: %s -> single reference",
-                        _name, exc,
+                        _name, type(exc).__name__,
                     )
                     _cands = []
                 for _i, _c in enumerate(_cands):
@@ -1166,7 +1166,7 @@ class SyncOrchestrator:
                 else:
                     resolved = await strategy_obj.resolve_with_provenance(query)
             except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("[sync] %s strategy failed: %s -> next", strategy_name, exc)
+                logger.warning("[sync] %s strategy failed: %s -> next", strategy_name, type(exc).__name__)
                 resolved = ResolvedReference(None)
 
             if not resolved.text:
@@ -1416,20 +1416,6 @@ class SyncOrchestrator:
                     consistency.coverage * 100,
                     evaluation.sync_state.value,
                 )
-                # Show what the comparison actually looked at. "Already aligned"
-                # is a claim about specific dialogue, so the cues it was decided
-                # on belong in the log; a wrong claim is then visible at a glance
-                # instead of needing a reproduction.
-                for position_ms, target_text_sample, reference_text_sample in (
-                    consistency.samples
-                ):
-                    logger.info(
-                        "[sync] already-aligned sample @%02d:%02d target=%r reference=%r",
-                        position_ms // 60000,
-                        (position_ms % 60000) // 1000,
-                        target_text_sample,
-                        reference_text_sample,
-                    )
                 if self._sync_cache is not None:
                     await self._sync_cache.clear_failed(resolution_key)
                     await self._sync_cache.set(resolution_key, sub_bytes)
