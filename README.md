@@ -17,11 +17,11 @@
 
 ## English
 
-A lightweight, self-hosted [Stremio](https://stremio.com) subtitle addon built with **Python 3.11+**, **FastAPI**, and **Uvicorn**. It aggregates subtitles from **five providers**, unpacks archives safely in memory, and streams native subtitles with a dedicated **Arabic Language Engine** for BiDi, punctuation, diacritics and numeral normalization.
+A lightweight, self-hosted [Stremio](https://stremio.com) subtitle addon built with **Python 3.11+**, **FastAPI**, and **Uvicorn**. It aggregates subtitles from **three providers**, unpacks archives safely in memory, and streams native subtitles with a dedicated **Arabic Language Engine** for BiDi, punctuation, diacritics and numeral normalization.
 
 ### Highlights
 
-- **Multi-provider aggregation** — SubDL, SubSource, OpenSubtitles, YIFYSubtitles and SubtitleCat queried in parallel (`asyncio.gather`) with per-provider timeouts and resilient fallback.
+- **Multi-provider aggregation** — SubDL, SubSource and OpenSubtitles with per-provider timeouts, resilient fallback, and provider-specific credential handling.
 - **Arabic Subtitle Optimization** — context-aware RTL alignment, reversal repair, optional Tashkeel (diacritics) removal, Eastern-Arabic numerals and in-dialogue HI cleanup.
 - **Auto-Sync Subtitles** — Automatic subtitle synchronization with Alass, verification, and safe fallback handling.
 - **Stateless, per-user configuration** — every preference and API key is serialized into a URL-safe Base64 token embedded in the manifest URL; nothing is stored server-side.
@@ -30,13 +30,11 @@ A lightweight, self-hosted [Stremio](https://stremio.com) subtitle addon built w
 
 ### Subtitle Providers
 
-| Provider | Access | Default | Notes |
-| :--- | :--- | :---: | :--- |
-| **SubDL** | API key | ✅ on | Primary source, broad release coverage |
-| **SubSource** | API key | ✅ on | Strong community uploads |
-| **OpenSubtitles** | API key (account optional) | ⛔ off | Optional; an account raises the download quota |
-| **YIFYSubtitles** | Keyless | ⛔ off | Movies only (IMDb lookup) |
-| **SubtitleCat** | Keyless | ⛔ off | Machine-translated `.srt` files |
+| Provider | Access |
+| :--- | :--- |
+| **SubDL** | API key |
+| **SubSource** | API key |
+| **OpenSubtitles** | API key + optional account |
 
 ### Features & Preferences
 
@@ -117,32 +115,29 @@ Auto-Sync is an optional, best-effort timing correction system for subtitle trac
 
 Enable Auto-Sync by setting `ENABLE_SUBTITLE_SYNC=true` in `.env`, restarting the service, and then enabling **Auto-Sync Subtitles** in the addon configuration. Docker images include `alass`, `ffmpeg`, and `ffprobe`; for local Python installations, these executables must be available on `PATH` or configured through `.env`.
 
-When Auto-Sync is enabled, the addon attempts to synchronize a subtitle to the **target video release** rather than blindly applying a fixed time offset. Reference timing may come from compatible subtitle tracks associated with the target release, including an embedded track when the client provides a usable stream URL, or from a matching external release.
+When Auto-Sync is enabled, NinjaSubs tries to synchronize a subtitle to the **target video release** instead of blindly applying a fixed offset. Reference timing is selected conservatively from the strongest evidence available:
 
-The synchronization pipeline is intentionally conservative:
+* **Exact OpenSubtitles MovieHash reference** — used only when the request includes a usable `moviehash` and `moviebytesize`. If no video hash is available, this exact-match path is skipped; NinjaSubs never guesses a hash match.
+* **Compatible external release references** — SubDL, SubSource, and OpenSubtitles can provide release-matched candidates. Candidates are evaluated lazily, unsuitable or duplicate references are skipped, and later candidates remain available when an earlier one fails.
+* **Embedded subtitle timing** — may be used when the client provides a usable stream URL and a compatible embedded track is available.
 
-* The addon first uses the available video and release metadata to identify the target and select compatible reference material.
-* `alass` performs the actual timing alignment.
-* The resulting subtitle is evaluated before it can be considered synchronized.
-* Unreliable, rejected, incomplete, or otherwise unverified alignment results are **not served as successful sync results**; the original subtitle is used instead.
-* Verified synchronization results may be reused for the same target video through the sync cache, avoiding unnecessary re-alignment.
+The synchronization pipeline then applies multiple strategies and safety checks:
 
-If no usable reference is available, alignment cannot be completed, verification does not pass, or the request reaches the sync time budget, AutoSync safely falls back to the original subtitle. A synchronization attempt that times out may still complete in the background so that a verified result can become available for a later request.
+* **Timeline Affine** can correct stable offset/drift patterns when the timing model is internally consistent.
+* **ALASS** is used for harder alignment cases that need subtitle-to-subtitle timing analysis.
+* Candidate results are checked before serving, and rejected or incomplete attempts normally fall back to the original subtitle.
+* A dedicated **large-offset recovery path** has its own same-episode and anchor-consistency checks. It may serve an ALASS-corrected result when those checks pass even if the legacy verifier remains inconclusive; otherwise the original subtitle is preserved.
+* Accepted synchronization results can be reused for the same target video through the sync cache, avoiding unnecessary re-alignment.
 
-Auto-Sync changes **timing only**. It does not translate subtitles or rewrite their dialogue content. When **Convert ASS/SSA subtitles to SRT** is disabled, native ASS/SSA subtitles are preserved instead of being aligned through the SRT-based synchronization path.
+If no usable reference is available, alignment cannot be completed, safety checks reject the result, or the request reaches the sync time budget, Auto-Sync falls back to the original subtitle. A timed-out attempt may still finish in the background so that a usable cached result can become available for a later request.
+
+Auto-Sync changes **timing only**. It does not translate subtitles or rewrite dialogue content. When **Convert ASS/SSA subtitles to SRT** is disabled, native ASS/SSA subtitles are preserved instead of being aligned through the SRT-based synchronization path.
 
 #### Known limitation
 
-Subtitles that are segmented differently from the reference — for example a
-release that splits or merges the same dialogue into a different number of cues —
-are currently treated as less reliable than they are. The conservative checks
-measure agreement with the reference's own cue boundaries, so a subtitle that is
-well synchronized but segmented differently may fail verification and fall back to
-the original. This affects the fallback, not correctness: the original subtitle is
-always safe to serve.
+Subtitles whose cue population or segmentation differs substantially from the reference can still be harder to verify even when their overall timing is close. The boundary-aware verifier is currently evaluated in **shadow mode only** and does not control production serving decisions, so conservative fallback to the original subtitle can still occur in these cases.
 
-See [the autosync audit](docs/internal-reports/AUTOSYNC_AUDIT.md) for fixes,
-verification, and remaining limitations.
+See [the autosync audit](docs/internal-reports/AUTOSYNC_AUDIT.md) for implementation details, verification work, and remaining limitations.
 
 ### Subtitle Badge Customizer
 
@@ -256,11 +251,11 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 
 ## العربية
 
-إضافة ترجمة خفيفة وذاتية الاستضافة لـ [Stremio](https://stremio.com)، مبنية بـ **Python 3.11+** و**FastAPI** و**Uvicorn**. تجمع الترجمة من **خمسة مصادر**، وتفكّ ضغط الملفات داخل الذاكرة بأمان، وتبثّ الترجمة مع **محرّك خاص باللغة العربية** لمعالجة الاتجاه (BiDi) وعلامات الترقيم والتشكيل والأرقام.
+إضافة ترجمة خفيفة وذاتية الاستضافة لـ [Stremio](https://stremio.com)، مبنية بـ **Python 3.11+** و**FastAPI** و**Uvicorn**. تجمع الترجمة من **ثلاثة مصادر**، وتفكّ ضغط الملفات داخل الذاكرة بأمان، وتبثّ الترجمة مع **محرّك خاص باللغة العربية** لمعالجة الاتجاه (BiDi) وعلامات الترقيم والتشكيل والأرقام.
 
 ### أبرز المزايا
 
-- **تجميع من عدة مصادر** — SubDL وSubSource وOpenSubtitles وYIFYSubtitles وSubtitleCat بالتوازي (`asyncio.gather`) مع مهلة لكل مصدر واحتياطي عند الفشل.
+- **تجميع من عدة مصادر** — SubDL وSubSource وOpenSubtitles مع مهلة لكل مصدر، وآلية احتياطية عند الفشل، ومعالجة مستقلة لبيانات اعتماد كل مزود.
 - **المزامنة التلقائية للترجمات** — مزامنة تلقائية للترجمات باستخدام Alass، مع التحقق من صحتها، ومعالجة آمنة للرجوع إلى الترجمة الأصلية (Fallback).
 - **تحسين نصوص الترجمة العربية** — ضبط اتجاه النص من اليمين لليسار، وإصلاح النص المعكوس، وإزالة التشكيل (اختياري)، وتحويل الأرقام إلى الأرقام العربية المشرقية، وتنظيف وسوم الصوت الوصفية.
 - **إعدادات لكل مستخدم بدون حفظ** — تُرمّز كل الإعدادات ومفاتيح الـ API داخل رابط الـ manifest (Base64) ولا يُخزَّن شيء على الخادم.
@@ -269,13 +264,11 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 
 ### مصادر الترجمة
 
-| المصدر | الوصول | الافتراضي | ملاحظات |
-| :--- | :--- | :---: | :--- |
-| **SubDL** | مفتاح API | ✅ مُفعّل | المصدر الأساسي وواسع التغطية |
-| **SubSource** | مفتاح API | ✅ مُفعّل | ترجمات مجتمعية قوية |
-| **OpenSubtitles** | مفتاح API | ⛔ معطّل | اختياري مع مراعاة الحصة |
-| **YIFYSubtitles** | بدون مفتاح | ⛔ معطّل | للأفلام فقط |
-| **SubtitleCat** | بدون مفتاح | ⛔ معطّل | ملفات مترجمة آليًا |
+| المصدر | الوصول |
+| :--- | :--- |
+| **SubDL** | مفتاح API |
+| **SubSource** | مفتاح API |
+| **OpenSubtitles** | مفتاح API + حساب اختياري |
 
 ### المزايا والتفضيلات
 
@@ -334,30 +327,33 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 
 #### المزامنة التلقائية للترجمات
 
-تُعد خاصية المزامنة التلقائية (Auto-Sync) نظامًا اختياريًا لتصحيح تواقيت مسارات الترجمة بأفضل جهد ممكن (Best-effort).
+تُعد خاصية المزامنة التلقائية (Auto-Sync) نظامًا اختياريًا لتصحيح توقيت مسارات الترجمة بأفضل جهد ممكن (Best-effort).
 
-لتفعيل المزامنة التلقائية، اضبط ENABLE_SUBTITLE_SYNC=true في ملف .env، ثم أعد تشغيل الخدمة، وفعّل خيار Auto-Sync Subtitles من واجهة إعدادات الإضافة. تأتي صور Docker محملة مسبقاً بأدوات alass وffmpeg وffprobe؛ أما عند التثبيت المحلي عبر Python، فيجب أن تكون هذه الحزم متوفرة في مسار النظام PATH أو مُعرّفة بدقة عبر ملف .env.
+لتفعيل المزامنة التلقائية، اضبط `ENABLE_SUBTITLE_SYNC=true` في ملف `.env`، ثم أعد تشغيل الخدمة وفعّل خيار **Auto-Sync Subtitles** من واجهة إعدادات الإضافة. تتضمن صور Docker أدوات `alass` و`ffmpeg` و`ffprobe`؛ أما عند التثبيت المحلي عبر Python فيجب أن تكون هذه الأدوات متاحة في `PATH` أو معرّفة عبر `.env`.
 
-عند تفعيل الخاصية، تحاول الإضافة مزامنة الترجمة لتطابق إصدار الفيديو المستهدف (Target video release) بدلاً من تطبيق إزاحة زمنية ثابتة بشكل عشوائي. يُستمد التوقيت المرجعي إما من مسارات ترجمة متوافقة تابعة للنسخة المستهدفة (بما في ذلك المسارات المدمجة داخل الفيديو عندما يوفّر المشغّل رابط بث صالح)، أو من إصدار خارجي مطابق.
+عند تفعيل الخاصية، يحاول NinjaSubs مزامنة الترجمة مع **إصدار الفيديو المستهدف** بدل تطبيق إزاحة زمنية ثابتة بشكل عشوائي. ويختار التوقيت المرجعي بصورة محافظة من أقوى الأدلة المتاحة:
 
-صُمم مسار المزامنة البرمجي ليكون محافظاً وصارماً في قراراته:
+* **مرجع OpenSubtitles المطابق عبر MovieHash** — لا يُستخدم إلا عند توفر `moviehash` و`moviebytesize` صالحين في الطلب. وإذا لم يتوفر Hash للفيديو، يُتخطى مسار المطابقة الدقيقة بالكامل ولا يتم افتراض تطابق Hash.
+* **مراجع خارجية متوافقة مع الإصدار** — يمكن لـ SubDL وSubSource وOpenSubtitles تقديم مرشحين مرتبطين بنسخة الفيديو. تُفحص المرشحات تدريجيًا عند الحاجة، وتُتخطى المراجع غير المناسبة أو المكررة، مع الاستمرار إلى المرشح التالي إذا فشل السابق.
+* **توقيت ترجمة مدمجة داخل الفيديو** — يمكن استخدامه عندما يوفّر العميل رابط بث صالحًا وتتوفر ترجمة مدمجة متوافقة.
 
-تبدأ الإضافة بقراءة بيانات الفيديو والنسخة المتاحة لتحديد الهدف بدقة وانتقاء المرجع الزمني المتوافق.
+بعد اختيار المرجع، يستخدم مسار المزامنة عدة استراتيجيات وطبقات أمان:
 
-تتولى أداة alass مهمة المحاذاة الزمنية الفعلية.
+* يمكن لـ **Timeline Affine** تصحيح الإزاحة والانجراف الزمني المنتظم عندما يكون النموذج الزمني متسقًا.
+* تُستخدم **ALASS** للحالات الأصعب التي تحتاج إلى محاذاة فعلية بين ملفي ترجمة.
+* تُفحص النتائج قبل تقديمها، وعادةً ما تؤدي المحاولات المرفوضة أو غير المكتملة إلى الرجوع للترجمة الأصلية.
+* يوجد مسار مخصص لمعالجة **الإزاحات الزمنية الكبيرة** يعتمد على فحوص مستقلة لاتساق الحلقة ونقاط الارتكاز. ويمكنه تقديم نتيجة مصححة بواسطة ALASS عندما تنجح هذه الفحوص حتى لو بقي المدقق القديم غير حاسم؛ وإلا تُحفظ الترجمة الأصلية.
+* يمكن إعادة استخدام نتائج المزامنة المقبولة لنفس الفيديو عبر ذاكرة التخزين المؤقت للمزامنة (Sync cache)، لتجنب إعادة المعالجة دون حاجة.
 
-يخضع ملف الترجمة الناتج لعملية فحص وتقييم شاملة قبل اعتماده كملف متزامن.
+إذا لم يتوفر مرجع صالح، أو تعذر إتمام المحاذاة، أو رفضت فحوص الأمان النتيجة، أو انتهت المهلة الزمنية للطلب (Sync time budget)، تعود الخاصية إلى الترجمة الأصلية. وقد تستمر محاولة انتهت مهلتها في الخلفية حتى تصبح نتيجة قابلة للاستخدام متاحة في الذاكرة المؤقتة لطلب لاحق.
 
-النتائج غير الموثوقة، أو المرفوضة، أو غير المكتملة، أو التي تفشل في اجتياز بوابات الفحص لا تُقدَّم إطلاقًا كترجمات متزامنة ناجحة؛ بل يتم تقديم ملف الترجمة الأصلي فورًا كخيار آمن.
+تغيّر Auto-Sync **التوقيت فقط**؛ فهي لا تترجم النص ولا تعيد صياغة الحوار. وعند تعطيل خيار **Convert ASS/SSA subtitles to SRT** يتم الاحتفاظ بملفات ASS/SSA الأصلية بدل إدخالها في مسار المزامنة المعتمد على SRT.
 
-يمكن إعادة استخدام نتائج المزامنة المعتمدة لنفس الفيديو المستهدف لاحقاً عبر ذاكرة التخزين المؤقت للمزامنة (Sync cache)، مما يمنع تكرار عمليات المعالجة غير الضرورية.
+##### قيد معروف
 
-في حال عدم توفر مرجع صالح، أو تعذر إتمام المحاذاة، أو فشل الترجمة في اجتياز الفحص، أو استهلاك المهلة الزمنية المحددة للطلب (Sync time budget)، تعود الإضافة بأمان إلى تقديم الترجمة الأصلية دون تعديل. كما أن محاولات المزامنة التي تنتهي مهلتها قد تستمر في الخلفية لتكتمل وتصبح نتيجتها المعتمدة جاهزة للطلبات المستقبلية.
+قد تكون الترجمات التي تختلف كثيرًا عن المرجع في عدد المقاطع أو طريقة تقسيم الحوار أصعب في التحقق حتى عندما يكون توقيتها العام قريبًا. يعمل المدقق المدرك للحدود (Boundary-aware verifier) حاليًا في **وضع الظل (Shadow Mode) فقط** ولا يتحكم في قرارات التقديم الفعلية، لذلك قد يستمر الرجوع المحافظ إلى الترجمة الأصلية في هذه الحالات.
 
-تقتصر مهمة Auto-Sync على تعديل التوقيت الزمني فقط؛ فهي لا تترجم النصوص ولا تُعيد صياغة محتوى الحوارات. وعند تعطيل خيار تحويل ترجمات ASS/SSA إلى SRT، يتم الاحتفاظ بملفات ASS/SSA الأصلية كما هي دون إدخالها في مسار المزامنة المعتمد على صيغة SRT.
-
-للاطلاع على الإصلاحات الهندسية، واختبارات التحقق، والقيود الحالية، راجع تقرير تدقيق المزامنة التلقائية.
-
+للاطلاع على تفاصيل التنفيذ، وأعمال التحقق، والقيود المتبقية، راجع [تقرير تدقيق المزامنة التلقائية](docs/internal-reports/AUTOSYNC_AUDIT.md).
 
 #### تنسيق النص والتوقيت
 
