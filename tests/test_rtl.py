@@ -294,11 +294,11 @@ def test_balanced_quotes_are_preserved():
 # ============================================================================
 
 
-def test_quoted_arabic_leading_period_moves_after_closing_quote():
+def test_quoted_arabic_leading_period_stays_inside_closing_quote():
     """Reported case: ``".نطلق عليه صندوق السماء"`` used to flip the dot to the front."""
     assert (
         fix_rtl_punctuation('".نطلق عليه صندوق السماء"')
-        == f'"نطلق عليه صندوق السماء".{RLM}'
+        == f'"نطلق عليه صندوق السماء."{RLM}'
     )
 
 
@@ -310,7 +310,7 @@ def test_quoted_arabic_trailing_period_inside_quote_is_preserved():
 
 
 def test_quoted_arabic_guillemets_leading_period():
-    assert fix_rtl_punctuation("«.نطلق عليه صندوق السماء»") == f"«نطلق عليه صندوق السماء».{RLM}"
+    assert fix_rtl_punctuation("«.نطلق عليه صندوق السماء»") == f"«نطلق عليه صندوق السماء.»{RLM}"
 
 
 def test_quoted_arabic_without_edge_punctuation_is_untouched():

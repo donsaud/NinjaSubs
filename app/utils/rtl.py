@@ -83,8 +83,12 @@ _QUOTE_WRAPPERS: tuple[tuple[str, str], ...] = (
     ("«", "»"),
     ("“", "”"),
 )
-# Misplaced edge punctuation inside a quoted phrase.
-_EDGE_DOTS_LEADING_REGEX = re.compile(r"^[.…]+")
+# Inner-wrapper repair is deliberately narrower than the historical outer-prefix rule.
+_INNER_TERMINAL_PUNCTUATION = frozenset(".!?؟")
+_INNER_WRAPPERS = _QUOTE_WRAPPERS + (("(", ")"), ("[", "]"))
+_SIMPLE_EMPHASIS_REGEX = re.compile(
+    r"(?P<opening><(?P<tag>[ib])>)(?P<body>[^<>]*)(?P<closing></(?P=tag)>)"
+)
 
 # ASS/SSA inline override tags: {\i1}, {\pos(1,2)}, etc.
 _LEADING_TAGS_REGEX = re.compile(r"^(?:\{[^}]*\})+")
@@ -465,51 +469,68 @@ def _relocate_leading_quote(core: str) -> str:
     return rest
 
 
-def _detect_quote_wrapper(text: str) -> tuple[str, str] | None:
-    """Return the (opener, closer) pair when ``text`` is fully wrapped in quotes."""
-    for opener, closer in _QUOTE_WRAPPERS:
-        if (
-            len(text) > len(opener) + len(closer)
-            and text.startswith(opener)
-            and text.endswith(closer)
-        ):
-            return opener, closer
-    return None
+def _relocate_inner_terminal(text: str) -> str:
+    """Move one terminal prefix in plain Arabic; never recurse into wrappers."""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in _INNER_TERMINAL_PUNCTUATION:
+        return text
+    body = stripped[1:]
+    # Nested wrappers, markup, numbers and controls are ambiguous here. The
+    # existing Arabic-only/first-last-letter guard also rejects mixed scripts,
+    # already-terminated dialogue and leading ellipses/multiple punctuation.
+    if (
+        any(char in _BRACKET_CHARS | _QUOTE_CHARS or char in "<>\\" for char in body)
+        or any(unicodedata.category(char)[0] in {"N", "C"} for char in body)
+        or not _legacy_punctuation_body(body)
+    ):
+        return text
+    leading_ws = text[: len(text) - len(text.lstrip())]
+    trailing_ws = text[len(text.rstrip()) :]
+    return f"{leading_ws}{body}{stripped[0]}{trailing_ws}"
 
 
-def _normalize_quoted_edges(core: str) -> str:
-    """
-    Fix misplaced edge punctuation inside a fully quoted Arabic phrase.
+def _repair_wrapped_body(inner: str) -> str:
+    """Repair plain content or one attribute-free i/b emphasis layer only."""
+    if "<" not in inner and ">" not in inner:
+        return _relocate_inner_terminal(inner)
+    stripped = inner.strip()
+    prefix = stripped[:1] if stripped[:1] in _INNER_TERMINAL_PUNCTUATION else ""
+    emphasis = _SIMPLE_EMPHASIS_REGEX.fullmatch(stripped[len(prefix):])
+    if emphasis is None:
+        return inner
+    content = prefix + emphasis.group("body")
+    repaired = _relocate_inner_terminal(content)
+    if repaired == content:
+        return inner
+    leading_ws = inner[: len(inner) - len(inner.lstrip())]
+    trailing_ws = inner[len(inner.rstrip()) :]
+    return (
+        f"{leading_ws}{emphasis.group('opening')}{repaired}"
+        f"{emphasis.group('closing')}{trailing_ws}"
+    )
 
-    Legacy files render ``".نطلق عليه صندوق السماء"`` where the sentence-final
-    period visually flips to the front of the line. The period is moved across
-    the closing quote (``"نطلق عليه صندوق السماء".``); the trailing RLM is then
-    appended by :func:`_append_trailing_rlm` so the dot stays locked on the left.
-    Correctly placed punctuation inside the closing quote is preserved.
+
+def _normalize_wrapped_punctuation(core: str) -> str | None:
+    """Handle one outer wrapper; return None when there is no supported wrapper.
+
+    Recognized but ambiguous content is returned unchanged so legacy quote and
+    bracket heuristics cannot reinterpret it. Curly braces, arbitrary nesting,
+    attributes and non-emphasis tags are deliberately outside this repair rule.
     """
     leading_ws = core[: len(core) - len(core.lstrip())]
     trailing_ws = core[len(core.rstrip()) :]
     stripped = core.strip()
-
-    wrapper = _detect_quote_wrapper(stripped)
-    if wrapper is None:
-        return core
-
-    opener, closer = wrapper
-    inner = stripped[len(opener) : len(stripped) - len(closer)]
-    body = inner.strip()
-    if not body:
-        return core
-
-    match = _EDGE_DOTS_LEADING_REGEX.match(body)
-    if match is None:
-        return core
-    punctuation = match.group(0)
-    body = body[match.end():].strip()
-    if not _legacy_punctuation_body(body):
-        return core
-
-    return f"{leading_ws}{opener}{body}{closer}{punctuation}{trailing_ws}"
+    marker = RLM if stripped.endswith(RLM) else ""
+    if marker:
+        stripped = stripped[:-1]
+    for opener, closer in _INNER_WRAPPERS:
+        if len(stripped) >= 2 and stripped.startswith(opener) and stripped.endswith(closer):
+            inner = stripped[len(opener):len(stripped) - len(closer)]
+            repaired = _repair_wrapped_body(inner)
+            return f"{leading_ws}{opener}{repaired}{closer}{marker}{trailing_ws}"
+    if _SIMPLE_EMPHASIS_REGEX.fullmatch(stripped):
+        return f"{leading_ws}{_repair_wrapped_body(stripped)}{marker}{trailing_ws}"
+    return None
 
 
 _DIALOGUE_DASH_CHARS = "-\u2013\u2014"
@@ -639,10 +660,11 @@ def _normalize_core(core: str) -> str:
     if not contains_rtl(core):
         return core
 
+    wrapped = _normalize_wrapped_punctuation(core)
+    if wrapped is not None:
+        return _append_trailing_rlm(wrapped)
+
     core = _normalize_brackets(core)
-    # Fix quoted edge punctuation before the legacy leading-quote relocation, which
-    # would otherwise misread the trailing quote of ``"نص."`` as an opening quote.
-    core = _normalize_quoted_edges(core)
     core = _relocate_leading_quote(core)
 
     run = _leading_movable_run(core)
