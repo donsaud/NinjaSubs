@@ -323,7 +323,13 @@ async def test_the_expansion_uses_the_multi_path_and_never_the_single_path(monke
     multi = _Multi()
     # A sync_service stub keeps the candidate loop reachable; the point of this
     # test is WHICH candidates the strategy offers, not the alass outcome.
-    o = SyncOrchestrator(sync_cache=_Cache(), external_strategy=multi, sync_service=object())
+    from types import SimpleNamespace
+
+    async def no_alignment(*args, **kwargs):
+        return None
+
+    o = SyncOrchestrator(sync_cache=_Cache(), external_strategy=multi,
+                         sync_service=SimpleNamespace(sync_async=no_alignment))
 
     await o.evaluate_and_sync(
         _srt(TARGET_CUES, tag="T").encode(),

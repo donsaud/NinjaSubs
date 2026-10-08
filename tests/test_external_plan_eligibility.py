@@ -43,10 +43,10 @@ class Strategy(ExternalExactStrategy):
         self.cache = SimpleNamespace(get=lambda query: None)
         self.releases = []
         for i in range(6):
-            self.add(self.os, f"Show.S01E01.1080p.BluRay.x264-A{i}", "eng", "unused")
+            self.add(self.os, f"Show.S01E01.Criterion.Collection.1080p.BluRay.x264-A{i}", "eng", "unused")
         for i, payload in enumerate(references):
             self.add(self.sd if i % 2 == 0 else self.ss,
-                     f"Show.S01E01.1080p.BluRay.x264-B{i}", "ara", payload)
+                     f"Show.S01E01.Criterion.Collection.1080p.BluRay.x264-B{i}", "ara", payload)
 
     def add(self, provider, name, lang, payload, **kwargs):
         url = f"/{provider.name}/{len(self.releases)}"
@@ -63,7 +63,7 @@ class Strategy(ExternalExactStrategy):
 
 META: dict[str, Any] = {
     "imdb_id": "tt1234567", "media_type": "series", "season": 1, "episode": 1,
-    "target_filename": "Show.S01E01.1080p.BluRay.x264-TARGET.mkv", "lang": "ara",
+    "target_filename": "Show.S01E01.Criterion.Collection.1080p.BluRay.x264-TARGET.mkv", "lang": "ara",
 }
 QUERY = ReferenceQuery(
     imdb_id=META["imdb_id"], media_type="series", season=1, episode=1,
@@ -188,7 +188,7 @@ async def test_exact_hash_reference_still_precedes_external_plan(monkeypatch):
         return ResolvedReference(_srt(600, "HASH", 3000), kind="hash")
 
     orchestrator._hash_reference_strategy = SimpleNamespace(resolve_with_provenance=hashed)
-    assert await orchestrator._execute(TARGET, dict(META), "target", True) != TARGET
+    assert await orchestrator._execute(TARGET, {**META, "video_hash": "1234567890abcdef"}, "target", True) != TARGET
     assert [r.kind for r in attempts] == ["hash"]
     assert strategy.sd.downloads == strategy.os.downloads == []
 

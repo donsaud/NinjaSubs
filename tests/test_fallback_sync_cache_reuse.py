@@ -92,6 +92,7 @@ async def _seed_verified(state: SyncState, *, language: str = LANG, engine: int 
     verdict = {
         "sync_state": state.value,
         "verification": "verified",
+            "target_binding": "strong",
         "language": language,
         "sync_confidence": 0.9,
         "reasons": ["seeded for test"],
@@ -205,6 +206,7 @@ async def test_d_different_target_video_is_a_miss():
         {
             "sync_state": SyncState.VERIFIED_SYNCED.value,
             "verification": "verified",
+            "target_binding": "strong",
             "language": LANG,
         },
         alias_key=SyncCache.build_verdict_alias_key(other_fp, _ref()),
@@ -229,6 +231,7 @@ async def test_e_different_subtitle_is_a_miss():
         {
             "sync_state": SyncState.VERIFIED_SYNCED.value,
             "verification": "verified",
+            "target_binding": "strong",
             "language": LANG,
         },
         alias_key=SyncCache.build_verdict_alias_key(fingerprint, "0000000000000000"),
@@ -274,6 +277,7 @@ async def test_g_stale_engine_version_is_a_miss():
         {
             "sync_state": SyncState.VERIFIED_SYNCED.value,
             "verification": "verified",
+            "target_binding": "strong",
             "language": LANG,
             "engine_version": stale,
         }
@@ -306,6 +310,7 @@ async def test_h_cached_non_positive_is_not_served(state):
         {
             "sync_state": state.value,
             "verification": "verified",
+            "target_binding": "strong",
             "language": LANG,
         },
         alias_key=SyncCache.build_verdict_alias_key(fingerprint, _ref()),
@@ -392,6 +397,7 @@ async def test_verified_verdict_without_artifact_still_downloads():
         {
             "sync_state": SyncState.VERIFIED_SYNCED.value,
             "verification": "verified",
+            "target_binding": "strong",
             "language": LANG,
         },
         alias_key=SyncCache.build_verdict_alias_key(fingerprint, _ref()),

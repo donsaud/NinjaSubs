@@ -178,6 +178,7 @@ class TestUnverifiedPayloadIsNotServed:
         out = await orch.evaluate_and_sync(_arabic_bytes(), _meta(), "t", True)
 
         # Simulate a pre-fix cache: payload present, meta absent.
+        cache._local_verdict.clear()
         for key in list(cache._local.keys()):
             cache._local_meta.pop(f"{key}:meta", None)
 
@@ -219,6 +220,7 @@ class TestResyncVerdictReuse:
         v = {
             "sync_state": state,
             "verification": "verified",
+            "target_binding": "strong",
             "alass_applied": state == "verified_resynced",
             "alass_successful": state == "verified_resynced",
             "engine_version": 1,
@@ -343,7 +345,8 @@ class TestIsolation:
             sync_cache=orch._sync_cache,
         )
         _stub_analyzer(orch2)
-        await orch2.evaluate_and_sync(_arabic_bytes(), _meta(), "ara-release-b", True)
+        other_video = {**_meta(), "target_filename": "Film.2020.720p.BluRay.x264-OTHER"}
+        await orch2.evaluate_and_sync(_arabic_bytes(), other_video, "ara-release-b", True)
 
         assert orch2._external_strategy.calls == 1, "result was reused across target identities"
 

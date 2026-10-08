@@ -107,7 +107,7 @@ async def test_reuse_lookup_finds_a_verdict_written_by_the_orchestrator():
         SyncCache.build_verdict_key(serve_fp, "h", LANG),
         {
             "sync_state": SyncState.VERIFIED_SYNCED.value,
-            "verification": "verified",
+            "verification": "verified", "target_binding": "strong",
             "language": LANG,
         },
         alias_key=SyncCache.build_verdict_alias_key(serve_fp, ref),

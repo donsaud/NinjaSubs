@@ -138,7 +138,7 @@ def test_d_no_credentials_preserves_behaviour(clean_env):
     # being refused or lumped into a fabricated namespace.
     orch = SyncOrchestrator(sync_cache=None)
     key = orch._flight_key({**META, **{k: "" for k in FAKE}}, SUB_ID, SUB_BYTES)
-    assert key.startswith(f"final_sub:{IMDB}:s8e5:")
+    assert key.startswith(f"final_sub:v7-target-binding-v1:{IMDB}:s8e5:")
 
 
 def test_d_credential_source_never_returns_a_secret(clean_env):

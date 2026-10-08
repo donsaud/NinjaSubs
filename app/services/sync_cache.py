@@ -34,7 +34,8 @@ _DEFAULT_TTL = 86_400  # 24 hours
 _NEGATIVE_TTL = 300  # 5 minutes
 # Bump when the verification/ordering logic changes so stale verdicts written by
 # an older engine are never reused. Mirrors ReferenceDiskCache's engine_version.
-SYNC_VERDICT_ENGINE_VERSION = 3
+SYNC_VERDICT_ENGINE_VERSION = 4
+SYNC_PAYLOAD_VERSION = "v7-target-binding-v1"
 # Verdict TTL. Shorter than the payload TTL: a positive synchronization claim
 # should be re-derived reasonably often rather than trusted for a full day.
 _VERDICT_TTL = 7 * 86_400  # 7 days
@@ -74,7 +75,7 @@ class SyncCache:
         exact media, edition verdict, and payload, so one edition's sync can
         never serve another.
         """
-        key = f"final_sub:{imdb_id}:{season_ep}:{fingerprint}:{arabic_sub_id}"
+        key = f"final_sub:{SYNC_PAYLOAD_VERSION}:{imdb_id}:{season_ep}:{fingerprint}:{arabic_sub_id}"
         if decision:
             key = f"{key}:{decision}"
         if content_hash:
@@ -210,7 +211,7 @@ class SyncCache:
         sid = (sub_id or "").strip()
         if not imdb or not sid:
             return None
-        prefix = f"final_sub:{imdb}:"
+        prefix = f"final_sub:{SYNC_PAYLOAD_VERSION}:{imdb}:"
         needle = f":{sid}:"
         for key in list(self._local.keys()):
             if key.startswith(prefix) and needle in key:
@@ -261,7 +262,7 @@ class SyncCache:
         fp = (fingerprint or "").strip()
         if not imdb or not sid or not fp:
             return None
-        prefix = f"final_sub:{imdb}:{season_ep}:{fp}:{sid}"
+        prefix = f"final_sub:{SYNC_PAYLOAD_VERSION}:{imdb}:{season_ep}:{fp}:{sid}"
         head = f"{prefix}:"
         for key in list(self._local.keys()):
             if key == prefix or key.startswith(head):
@@ -363,6 +364,9 @@ class SyncCache:
             return None
         if int(data.get("engine_version") or 0) != SYNC_VERDICT_ENGINE_VERSION:
             return None
+        if (str(data.get("sync_state", "")).startswith("verified")
+                and data.get("target_binding") not in {"exact", "strong"}):
+            return None
         data["verification"] = "cached"
         return data
 
@@ -407,6 +411,8 @@ class SyncCache:
             logger.debug("[sync-cache] refusing to cache a verdict with no measurement")
             return
         if state in (SyncState.VERIFIED_SYNCED.value, SyncState.VERIFIED_RESYNCED.value):
+            if verdict.get("target_binding") not in {"exact", "strong"}:
+                return
             if measured not in (
                 VerificationAvailability.VERIFIED.value,
                 VerificationAvailability.CACHED.value,

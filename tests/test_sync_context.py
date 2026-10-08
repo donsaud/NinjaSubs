@@ -64,16 +64,16 @@ def test_sync_cache_key_is_bound_to_exact_payload():
     meta = {"imdb_id": "tt1", "season": 1, "episode": 1}
     key_a = _sync_cache_key(meta, "sub1", content_hash="hash-of-file-a", decision="team")
     key_b = _sync_cache_key(meta, "sub1", content_hash="hash-of-file-b", decision="team")
-    assert key_a.startswith("final_sub:tt1:s1e1:")
+    assert key_a.startswith("final_sub:v7-target-binding-v1:tt1:s1e1:")
     assert ":sub1:team:hash-of-file-a" in key_a
     assert key_a != key_b
 
 
 def test_sync_cache_key_scoped_to_media_fingerprint():
     hashed = _sync_cache_key({"imdb_id": "tt1", "video_hash": "VH"}, "s", "h", "team")
-    assert hashed == "final_sub:tt1:movie:vh:s:team:h"
+    assert hashed == "final_sub:v7-target-binding-v1:tt1:movie:vh:s:team:h"
     named = _sync_cache_key({"imdb_id": "tt1", "target_filename": "Show S01E01.mkv"}, "s", "h", "team")
-    assert named == "final_sub:tt1:movie:show s01e01.mkv:s:team:h"
+    assert named == "final_sub:v7-target-binding-v1:tt1:movie:show s01e01.mkv:s:team:h"
     assert hashed != named
     # Same bytes, different verdicts: team and edition syncs never collide.
     edition = _sync_cache_key({"imdb_id": "tt1", "video_hash": "VH"}, "s", "h", "edition")

@@ -93,7 +93,7 @@ def _query(**kw):
     base = {
         "imdb_id": "tt2582802",
         "media_type": "movie",
-        "target_filename": "Whiplash.2014.2160p.UHD.BluRay.x254-SURCODE.mkv",
+        "target_filename": "Whiplash.2014.Criterion.Collection.2160p.UHD.BluRay.x254-SURCODE.mkv",
         "video_hash": "",
         "video_size": "19571049411",
         "languages": ("ara",),
@@ -104,7 +104,7 @@ def _query(**kw):
 
 def _payloads(n: int) -> dict[str, str]:
     # Distinct content, small opening offsets: passes cue-sanity, needs alass.
-    return {f"R{i}.2014.2160p.mkv": _srt(600, f"C{i}", offset_ms=3000 * (i + 1)) for i in range(n)}
+    return {f"Whiplash.2014.Criterion.Collection.2160p.BluRay.x264-R{i}.mkv": _srt(600, f"C{i}", offset_ms=3000 * (i + 1)) for i in range(n)}
 
 
 class _Cache:
@@ -147,7 +147,7 @@ class _Cache:
 def _meta():
     return {
         "media_type": "movie",
-        "target_filename": "Whiplash.2014.2160p.UHD.BluRay.x264-SURCODE.mkv",
+        "target_filename": "Whiplash.2014.Criterion.Collection.2160p.UHD.BluRay.x264-SURCODE.mkv",
         "video_hash": "",
         "video_size": "19571049411",
         "lang": "ara",
@@ -294,7 +294,7 @@ async def test_cache_hit_stays_first_without_redownload():
 
         def get(self, query):
             return ResolvedReference(
-                _srt(600, "HIT", offset_ms=3000), kind="edition", candidate="HIT"
+                _srt(600, "HIT", offset_ms=3000), kind="edition", candidate="Whiplash.2014.Criterion.Collection.2160p.BluRay.x264-HIT"
             )
 
     strategy = _strategy(_payloads(2))
@@ -324,7 +324,7 @@ async def test_strategy_without_plan_falls_back_to_eager():
         async def resolve_all_with_provenance(self, query, *, update_validator=None):
             self.calls += 1
             return [
-                ResolvedReference(_srt(600, "L", offset_ms=3000), kind="edition", candidate="L")
+                ResolvedReference(_srt(600, "L", offset_ms=3000), kind="edition", candidate="Whiplash.2014.Criterion.Collection.2160p.BluRay.x264-LEGACY")
             ]
 
     legacy = _Legacy()

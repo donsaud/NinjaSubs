@@ -108,7 +108,7 @@ async def test_warm_sync_cache_survives_reference_provider_outage(enabled_sync):
     from test_sync_strategies import _stub_analyzer
 
     strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(
-        return_value=ResolvedReference(_srt([1] * 10), "team")
+        return_value=ResolvedReference(_srt([1] * 10), "team", candidate=_meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP")["target_filename"])
     ))
     service = SimpleNamespace(sync_async=AsyncMock(return_value=_srt([1] * 10)))
     orch = _orch(strategy, service)
@@ -119,9 +119,9 @@ async def test_warm_sync_cache_survives_reference_provider_outage(enabled_sync):
     # test_non_positive_warm_entry_does_not_mask_provider_outage.
     _stub_analyzer(orch)
     original = _srt().encode()
-    synced = await orch.evaluate_and_sync(original, _meta(), "t", True)
+    synced = await orch.evaluate_and_sync(original, _meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP"), "t", True)
     strategy.resolve_with_provenance.return_value = ResolvedReference(None)
-    assert await orch.evaluate_and_sync(original, _meta(), "t", True) == synced
+    assert await orch.evaluate_and_sync(original, _meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP"), "t", True) == synced
     assert synced != original
     assert strategy.resolve_with_provenance.await_count == 1
 
@@ -136,16 +136,16 @@ async def test_non_positive_warm_entry_does_not_mask_provider_outage(enabled_syn
     unconfirmed artifact.
     """
     strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(
-        return_value=ResolvedReference(_srt([1] * 10), "team")
+        return_value=ResolvedReference(_srt([1] * 10), "team", candidate=_meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP")["target_filename"])
     ))
     service = SimpleNamespace(sync_async=AsyncMock(return_value=_srt([1] * 10)))
     orch = _orch(strategy, service)
     original = _srt().encode()
-    await orch.evaluate_and_sync(original, _meta(), "t", True)
+    await orch.evaluate_and_sync(original, _meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP"), "t", True)
     assert orch._last_evaluation.sync_state.value != "verified_synced"
 
     strategy.resolve_with_provenance.return_value = ResolvedReference(None)
-    out = await orch.evaluate_and_sync(original, _meta(), "t", True)
+    out = await orch.evaluate_and_sync(original, _meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP"), "t", True)
     assert out == original, "non-positive artifact was served as a finished result"
 
 

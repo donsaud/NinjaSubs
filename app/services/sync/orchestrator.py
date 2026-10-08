@@ -83,8 +83,9 @@ from app.services.sync.outcomes import (
 )
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync.reference import is_dialogue_cue
+from app.services.sync.target_binding import BindingAssessment, classify_target_binding
 from app.services.sync.telemetry import SyncTiming, current_sync_timing
-from app.services.sync_cache import SyncCache
+from app.services.sync_cache import SYNC_PAYLOAD_VERSION, SyncCache
 from app.utils.cleaners import strip_intro_credits
 
 logger = logging.getLogger(__name__)
@@ -504,7 +505,7 @@ class SyncOrchestrator:
             str(meta.get("video_size") or ""), meta.get("lang"),
         ], ensure_ascii=False).encode()).hexdigest()[:16]
         strict = bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True))
-        return f"{key}:v6-timeline-affine-v2:{strict}:{context_digest}:{auth_digest}"
+        return f"{key}:{SYNC_PAYLOAD_VERSION}:{strict}:{context_digest}:{auth_digest}"
 
     @staticmethod
     def _verdict_key(meta: dict, subtitle_hash: str) -> str | None:
@@ -537,6 +538,8 @@ class SyncOrchestrator:
             sync_state=verdict.get("sync_state", SyncState.UNVERIFIED.value),
             verification=verdict.get("verification", VerificationAvailability.CACHED.value),
             reasons=list(verdict.get("reasons") or []),
+            target_binding=verdict.get("target_binding"),
+            target_binding_reasons=list(verdict.get("target_binding_reasons") or []),
             median_offset_ms=verdict.get("median_offset_ms"),
             p95_offset_ms=verdict.get("p95_offset_ms"),
             mad_offset_ms=verdict.get("mad_offset_ms"),
@@ -848,7 +851,8 @@ class SyncOrchestrator:
                     logger.debug("[sync-cache] meta read failed: %s", exc)
                 stored_state = (meta_record or {}).get("sync_state")
                 stored_verification = (meta_record or {}).get("verification")
-                if is_reusable_verified(stored_state, stored_verification):
+                if (is_reusable_verified(stored_state, stored_verification)
+                        and (meta_record or {}).get("target_binding") in {"exact", "strong"}):
                     logger.info(
                         "[sync-cache] layer=payload result=hit sub_id=%s process=%s "
                         "fingerprint_source=%s credential_source=%s content_hash=%s "
@@ -969,6 +973,8 @@ class SyncOrchestrator:
                             "sync_state": str(remembered.get("sync_state")),
                             "verification": str(remembered.get("verification") or "cached"),
                             "sync_confidence": remembered.get("sync_confidence"),
+                            "target_binding": remembered.get("target_binding"),
+                            "target_binding_reasons": remembered.get("target_binding_reasons", []),
                         },
                     )
                 self._record_outcome(meta, VERIFIED)
@@ -1153,6 +1159,7 @@ class SyncOrchestrator:
         # reference is the highest-priority strategy's pick.
         pal_target_snapshot = target_text
         pal_first_reference: str | None = None
+        pal_resolved: ResolvedReference | None = None
 
         async for strategy_name, strategy_obj in self._reference_attempts(
             attempts, query, _passes_cue_sanity, timing
@@ -1212,8 +1219,10 @@ class SyncOrchestrator:
                 capture_provider(reference, "opensubtitles")
             capture_reference(reference, resolved.candidate, resolved.kind)
             decision_kind = resolved.kind
+            binding = self._target_binding(resolved, meta)
             if pal_first_reference is None and reference:
                 pal_first_reference = reference
+                pal_resolved = resolved
                 timing.pal_reference_kind = resolved.kind
                 timing.pal_reference_index = timing.candidates_considered
             # Cheap global candidate on pristine input, independently verified
@@ -1222,6 +1231,9 @@ class SyncOrchestrator:
                 pal_target_snapshot, resolved, meta, target_id, content_hash,
                 resolution_key, verdict_key,
             )
+            if isinstance(affine_served, BindingAssessment):
+                rejected_candidates_seen = True
+                continue
             if affine_served is not None:
                 return affine_served
             # This only means a reference is now IN HAND. Alass may still not
@@ -1397,6 +1409,9 @@ class SyncOrchestrator:
                     reference_failure=getattr(resolved, "reference_failure", None),
                     max_plausible_offset_ms=offset_ceiling_ms,
                 )
+                if not self._gate_target_binding(evaluation, binding):
+                    rejected_candidates_seen = True
+                    continue
                 self._last_evaluation = evaluation
                 self._metrics["candidates_verified"] += 1
                 await self._store_verdict(
@@ -1425,6 +1440,7 @@ class SyncOrchestrator:
                             "sync_state": evaluation.sync_state.value,
                             "verification": evaluation.verification.value,
                             "sync_confidence": evaluation.sync_confidence,
+                            **self._binding_metadata(binding),
                         },
                     )
                 self._record_outcome(
@@ -1666,6 +1682,9 @@ class SyncOrchestrator:
                         apply_exemption_to_evaluation(evaluation)
                         self._last_evaluation = evaluation
 
+                binding_allowed = self._gate_target_binding(evaluation, binding)
+                if not binding_allowed:
+                    constant_shift_state = ConstantShiftExemptionState.ORIGINAL
                 capture_verifier(reference, synced, evaluation)
                 self._metrics["candidates_verified"] += 1
                 # Computed before the verdict is stored: a resync verdict records
@@ -1699,6 +1718,7 @@ class SyncOrchestrator:
                         # which Large Offset decision delivered the bytes and
                         # never asserts a verification the analyzer refused.
                         "serving_state": serving_state.value,
+                        **self._binding_metadata(binding),
                     }
                     await self._sync_cache.set_meta(key, {**outcome_meta, **{
                         "status": "synced",
@@ -1713,7 +1733,7 @@ class SyncOrchestrator:
                 # trust is kept for diagnostics/cache but never returned to the
                 # user, who gets the original provider subtitle instead -- the
                 # unsynchronized original is far more usable than a mangled one.
-                serve_synchronized = may_serve_synchronized(
+                serve_synchronized = binding_allowed and may_serve_synchronized(
                     evaluation.sync_state.value, evaluation.verification.value
                 )
                 # Scoped exception to "an attempt the verifier does not trust
@@ -1901,6 +1921,7 @@ class SyncOrchestrator:
                 content_hash,
                 resolution_key,
                 verdict_key,
+                resolved=pal_resolved,
             )
             if pal_served is not None:
                 return pal_served
@@ -1920,7 +1941,7 @@ class SyncOrchestrator:
         content_hash: str,
         resolution_key: str,
         verdict_key: str | None,
-    ) -> bytes | None:
+    ) -> bytes | BindingAssessment | None:
         """Serve/cache only an independently verified affine artifact."""
         from app.services.sync.timeline_affine import (
             MODEL_VERSION,
@@ -1940,6 +1961,9 @@ class SyncOrchestrator:
         if (not result.accepted or not result.transformed_text or evaluation is None
                 or not may_serve_synchronized(evaluation.sync_state, evaluation.verification)):
             return None
+        binding = self._target_binding(resolved, meta)
+        if not self._gate_target_binding(evaluation, binding):
+            return binding
         evaluation.reference_trust = resolved.reference_trust
         transformed = result.transformed_text.encode("utf-8")
         capture_transformed(resolved.text, result.transformed_text, STRATEGY_ID, evaluation)
@@ -1964,6 +1988,7 @@ class SyncOrchestrator:
                 "reference_sha": hashlib.sha256(resolved.text.encode()).hexdigest(),
                 "slope": result.slope,
                 "intercept_ms": result.intercept_ms,
+                **self._binding_metadata(binding),
             }
             await self._sync_cache.set(key, transformed)
             await self._sync_cache.set_meta(key, outcome_meta)
@@ -1993,6 +2018,7 @@ class SyncOrchestrator:
         content_hash: str,
         resolution_key: str,
         verdict_key: str | None,
+        resolved: ResolvedReference | None = None,
     ) -> bytes | None:
         """Two-point PAL-speedup fallback. Returns served bytes or None.
 
@@ -2073,6 +2099,9 @@ class SyncOrchestrator:
         evaluation.set_verdict(
             SyncState.VERIFIED_RESYNCED, VerificationAvailability.VERIFIED
         )
+        binding = self._target_binding(resolved or ResolvedReference(reference_text), meta)
+        if not self._gate_target_binding(evaluation, binding):
+            return None
         evaluation.reasons.append(
             f"{PAL_STRATEGY_ID}: narrow PAL-speedup policy acceptance "
             f"(slope={result.slope:.6f}, model={PAL_MODEL_VERSION}); "
@@ -2105,11 +2134,13 @@ class SyncOrchestrator:
                 "sync_state": evaluation.sync_state.value,
                 "verification": evaluation.verification.value,
                 "sync_confidence": evaluation.sync_confidence,
+                **self._binding_metadata(binding),
             })
             await self._sync_cache.set_meta(resolution_key, {
                 "sync_state": evaluation.sync_state.value,
                 "verification": evaluation.verification.value,
                 "sync_confidence": evaluation.sync_confidence,
+                **self._binding_metadata(binding),
             })
         self._record_outcome(
             meta, classify_outcome(True, PAL_STRATEGY_ID, False)
@@ -2136,6 +2167,49 @@ class SyncOrchestrator:
             timing.winning_candidate_index = timing.pal_reference_index
         capture_selected(reference_text, result.transformed_text, PAL_STRATEGY_ID)
         return transformed
+
+    @staticmethod
+    def _target_binding(resolved: ResolvedReference, meta: dict) -> BindingAssessment:
+        binding = classify_target_binding(
+            meta.get("target_filename"), resolved.candidate,
+            exact_moviehash=(resolved.kind == "hash" and bool(str(meta.get("video_hash") or "").strip())),
+            embedded=resolved.kind == "embedded",
+        )
+        # Log canonical technical metadata only; never raw names or request config.
+        logger.info(
+            "[target-binding] provider=%s candidate_sha=%s state=%s reasons=%s "
+            "target_edition=%s reference_edition=%s "
+            "target_cut=%s reference_cut=%s target_group=%s reference_group=%s "
+            "target_source=%s reference_source=%s",
+            resolved.provider if resolved.provider in {"subdl", "subsource", "opensubtitles"}
+            else ("opensubtitles" if resolved.kind == "hash" else "unknown"),
+            hashlib.sha256(resolved.candidate.encode()).hexdigest()[:12],
+            binding.state.value, ",".join(binding.reasons),
+            binding.target.edition_tags, binding.reference.edition_tags,
+            binding.target.cut_tags, binding.reference.cut_tags,
+            binding.target.release_group, binding.reference.release_group,
+            binding.target.source_family, binding.reference.source_family,
+        )
+        return binding
+
+    @staticmethod
+    def _binding_metadata(binding: BindingAssessment) -> dict:
+        return {"target_binding": binding.state.value,
+                "target_binding_reasons": list(binding.reasons)}
+
+    @staticmethod
+    def _gate_target_binding(evaluation: SubtitleEvaluation, binding: BindingAssessment) -> bool:
+        evaluation.target_binding = binding.state.value
+        evaluation.target_binding_reasons = list(binding.reasons)
+        if binding.supports_verified:
+            return True
+        if is_reusable_verified(evaluation.sync_state, evaluation.verification):
+            logger.info("[sync] alignment accepted but target binding insufficient; "
+                        "continuing to next external candidate state=%s reasons=%s",
+                        binding.state.value, ",".join(binding.reasons))
+            evaluation.set_verdict(SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN)
+            evaluation.reasons.append("target_binding_insufficient")
+        return False
 
     @staticmethod
     def _applied_shifts(target_text: str, synced: str) -> list[float]:

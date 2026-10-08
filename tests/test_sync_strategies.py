@@ -33,7 +33,8 @@ class _FakeStrategy:
         self.calls += 1
         if self.exc is not None:
             raise self.exc
-        return ResolvedReference(self.result, kind=self.kind, bluray_match=self.bluray_match)
+        return ResolvedReference(self.result, kind=self.kind, bluray_match=self.bluray_match,
+                                 candidate=query.target_filename or "")
 
 
 class _FakeSyncService:
@@ -125,7 +126,9 @@ def _orchestrator(**overrides):
 
 
 def _meta():
-    return {"imdb_id": "tt1", "media_type": "movie", "lang": "ara"}
+    # Synthetic identity makes these cache/coalescing fixtures explicitly trusted.
+    return {"imdb_id": "tt1", "media_type": "movie", "lang": "ara",
+            "target_filename": "Film.2020.1080p.BluRay.x264-TESTGROUP"}
 
 
 @pytest.mark.asyncio
@@ -273,7 +276,7 @@ def test_synced_cache_key_binds_payload():
     key_a = build_synced_cache_key(meta, "s", content_hash="a", decision="team")
     key_b = build_synced_cache_key(meta, "s", content_hash="b", decision="team")
     assert key_a != key_b
-    assert key_a == "final_sub:tt1:s1e1:vh:s:team:a"
+    assert key_a == "final_sub:v7-target-binding-v1:tt1:s1e1:vh:s:team:a"
 
 
 @pytest.mark.asyncio
@@ -456,7 +459,7 @@ async def test_single_flight_coalesces_identical_requests(monkeypatch):
 
             self.calls += 1
             await release.wait()
-            return ResolvedReference(BIG_REF.decode(), kind="team")
+            return ResolvedReference(BIG_REF.decode(), kind="team", candidate=query.target_filename or "")
 
     strategy = _SlowStrategy()
     orch = _orchestrator(external_strategy=strategy)
@@ -479,7 +482,7 @@ async def test_single_flight_isolates_distinct_keys(monkeypatch):
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
-    orch = _orchestrator(external_strategy=_FakeStrategy(BIG_REF.decode(), kind="team"))
+    orch = _orchestrator(external_strategy=_FakeStrategy(BIG_REF.decode(), kind="team"), sync_cache=None)
     # Trusted outcome: this test is about orchestration, not verification.
     # The real analyzer rejects the fake service's output, and an untrusted
     # result is deliberately not served.
@@ -586,7 +589,7 @@ async def test_app_singleton_orchestrator_coalesces_concurrent_requests(monkeypa
         async def resolve_with_provenance(self, query):
             calls["n"] += 1
             await released.wait()
-            return ResolvedReference(BIG_REF.decode(), kind="team")
+            return ResolvedReference(BIG_REF.decode(), kind="team", candidate=query.target_filename or "")
 
     orch._external_strategy = _Slow()
     # Trusted outcome: this test is about coalescing on the app singleton.
@@ -638,7 +641,7 @@ async def test_request_budget_returns_original_and_warms_cache(monkeypatch):
     class _Slow:
         async def resolve_with_provenance(self, query):
             await released.wait()
-            return ResolvedReference(BIG_REF.decode(), kind="team")
+            return ResolvedReference(BIG_REF.decode(), kind="team", candidate=query.target_filename or "")
 
     orch._external_strategy = _Slow()
     # Trusted outcome: this test is about coalescing on the app singleton.

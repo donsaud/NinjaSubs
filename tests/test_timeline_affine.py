@@ -178,10 +178,10 @@ async def test_orchestrator_affine_cache_and_provenance(monkeypatch):
     from app.services.sync_cache import SyncCache
 
     target = render_srt(film())
-    resolved = ResolvedReference(render_srt(reference(film(), 1.0123, 5000)), kind="edition")
+    resolved = ResolvedReference(render_srt(reference(film(), 1.0123, 5000)), kind="edition", candidate="Movie.2020.1080p.WEB-DL-TESTGROUP")
     cache = SyncCache()
     orch = SyncOrchestrator(sync_cache=cache)
-    served = await orch._try_timeline_affine(target, resolved, {}, "sub", "sha", "rk", None)
+    served = await orch._try_timeline_affine(target, resolved, {"target_filename": "Movie.2020.1080p.WEB-DL-TESTGROUP"}, "sub", "sha", "rk", None)
     assert served is not None and served != target.encode()
     assert await cache.get("rk") == served
     meta = await cache.get_meta("rk")
@@ -212,8 +212,8 @@ async def test_multi_reference_affine_delivery_and_reuse(monkeypatch):
 
     monkeypatch.setattr(settings, "ENABLE_SUBTITLE_SYNC", True)
     target = render_srt(film()).encode()
-    refs = [ResolvedReference(render_srt(reference(film(seed=92), 1.0123, 5000)), kind="edition"),
-            ResolvedReference(render_srt(reference(film(), 1.0123, 35000)), kind="edition")]
+    refs = [ResolvedReference(render_srt(reference(film(seed=92), 1.0123, 5000)), kind="edition", candidate="Movie.2020.1080p.WEB-DL-TESTGROUP"),
+            ResolvedReference(render_srt(reference(film(), 1.0123, 35000)), kind="edition", candidate="Movie.2020.1080p.WEB-DL-TESTGROUP")]
 
     class Multi:
         cache = None
@@ -232,7 +232,7 @@ async def test_multi_reference_affine_delivery_and_reuse(monkeypatch):
 
     multi, alass, cache = Multi(), Alass(), SyncCache()
     orch = SyncOrchestrator(external_strategy=multi, sync_service=alass, sync_cache=cache)
-    meta = {"imdb_id": "tt1234567", "lang": "fra", "target_filename": "Movie.2020.WEB.mkv"}
+    meta = {"imdb_id": "tt1234567", "lang": "fra", "target_filename": "Movie.2020.1080p.WEB-DL-TESTGROUP"}
     served = await orch.evaluate_and_sync(target, meta, "sub", auto_sync=True)
     assert served != target
     assert orch._last_evaluation.verification.value == "verified"

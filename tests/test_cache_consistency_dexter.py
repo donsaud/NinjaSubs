@@ -219,7 +219,7 @@ async def test_d_rejected_verdict_with_artifact_present_is_not_served():
             getattr(_sync_cache, store).clear()
         await _sync_cache.set_verdict(
             SyncCache.build_verdict_key(fingerprint, "h", "ara"),
-            {"sync_state": state, "verification": "verified", "language": "ara"},
+            {"sync_state": state, "verification": "verified", "target_binding": "strong", "language": "ara"},
             alias_key=SyncCache.build_verdict_alias_key(fingerprint, ref),
         )
         await _sync_cache.set(payload_key, artifact)
@@ -258,7 +258,7 @@ async def test_e_stale_engine_version_is_rejected_not_silently_accepted():
     cache._local_verdict[SyncCache.build_verdict_alias_key(fingerprint, SUB_ID)] = json.dumps(
         {
             "sync_state": SyncState.VERIFIED_SYNCED.value,
-            "verification": "verified",
+            "verification": "verified", "target_binding": "strong",
             "language": "ara",
             "engine_version": stale,
         }
@@ -374,7 +374,7 @@ def test_key_is_stable_for_identical_inputs():
 def test_build_synced_cache_key_shape_is_unchanged():
     """The documented key layout must not drift silently."""
     key = build_synced_cache_key(dict(META), SUB_ID, content_hash="c0ffee", decision="edition")
-    assert key.startswith(f"final_sub:{IMDB}:s{SEASON}e{EPISODE}:")
+    assert key.startswith(f"final_sub:v7-target-binding-v1:{IMDB}:s{SEASON}e{EPISODE}:")
     assert key.endswith(":edition:c0ffee")
 
 
@@ -389,7 +389,7 @@ async def test_verdict_lookup_requires_language_match_when_alias_lacks_it():
     fingerprint = SyncCache.video_fingerprint_from_meta(dict(META))
     await cache.set_verdict(
         SyncCache.build_verdict_key(fingerprint, "h", "eng"),
-        {"sync_state": SyncState.VERIFIED_SYNCED.value, "verification": "verified",
+        {"sync_state": SyncState.VERIFIED_SYNCED.value, "verification": "verified", "target_binding": "strong",
          "language": "eng"},
         alias_key=SyncCache.build_verdict_alias_key(fingerprint, SUB_ID),
     )

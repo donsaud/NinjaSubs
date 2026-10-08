@@ -222,6 +222,9 @@ class SubtitleEvaluation(BaseModel):
     reference_consensus: float | None = None
     reference_independent_sources: int | None = None
     reference_failure: str | None = None
+    # Orthogonal to alignment confidence; populated at the production boundary.
+    target_binding: str | None = None
+    target_binding_reasons: list[str] = Field(default_factory=list)
 
     #: validate_assignment is what closes the attribute-assignment bypass: the
     #: field validator below then runs on ordinary writes, not just on

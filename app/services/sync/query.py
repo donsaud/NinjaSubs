@@ -216,3 +216,4 @@ class ResolvedReference:
     shadow_extra_candidate_provider: str | None = None
     shadow_extra_candidate_match_tier: str | None = None
     shadow_extra_candidate_source_class: str | None = None
+    provider: str | None = None

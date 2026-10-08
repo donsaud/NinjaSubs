@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 from urllib.parse import unquote_plus
@@ -316,6 +317,104 @@ def normalize_release_group(group: str | None) -> str:
     means.
     """
     return re.sub(r"[^a-z0-9]", "", (group or "").strip().lower())
+
+
+# Structured identity supplements the existing matching primitives; ranking
+# continues to use its existing hints and thresholds.
+_VARIANT_MARKERS = {
+    "criterion_collection": r"criterion(?: collection)?",
+    "special_edition": r"special edition",
+    "collectors_edition": r"collector ?s edition",
+    "anniversary_edition": r"(?:\d+(?:th|st|nd|rd) )?anniversary edition",
+    "remastered": r"remaster(?:ed)?",
+    "restored": r"restored|restoration",
+    "imax": r"imax",
+    "open_matte": r"open matte",
+}
+_CUT_MARKERS = {
+    "directors_cut": r"director ?s cut",
+    "extended": r"extended(?: cut| edition)?",
+    "theatrical": r"theatrical(?: cut)?",
+    "unrated": r"unrated",
+    "uncut": r"uncut",
+    "final_cut": r"final cut",
+    "international_cut": r"international (?:cut|version)",
+}
+
+
+@dataclass(frozen=True)
+class ReleaseMetadata:
+    """Known filename evidence; absent fields never imply a matching edition."""
+
+    title: str | None = None
+    year: int | None = None
+    source_family: str | None = None
+    resolution: str | None = None
+    codec: str | None = None
+    bit_depth: int | None = None
+    remux: bool = False
+    hdr_flags: tuple[str, ...] = ()
+    release_group: str | None = None
+    edition_tags: tuple[str, ...] = ()
+    cut_tags: tuple[str, ...] = ()
+    duration_hint_seconds: int | None = None
+
+
+def parse_release_identity(name: str | None) -> ReleaseMetadata:
+    """Project canonical sync filename parsing into explicit identity evidence.
+
+    No remote lookups. Word boundaries avoid aliases such as generic ``CC``.
+    The technical fields reuse the same parser used by reference selection.
+    """
+    raw = name or ""
+    words = re.sub(r"[^a-z0-9+]+", " ", raw.lower()).strip()
+    meta = guess_metadata(raw)
+
+    def tags(patterns: dict[str, str]) -> tuple[str, ...]:
+        return tuple(sorted(key for key, pattern in patterns.items()
+                            if re.search(r"\b(?:" + pattern + r")\b", words)))
+
+    bits = re.search(r"\b(8|10|12) ?bit\b", words)
+    hdr = []
+    for tag, pattern in (("hdr", r"hdr"), ("hdr10", r"hdr10(?!\+)"),
+                         ("hdr10_plus", r"hdr10\+"),
+                         ("dolby_vision", r"dolby vision|\bdv\b|\bdovi\b")):
+        if re.search(r"\b(?:" + pattern + r")", words):
+            hdr.append(tag)
+    duration = re.search(r"\[(\d+)h(\d+)m(\d+)[ms]\]", raw, re.IGNORECASE)
+    source = _source_kind(raw)
+    # The legacy matcher intentionally merges WEBRip into WEB-DL. Keep its
+    # selection behavior, while preserving the explicit subtype in this view.
+    if re.search(r"\bweb[ ._-]?rip\b", raw, re.IGNORECASE):
+        source = "webrip"
+    year = meta.get("year")
+    group = _release_group(raw)
+    # Existing group extraction also tolerates arbitrary bracketed suffixes.
+    # For trust, require a scene suffix or a technical parenthetical suffix.
+    base = re.sub(r"\.(?:srt|ass|ssa|sub|vtt|mkv|mp4|avi)$", "", raw, flags=re.I)
+    parenthetical = re.search(r"[\[(]([^\[\]()]+)[\])]\s*$", base)
+    scene_suffix = bool(group and re.search(
+        r"-" + re.escape(group) + r"(?:\.[a-z]{2,3})?$", base, re.I))
+    technical_suffix = bool(
+        group and parenthetical and _resolution(parenthetical.group(1))
+        and _codec_kind(parenthetical.group(1))
+        and re.search(r"\b" + re.escape(group) + r"$", parenthetical.group(1), re.I)
+    )
+    if (not (scene_suffix or technical_suffix)
+            or (group and re.fullmatch(r"(?:\d+bit|edition|collection|cut|hdr\d*|dv)", group, re.I))):
+        group = None
+    return ReleaseMetadata(
+        title=meta.get("title") if isinstance(meta.get("title"), str) else None,
+        year=year if isinstance(year, int) else None,
+        source_family="bluray" if source == "remux" else source,
+        resolution=_resolution(raw), codec=_codec_kind(raw),
+        bit_depth=int(bits.group(1)) if bits else None,
+        remux=bool(re.search(r"\b(?:bd)?remux\b", words)), hdr_flags=tuple(hdr),
+        release_group=group, edition_tags=tags(_VARIANT_MARKERS),
+        cut_tags=tags(_CUT_MARKERS),
+        duration_hint_seconds=(int(duration.group(1)) * 3600 + int(duration.group(2)) * 60
+                               + int(duration.group(3))) if duration else None,
+    )
 
 
 def _release_group(name: str | None) -> str | None:

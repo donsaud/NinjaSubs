@@ -949,6 +949,7 @@ class ExternalExactStrategy:
             kind=result.kind,
             bluray_match=result.bluray_match,
             candidate=result.candidate,
+            provider=result.provider,
             reference_trust=assessment.trust.value if assessment else None,
             reference_consensus=assessment.consensus_score if assessment else None,
             reference_independent_sources=assessment.independent_sources if assessment else 0,
@@ -1394,6 +1395,7 @@ class ExternalExactStrategy:
             kind=decision_kind,
             bluray_match=bluray_match,
             candidate=best_name,
+            provider=self._provider_label(provider),
         )
 
     async def _download_reference(

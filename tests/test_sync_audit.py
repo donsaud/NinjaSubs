@@ -367,7 +367,7 @@ def test_missing_fingerprint_stays_unknown_unless_an_exact_verdict_exists():
 async def test_same_subtitle_different_video_does_not_reuse_a_verdict():
     cache = SyncCache()
     key = SyncCache.build_verdict_key("videoA", "sub1", "ara")
-    await cache.set_verdict(key, {"sync_state": "verified_resynced", "verification": "verified"})
+    await cache.set_verdict(key, {"sync_state": "verified_resynced", "verification": "verified", "target_binding": "strong"})
     other_video = SyncCache.build_verdict_key("videoB", "sub1", "ara")
     assert await cache.get_verdict(other_video) is None
 
@@ -376,7 +376,7 @@ async def test_same_subtitle_different_video_does_not_reuse_a_verdict():
 async def test_same_video_different_subtitle_does_not_reuse_a_verdict():
     cache = SyncCache()
     key = SyncCache.build_verdict_key("videoA", "sub1", "ara")
-    await cache.set_verdict(key, {"sync_state": "verified_resynced", "verification": "verified"})
+    await cache.set_verdict(key, {"sync_state": "verified_resynced", "verification": "verified", "target_binding": "strong"})
     other_sub = SyncCache.build_verdict_key("videoA", "sub2", "ara")
     assert await cache.get_verdict(other_sub) is None
 
@@ -385,12 +385,12 @@ async def test_same_video_different_subtitle_does_not_reuse_a_verdict():
 async def test_different_engine_version_does_not_reuse_a_stale_verdict():
     cache = SyncCache()
     key = SyncCache.build_verdict_key("videoA", "sub1", "ara")
-    await cache.set_verdict(key, {"sync_state": "verified_resynced", "verification": "verified"})
+    await cache.set_verdict(key, {"sync_state": "verified_resynced", "verification": "verified", "target_binding": "strong"})
     # Simulate a record written by a different engine version.
     cache._local_verdict[key] = json.dumps(  # noqa: SLF001 - corruption/staleness test
         {
             "sync_state": "verified_resynced",
-            "verification": "verified",
+            "verification": "verified", "target_binding": "strong",
             "engine_version": SYNC_VERDICT_ENGINE_VERSION + 1,
         }
     )
@@ -403,7 +403,7 @@ async def test_alias_is_bound_to_the_video_fingerprint():
     primary = SyncCache.build_verdict_key("videoA", "sub1", "ara")
     alias = SyncCache.build_verdict_alias_key("videoA", "cand1")
     await cache.set_verdict(
-        primary, {"sync_state": "verified_synced", "verification": "verified"}, alias_key=alias
+        primary, {"sync_state": "verified_synced", "verification": "verified", "target_binding": "strong"}, alias_key=alias
     )
     assert await cache.get_verdict_by_ref("videoA", "cand1") is not None
     assert await cache.get_verdict_by_ref("videoB", "cand1") is None

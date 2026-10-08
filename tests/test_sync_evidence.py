@@ -297,7 +297,7 @@ async def test_only_measured_verdicts_are_cached():
     assert await cache.get_verdict(key) is None
 
     await cache.set_verdict(
-        key, {"sync_state": "verified_resynced", "verification": "verified", "reasons": ["ok"]}
+        key, {"sync_state": "verified_resynced", "verification": "verified", "target_binding": "strong", "reasons": ["ok"]}
     )
     stored = await cache.get_verdict(key)
     assert stored["sync_state"] == "verified_resynced"
@@ -314,7 +314,7 @@ async def test_alass_process_success_alone_is_not_a_verdict():
         key,
         {
             "sync_state": "unverified",
-            "verification": "verified",
+            "verification": "verified", "target_binding": "strong",
             "alass_successful": True,
             "alass_applied": True,
         },
@@ -329,7 +329,7 @@ async def test_stale_engine_version_is_never_reused():
     cache = SyncCache()
     key = SyncCache.build_verdict_key("fp1", "sub1", "ara")
     cache._local_verdict[key] = json.dumps(
-        {"sync_state": "verified_resynced", "verification": "verified", "engine_version": 0}
+        {"sync_state": "verified_resynced", "verification": "verified", "target_binding": "strong", "engine_version": 0}
     )
     assert await cache.get_verdict(key) is None
 
@@ -338,7 +338,7 @@ async def test_stale_engine_version_is_never_reused():
 async def test_verdict_does_not_leak_across_videos_or_subtitles():
     cache = SyncCache()
     key = SyncCache.build_verdict_key("fp1", "sub1", "ara")
-    await cache.set_verdict(key, {"sync_state": "verified_resynced", "verification": "verified"})
+    await cache.set_verdict(key, {"sync_state": "verified_resynced", "verification": "verified", "target_binding": "strong"})
     assert await cache.get_verdict(SyncCache.build_verdict_key("fp2", "sub1", "ara")) is None
     assert await cache.get_verdict(SyncCache.build_verdict_key("fp1", "sub2", "ara")) is None
 
@@ -349,7 +349,7 @@ async def test_alias_index_is_bound_to_the_video_fingerprint():
     primary = SyncCache.build_verdict_key("fp1", "sub1", "ara")
     alias = SyncCache.build_verdict_alias_key("fp1", "cand-1")
     await cache.set_verdict(
-        primary, {"sync_state": "verified_synced", "verification": "verified"}, alias_key=alias
+        primary, {"sync_state": "verified_synced", "verification": "verified", "target_binding": "strong"}, alias_key=alias
     )
     assert (await cache.get_verdict_by_ref("fp1", "cand-1"))["sync_state"] == "verified_synced"
     assert await cache.get_verdict_by_ref("fp2", "cand-1") is None

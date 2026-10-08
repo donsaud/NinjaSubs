@@ -272,7 +272,9 @@ async def test_real_affine_output_capture_does_not_change_cache_or_result(monkey
     fixture = Path(__file__).parent / "fixtures/whiplash"
     target = (fixture / "target.srt").read_text(encoding="utf-8-sig")
     reference = (fixture / "reference.srt").read_text(encoding="utf-8-sig")
-    resolved = ResolvedReference(reference, kind="edition", candidate="Whiplash BluRay HDA")
+    # Synthetic release identity isolates capture from the unchanged real timing oracle.
+    release = "Whiplash.2014.1080p.BluRay.REMUX-FraMeSToR"
+    resolved = ResolvedReference(reference, kind="edition", candidate=release)
     outputs, caches = [], []
     for selected in (False, True):
         if selected:
@@ -281,7 +283,7 @@ async def test_real_affine_output_capture_does_not_change_cache_or_result(monkey
             cc.capture_reference(reference, resolved.candidate, resolved.kind)
         cache = SyncCache()
         orch = SyncOrchestrator(sync_cache=cache)
-        outputs.append(await orch._try_timeline_affine(target, resolved, {}, "id", "sha", "rk", None))
+        outputs.append(await orch._try_timeline_affine(target, resolved, {"target_filename": release}, "id", "sha", "rk", None))
         caches.append(await cache.get_meta("rk"))
         await orch.close()
     assert outputs[0] == outputs[1] and outputs[0] is not None

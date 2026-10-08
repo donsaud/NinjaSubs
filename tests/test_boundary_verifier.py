@@ -227,6 +227,9 @@ async def test_shadow_is_nonblocking_bounded_and_cannot_mutate_verdict(monkeypat
         return bv.BoundaryResult(True, "EDGE_DISCONTINUITY")
     monkeypatch.setattr(bv, "verify_boundary", blocked)
     shadow, verdict = bv.BoundaryShadow(), evaluation()
+    # Production binding annotation is independent of the shadow measurement.
+    verdict.target_binding = "exact"
+    verdict.target_binding_reasons = ["moviehash_exact"]
     before = verdict.model_dump()
     try:
         assert shadow.schedule("pristine", "reference", "fixed", verdict) is None
@@ -439,6 +442,9 @@ async def test_orchestrator_shadow_does_not_change_fallback_cache_or_verdict(mon
         seen.append((pristine, ref, fixed))
         return bv.BoundaryResult(accepted, "EDGE_DISCONTINUITY" if accepted else "UNSUPPORTED")
     monkeypatch.setattr(bv, "verify_boundary", check)
+    # Production binding annotation is independent of the shadow measurement.
+    verdict.target_binding = "exact"
+    verdict.target_binding_reasons = ["moviehash_exact"]
     before = verdict.model_dump()
     meta = {"imdb_id": "tt1234567", "lang": "ara", "target_filename": "Series.BluRay.mkv",
             "media_type": "series", "season": 8, "episode": 4,

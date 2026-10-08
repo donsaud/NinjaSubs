@@ -82,7 +82,7 @@ def setup(monkeypatch, external, accepted="A", hashed=None):
             return b"accepted artifact"
         return None
 
-    async def pal(target, reference, *args):
+    async def pal(target, reference, *args, **kwargs):
         tails.append(reference)
         return None
 
@@ -364,7 +364,9 @@ async def test_real_whiplash_cached_scheduler_preserves_oracle_and_skips_tail(mo
     folder = Path(__file__).parent / "fixtures" / "whiplash"
     target = (folder / "target.srt").read_text(encoding="utf-8-sig").encode("utf-8")
     reference = (folder / "reference.srt").read_text(encoding="utf-8-sig")
-    external = External(cached=ResolvedReference(reference, kind="edition", candidate="whiplash"))
+    # Synthetic same-group identity isolates scheduling from the real timing oracle.
+    release = "Whiplash.2014.1080p.BluRay.REMUX-FraMeSToR"
+    external = External(cached=ResolvedReference(reference, kind="edition", candidate=release))
     monkeypatch.setattr(om.settings, "ENABLE_SUBTITLE_SYNC", True)
 
     class NoAlass:
@@ -377,7 +379,7 @@ async def test_real_whiplash_cached_scheduler_preserves_oracle_and_skips_tail(mo
         pytest.fail("verified Whiplash must not run PAL tail")
 
     monkeypatch.setattr(orchestrator, "_try_pal_two_point_fallback", no_pal)
-    output = await orchestrator.evaluate_and_sync(target, dict(META), "whiplash", auto_sync=True)
+    output = await orchestrator.evaluate_and_sync(target, {**META, "target_filename": release}, "whiplash", auto_sync=True)
     # The oracle remains outside synchronization inputs and is read after generation.
     expected = parse_srt_cues((folder / "expected.srt").read_text(encoding="utf-8-sig"))
     original, generated = parse_srt_cues(target.decode()), parse_srt_cues(output.decode())
