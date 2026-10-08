@@ -1,17 +1,9 @@
-"""Search-time synchronization-aware ordering.
+"""Search evidence remains scoped; presentation follows displayed compatibility.
 
-Search must use whatever synchronization evidence already exists - cached
-measured verdicts, and metadata predictions - without ever claiming a
-synchronization that has not been verified, and without running alass.
-
-Every test here asserts an invariant rather than a ranking convenience:
-
-* PREDICTED can never reach a VERIFIED_* state;
-* a missing fingerprint produces UNKNOWN, never a guess;
-* cache evidence outranks prediction;
-* hard rejection is absolute and cannot be predicted away;
-* search performs zero alass executions;
-* ordering is deterministic and leaves unevidenced order untouched.
+Predictions cannot become verification, missing stream context stays unknown,
+cache evidence remains fingerprint-bound, and search never runs synchronization.
+Ordering consumes precomputed Compatibility Scores without independently
+promoting states or overriding percentage order.
 """
 
 from __future__ import annotations
@@ -72,6 +64,8 @@ def _release(
         **compat_kwargs,
     )
     release.match_tier = tier
+    release.match_percentage = {MatchTier.HASH: 100, MatchTier.EXACT: 90,
+        MatchTier.SOURCE_FAMILY: 75, MatchTier.CLOSE: 40, MatchTier.FALLBACK: 10}[tier]
     return release
 
 
@@ -237,7 +231,7 @@ def test_wrong_episode_stays_rejected_even_with_strong_metadata():
     assert not prediction.is_actionable
 
 
-def test_cached_rejection_is_not_rescued_by_prediction():
+def test_sorting_preserves_cached_rejection_claim():
     """A measured rejection is honoured; prediction never runs over it."""
     rejected = _attach(
         _release("A.srt", tier=MatchTier.EXACT, release_group_match=True),
@@ -257,7 +251,8 @@ def test_cached_rejection_is_not_rescued_by_prediction():
             ),
         ]
     )
-    assert ordered[-1] is rejected
+    assert ordered[0] is rejected
+    assert rejected.sync_state == SyncState.REJECTED.value
 
 
 # --------------------------------------------------------------------------- #
@@ -265,7 +260,7 @@ def test_cached_rejection_is_not_rescued_by_prediction():
 # --------------------------------------------------------------------------- #
 
 
-def test_cached_verified_synced_beats_unverified_candidate():
+def test_exact_score_outweighs_unscoped_verified_claim():
     verified = _attach(
         _release("A.srt"),
         SyncState.VERIFIED_SYNCED.value,
@@ -275,10 +270,10 @@ def test_cached_verified_synced_beats_unverified_candidate():
     )
     unverified = _attach(_release("B.srt", tier=MatchTier.HASH), None, None, base=0)
     ordered = order_candidates([unverified, verified])
-    assert ordered[0] is verified
+    assert ordered[0] is unverified
 
 
-def test_verified_synced_outranks_verified_resynced_even_across_tiers():
+def test_displayed_score_orders_verified_sync_states():
     """Explicit product semantics: re-timing is not better evidence."""
     already = _attach(
         _release("A.srt", tier=MatchTier.EXACT),
@@ -295,10 +290,10 @@ def test_verified_synced_outranks_verified_resynced_even_across_tiers():
         confidence=100.0,
     )
     ordered = order_candidates([resynced, already])
-    assert ordered[0] is already
+    assert ordered[0] is resynced
 
 
-def test_cache_evidence_outranks_a_stronger_prediction():
+def test_unscoped_cache_claim_cannot_override_displayed_score():
     """Real measured evidence beats a metadata guess."""
     predicted = _attach(
         _release("A.srt", tier=MatchTier.HASH),
@@ -315,7 +310,7 @@ def test_cache_evidence_outranks_a_stronger_prediction():
         confidence=60.0,
     )
     ordered = order_candidates([predicted, cached])
-    assert ordered[0] is cached
+    assert ordered[0] is predicted
 
 
 def test_strong_prediction_outranks_weak_one():
@@ -401,10 +396,10 @@ def test_spec_order_matrix():
 
     ordered = order_candidates([c, d, b, a])
     assert [r.release_name for r in ordered] == [
-        a.release_name,
-        d.release_name,
         b.release_name,
+        a.release_name,
         c.release_name,
+        d.release_name,
     ]
     # The rejected candidate is last even if it were passed in.
     assert order_candidates([e, c])[0] is e

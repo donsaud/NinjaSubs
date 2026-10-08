@@ -36,7 +36,6 @@ from app.services.ranking import (
     _INVALID_GROUPS,
     KNOWN_GROUPS,
     clean_subtitle_filename,
-    get_source_popularity_percentage,
     levenshtein_ratio,
     sanitize_release_name,
 )
@@ -88,6 +87,11 @@ class CompatibilityResult:
     is_sdh: bool = False
     percentage: int = 0
     reasons: list[str] = field(default_factory=list)
+    binding: str | None = None
+    evidence_confidence: str | None = None
+    parsed_target: Any = None
+    parsed_candidate: Any = None
+    timing_variant_match: bool = False
 
     def __post_init__(self):
         if self.match_tier == MatchTier.HASH or self.is_hash_match:
@@ -1651,7 +1655,7 @@ def determine_match_tier(
     return base
 
 
-def calculate_compatibility(
+def _calculate_legacy_compatibility(
     video_meta: dict[str, Any] | str,
     sub_meta: dict[str, Any] | str | SubtitleRelease,
     is_hash_match: bool = False,
@@ -1662,15 +1666,10 @@ def calculate_compatibility(
     2. Tier 1 to 4: Stage 1 Hard Exclusion Filter -> Stage 2 Soft Scoring.
     """
     if hasattr(sub_meta, "release_name") and hasattr(sub_meta, "is_hash_match"):
-        is_hash_match = is_hash_match or bool(
-            getattr(sub_meta, "is_hash_match", False)
-            or getattr(sub_meta, "matched_by_hash", False)
-        )
+        is_hash_match = is_hash_match is True or getattr(sub_meta, "is_hash_match", False) is True or getattr(sub_meta, "matched_by_hash", False) is True
         s_meta = extract_metadata(sub_meta.release_name)
     elif isinstance(sub_meta, dict):
-        is_hash_match = is_hash_match or bool(
-            sub_meta.get("is_hash_match", False) or sub_meta.get("matched_by_hash", False)
-        )
+        is_hash_match = is_hash_match is True or sub_meta.get("is_hash_match", False) is True or sub_meta.get("matched_by_hash", False) is True
         if "title" not in sub_meta and "release_name" in sub_meta:
             s_meta = extract_metadata(sub_meta["release_name"])
         elif "title" not in sub_meta and isinstance(sub_meta.get("name"), str):
@@ -1687,7 +1686,7 @@ def calculate_compatibility(
     # -------------------------------------------------------------------
     # TIER 0: DETERMINISTIC BINARY HASH MATCH SHORT-CIRCUIT
     # -------------------------------------------------------------------
-    if is_hash_match:
+    if is_hash_match is True:
         logger.debug(
             "[Hash Match SHORT-CIRCUIT] Sub: '%s'",
             s_meta.get("raw_filename") if isinstance(s_meta, dict) else str(s_meta),
@@ -1704,7 +1703,7 @@ def calculate_compatibility(
             episode_match=True,
             is_hash_match=True,
             is_sdh=is_sdh,
-            reasons=["Exact binary MovieHash match (100% sync guaranteed)"],
+            reasons=["Exact binary MovieHash identity"],
         )
 
     if isinstance(video_meta, str):
@@ -2113,26 +2112,11 @@ def calculate_compatibility(
     if is_anime and is_anime_ep_match and not is_unshared_fansub and score > 0:
         score = max(score, 135)
 
-    # Percentage Normalization
-    # A candidate for a different work must never read as a strong match, no
-    # matter how many media properties happen to line up. Without this a release
-    # group collision (the same group naming unrelated titles) can push an
-    # unrelated subtitle to 100%.
+    # Preserve execution/diagnostic numeric scoring; visible percentages are
+    # assigned by the centralized binding-aware compatibility engine below.
+    percentage = 0
     if _is_different_work(title_ratio, episode_match, season_match):
         score = min(score, 0)
-        percentage = 0
-        reasons.append(
-            f"Different work (title similarity {title_ratio:.2f} "
-            f"< {MIN_TIER_TITLE_RATIO}, no season/episode match) - capped at 0%"
-        )
-    elif not is_unshared_fansub and score >= 130:
-        percentage = 100
-    elif score > 0:
-        percentage = max(1, min(99, int(round((score / 135.0) * 100))))
-        if is_anime and is_anime_ep_match:
-            percentage = max(percentage, 95)
-    else:
-        percentage = 0
 
     # Confidence Calculation (0.05 to 0.99)
     conf = 0.50
@@ -2167,12 +2151,6 @@ def calculate_compatibility(
         candidate_release_name=s_meta.get("raw_filename"),
     )
 
-    # Deterministic tier floor: an exact hash or exact release-group match is a
-    # 100% match by definition and must never be dragged down by soft score
-    # arithmetic.
-    if tier == MatchTier.EXACT:
-        percentage = 100
-
     logger.debug(
         "[Soft Rank] Target: '%s' | Sub: '%s' | Tier: %s | Score: %d | Pct: %d%% | Conf: %.2f | Reasons: %s",
         v_meta.get("raw_filename"),
@@ -2203,6 +2181,37 @@ def calculate_compatibility(
         percentage=percentage,
         reasons=reasons,
     )
+
+
+def calculate_compatibility(
+    video_meta: dict[str, Any] | str,
+    sub_meta: dict[str, Any] | str | SubtitleRelease,
+    is_hash_match: bool = False,
+) -> CompatibilityResult:
+    """Keep legacy execution scores; expose one binding-aware percentage."""
+    from app.services.sync.matching import parse_release_identity
+    from app.services.visible_compatibility import compatibility_score, exact_flag
+
+    result = _calculate_legacy_compatibility(video_meta, sub_meta, is_hash_match=is_hash_match)
+    def release_name(item):
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            return item.get("raw_filename") or item.get("release_name") or item.get("name") or ""
+        return getattr(item, "release_name", "")
+    target_name, candidate_name = release_name(video_meta), release_name(sub_meta)
+    hints: dict[str, object] | None = {key: video_meta[key] for key in ("title", "year", "season", "episode")
+             if key in video_meta} if isinstance(video_meta, dict) and not target_name else None
+    core = compatibility_score(parse_release_identity(target_name, hints=hints),
+                               parse_release_identity(candidate_name),
+                               exact_moviehash=is_hash_match is True or exact_flag(sub_meta), evidence=sub_meta,
+                               timing_variant_match=bool(_REPACK_REGEX.search(target_name) and _REPACK_REGEX.search(candidate_name)),
+                               target_name=target_name, candidate_name=candidate_name)
+    result.percentage = core.percentage
+    result.binding = core.binding.value
+    result.evidence_confidence = core.evidence_confidence
+    result.reasons.extend(core.reason_codes)
+    return result
 
 
 def calculate_match_score(
@@ -2325,305 +2334,121 @@ def rank_subtitles(
     year: int | None = None,
     hi_preference: str = "neutral",
 ) -> list[SubtitleRelease]:
+    """Dedup/identity eligibility, centralized compatibility, preference ties.
+
+    No downloads or synchronization. Cached parsed target/candidates are reused;
+    percentages and order share the same result. Old anime/range eligibility is
+    retained separately from release compatibility and technical quality.
     """
-    Ranks subtitle releases against a playback stream/video filename.
-    Sorting priority:
-    1. Language preference group (e.g. Arabic first, then English)
-    2. Hard Filter Accepted status (accepted candidates before rejected)
-    3. Hash match priority
-    4. Compatibility score descending
-    5. Confidence descending
-    6. Deterministic tie-breaker
-    """
+    from dataclasses import replace
+
+    from app.services.sync.matching import normalize_release_group, parse_release_identity
+    from app.services.sync.release_knowledge import Comparison, compare_field, compatible_source
+    from app.services.visible_compatibility import (
+        compatibility_score,
+        exact_flag,
+        presentation_key,
+        value,
+    )
+
     if not subtitles:
         return []
+    excluded = exclude_sdh or hi_preference == "exclude"
+    pool = deduplicate_subtitles([sub for sub in subtitles if not excluded or not _is_hearing_impaired(sub)])
+    hints = {key: val for key, val in (("season", season), ("episode", episode), ("year", year), ("title", title)) if val is not None}
+    # Catalogue title/year never contradict or replace an explicit stream identity.
+    parsed_target = parse_release_identity(video_filename or "")
+    missing_hints = {key: val for key, val in hints.items() if getattr(parsed_target, key) is None}
+    target = parse_release_identity(video_filename or "", hints=missing_hints) if missing_hints else parsed_target
+    langs = {normalize_to_iso639_2(lang): index for index, lang in enumerate(preferred_languages or [])}
 
-    # HI preference: "exclude" behaves like exclude_sdh; "prefer" boosts HI in sorting
-    if hi_preference == "exclude":
-        exclude_sdh = True
-    prefer_hi = hi_preference == "prefer"
+    def eligibility_view(metadata, raw):
+        view = {"raw_filename": raw or "", "title": metadata.title, "year": metadata.year,
+                "season": metadata.season, "episode": metadata.episode,
+                "episodes": {metadata.episode} if metadata.episode is not None else set(),
+                "group": metadata.release_group, "is_special": bool(_SPECIAL_REGEX.search(raw or ""))}
+        # Keep existing anime absolute/range/batch identity parsing as eligibility,
+        # not as a second release-semantic scoring system.
+        if is_anime_content(view, {}) or _MULTI_EP_REGEX.search(raw or ""):
+            # Range/pack parsing is an eligibility dependency too.
+            view = extract_metadata(raw or "")
+        view["edition"] = metadata.cut_tags[0].upper() if len(metadata.cut_tags) == 1 else None
+        return view
 
-    # Optional SDH exclusion
-    if exclude_sdh:
-        subtitles = [s for s in subtitles if not _is_hearing_impaired(s)]
-
-    # Deduplicate candidates across upstream providers
-    deduped_subs = deduplicate_subtitles(subtitles)
-
-    if video_filename:
-        target_meta = extract_metadata(video_filename)
-        if season is not None and target_meta.get("season") is None:
-            target_meta["season"] = season
-        if (
-            episode is not None
-            and target_meta.get("episode") is None
-            and not target_meta.get("episodes")
-        ):
-            target_meta["episode"] = episode
-            target_meta["episodes"] = {episode}
-            target_meta["absolute_episode"] = episode
-            target_meta["absolute_episode_confidence"] = "high"
-        if year is not None and target_meta.get("year") is None:
-            target_meta["year"] = year
-        if title and not target_meta.get("title"):
-            target_meta["title"] = sanitize_release_name(title)
-    elif title or season is not None or episode is not None:
-        target_meta = extract_metadata(title or "")
-        if season is not None:
-            target_meta["season"] = season
-        if episode is not None:
-            target_meta["episode"] = episode
-            target_meta["episodes"] = {episode}
-            target_meta["absolute_episode"] = episode
-            target_meta["absolute_episode_confidence"] = "high"
-        if year is not None:
-            target_meta["year"] = year
-        if title:
-            target_meta["title"] = sanitize_release_name(title)
-    else:
-        target_meta = None
-
-    scored_subs: list[SubtitleRelease] = []
-
-    for sub in deduped_subs:
-        rel_name = getattr(sub, "release_name", None) or (
-            sub.get("release_name") if isinstance(sub, dict) else ""
-        )
-        is_hash = bool(
-            getattr(sub, "is_hash_match", False)
-            or getattr(sub, "matched_by_hash", False)
-            or (sub.get("is_hash_match", False) if isinstance(sub, dict) else False)
-            or (sub.get("matched_by_hash", False) if isinstance(sub, dict) else False)
-        )
-
-        if target_meta:
-            scored_compat = calculate_compatibility(target_meta, rel_name, is_hash_match=is_hash)
-            score_val = scored_compat.score
-            pct_val = scored_compat.percentage
-            tier_val = scored_compat.match_tier
-
+    target_view = eligibility_view(target, video_filename or title or "")
+    target_anime = is_anime_content(target_view, {})
+    ranked = []
+    for sub in pool:
+        name = value(sub, "release_name", "")
+        candidate = parse_release_identity(name)
+        candidate_view = extract_metadata(name) if target_anime else eligibility_view(candidate, name)
+        candidate_view["edition"] = candidate.cut_tags[0].upper() if len(candidate.cut_tags) == 1 else None
+        if len(candidate_view.get("episodes") or set()) > 1:
+            candidate = replace(candidate, episode=None,
+                                ambiguous_fields=tuple(sorted(set(candidate.ambiguous_fields) | {"episode"})))
+        accepted, reason, _ = hard_compatibility_filter(target_view, candidate_view, is_hash_match=exact_flag(sub))
+        if discard_mismatches and not accepted:
+            if is_debug_ranking_enabled():
+                logger.info("[DEBUG_RANKING] DISCARDED reason=%s", reason)
+            continue
+        variant_match = bool(_REPACK_REGEX.search(video_filename or "") and _REPACK_REGEX.search(name))
+        core = compatibility_score(target, candidate, exact_moviehash=exact_flag(sub), evidence=sub, timing_variant_match=variant_match,
+                                   target_name=video_filename, candidate_name=name)
+        compat = CompatibilityResult(accepted=accepted, score=core.percentage, percentage=core.percentage,
+            binding=core.binding.value, evidence_confidence=core.evidence_confidence,
+            parsed_target=target, parsed_candidate=candidate, timing_variant_match=variant_match,
+            hard_reject_reason=reason, reasons=list(core.reason_codes), is_hash_match=exact_flag(sub),
+            title_match=1.0 if target.title and target.title == candidate.title else 0.0,
+            season_match=(target.season == candidate.season) if target.season is not None and candidate.season is not None else None,
+            episode_match=(target.episode in candidate_view["episodes"]) if target.episode is not None and candidate.episode is not None else None,
+            release_group_match=(normalize_release_group(target.release_group) == normalize_release_group(candidate.release_group)) if target.release_group and candidate.release_group else None,
+            source_match=compatible_source(target.source_family, candidate.source_family) if target.source_family and candidate.source_family else None,
+            service_match=(target.service == candidate.service) if target.service and candidate.service else None,
+            edition_match=(target.cut_tags == candidate.cut_tags and target.edition_tags == candidate.edition_tags) if (target.cut_tags or target.edition_tags) and (candidate.cut_tags or candidate.edition_tags) else None,
+            match_tier={"exact": MatchTier.HASH, "strong": MatchTier.EXACT, "weak": MatchTier.SOURCE_FAMILY,
+                        "unknown": MatchTier.CLOSE, "conflict": MatchTier.FALLBACK}[core.binding.value])
+        fields = {"score": core.percentage, "match_percentage": core.percentage,
+                  "match_tier": compat.match_tier, "compatibility": compat,
+                  "sync_lang_rank": langs.get(normalize_to_iso639_2(value(sub, "lang", "ara")), len(langs)),
+                  "compatibility_quality_rank": (10 * int(_is_micro_rip_group(candidate.release_group))
+                    + 8 * int(len(candidate_view.get("episodes") or set()) > 1)
+                    + sum(compare_field(target, candidate, field) == Comparison.CONFLICT
+                          for field in ("resolution", "codec", "bit_depth", "hdr_flags", "audio_tags"))
+                    - sum(compare_field(target, candidate, field) == Comparison.MATCH
+                          for field in ("resolution", "codec", "bit_depth", "hdr_flags", "audio_tags"))),
+                  "compatibility_hi_rank": 0 if hi_preference == "prefer" and _is_hearing_impaired(sub) else 1}
+        for key, val in fields.items():
             if isinstance(sub, dict):
-                sub["score"] = score_val
-                sub["match_percentage"] = pct_val
-                sub["match_tier"] = tier_val
-                sub["compatibility"] = scored_compat
+                sub[key] = val
             else:
-                sub.score = score_val
-                sub.match_percentage = pct_val
-                sub.match_tier = tier_val
-                if hasattr(sub, "compatibility"):
-                    sub.compatibility = scored_compat
-
-            if discard_mismatches and not scored_compat.accepted:
-                if is_debug_ranking_enabled():
-                    logger.info(
-                        "[DEBUG_RANKING] DISCARDED: [%s][%s] '%s' | HardReject: %s",
-                        getattr(sub, "provider", "unknown")
-                        if not isinstance(sub, dict)
-                        else sub.get("provider", "unknown"),
-                        getattr(sub, "lang", "ara")
-                        if not isinstance(sub, dict)
-                        else sub.get("lang", "ara"),
-                        rel_name,
-                        scored_compat.hard_reject_reason,
-                    )
-                continue
-        else:
-            pop_score = get_source_popularity_percentage(rel_name)
-            if is_hash:
-                score_val = WEIGHT_EXACT_HASH + pop_score
-                pct_val = 100
-                tier_val = MatchTier.HASH
-            else:
-                score_val = pop_score
-                pct_val = pop_score
-                tier_val = MatchTier.FALLBACK
-
-            if isinstance(sub, dict):
-                sub["score"] = score_val
-                sub["match_percentage"] = pct_val
-                sub["match_tier"] = tier_val
-            else:
-                sub.score = score_val
-                sub.match_percentage = pct_val
-                sub.match_tier = tier_val
-
-        scored_subs.append(sub)
-
-    pref_langs = [normalize_to_iso639_2(lang) for lang in (preferred_languages or [])]
-    lang_order = {lang: i for i, lang in enumerate(pref_langs)} if pref_langs else {}
-
-    def _sort_key(s):
-        s_lang = normalize_to_iso639_2(
-            getattr(s, "lang", None) or (s.get("lang") if isinstance(s, dict) else "ara")
-        )
-        l_idx = lang_order.get(s_lang, 999)
-
-        compat = (
-            getattr(s, "compatibility", None) if not isinstance(s, dict) else s.get("compatibility")
-        )
-        accepted = getattr(compat, "accepted", True) if compat else (getattr(s, "score", 0) > -500)
-        acc_idx = 0 if accepted else 1
-
-        is_h = (
-            0
-            if (
-                getattr(s, "is_hash_match", False)
-                or getattr(s, "matched_by_hash", False)
-                or (compat and compat.is_hash_match)
-            )
-            else 1
-        )
-        # Deterministic MatchTier drives the order. Cached ``status == "synced"``
-        # is deliberately excluded: a stale sync artifact must never be promoted
-        # above a candidate whose release metadata actually matches. A synced
-        # candidate still floats up naturally whenever its own tokens earn a
-        # better tier.
-        raw_tier = getattr(compat, "match_tier", None) if compat else None
-        if raw_tier is None and not isinstance(s, dict):
-            raw_tier = getattr(s, "match_tier", None)
-        if raw_tier is None and isinstance(s, dict):
-            raw_tier = s.get("match_tier")
-        try:
-            tier_val = int(getattr(raw_tier, "value", raw_tier) or 0)
-        except (TypeError, ValueError):
-            tier_val = 0 if is_h == 0 else 4
-
-        sc = getattr(s, "score", None) if not isinstance(s, dict) else s.get("score", 0)
-        sc_val = sc if sc is not None else 0
-
-        r_name = (
-            getattr(s, "release_name", "") if not isinstance(s, dict) else s.get("release_name", "")
-        )
-
-        # HI preference: prefer hearing-impaired tracks when requested
-        hi_rank = 0 if (prefer_hi and _is_hearing_impaired(s)) else 1
-
-        conf = getattr(compat, "confidence", 0.5) if compat else 0.5
-        if conf == "deterministic":
-            conf_val = 1.0
-        elif isinstance(conf, int | float):
-            conf_val = float(conf)
-        else:
-            try:
-                conf_val = float(conf)
-            except (ValueError, TypeError):
-                conf_val = 0.5
-
-        pct = (
-            getattr(s, "match_percentage", None)
-            if not isinstance(s, dict)
-            else s.get("match_percentage", 0)
-        )
-        pct_val = pct if pct is not None else 0
-
-        return (
-            l_idx,
-            acc_idx,
-            is_h,
-            tier_val,
-            -pct_val,
-            -sc_val,
-            hi_rank,
-            -conf_val,
-            r_name,
-        )
-
-    ranked = sorted(scored_subs, key=_sort_key)
-
+                setattr(sub, key, val)
+        ranked.append(sub)
+    ranked.sort(key=presentation_key)
     if is_debug_ranking_enabled():
-        logger.info(
-            "[DEBUG_RANKING] === Ranking Evaluation for Target: '%s' (Total Candidates: %d) ===",
-            video_filename or "None",
-            len(ranked),
-        )
-        for idx, item in enumerate(ranked, 1):
-            rel_name = (
-                getattr(item, "release_name", "")
-                if not isinstance(item, dict)
-                else item.get("release_name", "")
-            )
-            prov = (
-                getattr(item, "provider", "unknown")
-                if not isinstance(item, dict)
-                else item.get("provider", "unknown")
-            )
-            lang = (
-                getattr(item, "lang", "ara")
-                if not isinstance(item, dict)
-                else item.get("lang", "ara")
-            )
-            compat = (
-                getattr(item, "compatibility", None)
-                if not isinstance(item, dict)
-                else item.get("compatibility")
-            )
-            tier_display = (
-                getattr(compat, "match_tier", None)
-                if compat
-                else getattr(item, "match_tier", None)
-            )
-            sc = getattr(item, "score", 0) if not isinstance(item, dict) else item.get("score", 0)
-            pct = (
-                getattr(item, "match_percentage", 0)
-                if not isinstance(item, dict)
-                else item.get("match_percentage", 0)
-            )
-
-            conf = getattr(compat, "confidence", None) if compat else None
-            accepted = getattr(compat, "accepted", True) if compat else True
-            hard_reason = getattr(compat, "hard_reject_reason", None) if compat else None
-            match_method = getattr(compat, "match_method", "filename") if compat else "unknown"
-            is_hash = bool(
-                getattr(compat, "is_hash_match", False)
-                if compat
-                else getattr(item, "is_hash_match", False)
-            )
-            source_match = getattr(compat, "source_match", None) if compat else None
-            service_match = getattr(compat, "service_match", None) if compat else None
-            ep_match = getattr(compat, "episode_match", None) if compat else None
-            se_match = getattr(compat, "season_match", None) if compat else None
-            fps_rel = getattr(compat, "fps_relation", "unknown") if compat else "unknown"
-            top_reasons = getattr(compat, "reasons", [])[:3] if (compat and compat.reasons) else []
-
-            logger.info(
-                "[DEBUG_RANKING] #%d [%s][%s] '%s' | Tier: %s | Score: %s (%d%%) | Conf: %s | Accepted: %s | Method: %s | Hash: %s | SourceMatch: %s | ServiceMatch: %s | EpMatch: %s | SeMatch: %s | FPS: %s | Reject: %s | Reasons: %s",
-                idx,
-                prov,
-                lang,
-                rel_name,
-                tier_display,
-                sc,
-                pct,
-                conf,
-                accepted,
-                match_method,
-                is_hash,
-                source_match,
-                service_match,
-                ep_match,
-                se_match,
-                fps_rel,
-                hard_reason,
-                top_reasons,
-            )
-        logger.info("[DEBUG_RANKING] === End Ranking Evaluation ===")
-    elif logger.isEnabledFor(logging.DEBUG):
-        for idx, item in enumerate(ranked, 1):
-            r_name = (
-                getattr(item, "release_name", "")
-                if not isinstance(item, dict)
-                else item.get("release_name")
-            )
-            sc = getattr(item, "score", 0) if not isinstance(item, dict) else item.get("score")
-            pct = (
-                getattr(item, "match_percentage", 0)
-                if not isinstance(item, dict)
-                else item.get("match_percentage")
-            )
-            logger.debug("Final Rank #%d: [%d%%] (Score: %d) %s", idx, pct, sc, r_name)
-
+        for position, sub in enumerate(ranked):
+            compat = value(sub, "compatibility")
+            logger.info("[DEBUG_RANKING] position=%d compatibility=%d binding=%s reasons=%s",
+                         position, compat.percentage, compat.binding, compat.reasons)
     return ranked
+
+
+def refresh_visible_compatibility(candidates, target_filename=None, **preferences):
+    """Re-score measured evidence using the original parsed metadata, then sort."""
+    from app.services.visible_compatibility import compatibility_score, exact_flag, presentation_key
+
+    if any(not isinstance(getattr(item, "compatibility", None), CompatibilityResult)
+           or item.compatibility.parsed_target is None for item in candidates):
+        return rank_subtitles(target_filename, candidates, **preferences)
+    for item in candidates:
+        compat = item.compatibility
+        core = compatibility_score(compat.parsed_target, compat.parsed_candidate,
+            exact_moviehash=exact_flag(item), evidence=item,
+            timing_variant_match=compat.timing_variant_match,
+            target_name=target_filename, candidate_name=item.release_name)
+        item.match_percentage = item.score = compat.percentage = compat.score = core.percentage
+        compat.binding, compat.evidence_confidence = core.binding.value, core.evidence_confidence
+        compat.reasons = list(core.reason_codes)
+    return sorted(candidates, key=presentation_key)
 
 
 # =======================================================

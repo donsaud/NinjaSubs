@@ -96,7 +96,7 @@ def test_hash_match_receives_absolute_priority_and_ranks_number_one():
     assert ranked[0].is_hash_match is True
     assert ranked[0].provider == "opensubtitles"
     assert ranked[0].score > ranked[1].score
-    assert ranked[0].score >= 500
+    assert ranked[0].score == ranked[0].match_percentage == 100
     assert ranked[0].match_percentage == 100
 
 
@@ -141,7 +141,7 @@ def test_hash_match_without_video_filename():
 
     ranked = rank_subtitles(video_filename=None, subtitles=[sub1, sub2])
     assert ranked[0].is_hash_match is True
-    assert ranked[0].score >= 500
+    assert ranked[0].score == ranked[0].match_percentage == 100
     assert ranked[0].match_percentage == 100
 
 
@@ -584,7 +584,7 @@ def test_tier_0_deterministic_hash_match_short_circuits_mismatched_filename():
     assert compat.confidence == "deterministic"
     assert compat.match_method == "hash"
     assert compat.is_hash_match is True
-    assert compat.reasons == ["Exact binary MovieHash match (100% sync guaranteed)"]
+    assert "moviehash_exact" in compat.reasons
 
 
 def test_tier_0_short_circuit_with_subtitle_release_object():
@@ -618,7 +618,8 @@ def test_tier_1_exact_release_group_and_source():
     assert compat.accepted is True
     assert compat.match_tier == MatchTier.EXACT
     assert compat.match_tier == 1
-    assert compat.percentage == 100
+    assert compat.binding == "strong"
+    assert 85 <= compat.percentage < 100
     assert compat.score >= 110
 
 
@@ -696,7 +697,7 @@ def test_ranking_hierarchy_orders_hash_above_exact_text_match():
     # Rank 1: Binary Hash Match
     assert ranked[0].is_hash_match is True
     assert ranked[0].match_tier == MatchTier.HASH
-    assert ranked[0].score >= 500
+    assert ranked[0].score == ranked[0].match_percentage == 100
     assert ranked[0].match_percentage == 100
 
     # Rank 2: Exact Filename Match

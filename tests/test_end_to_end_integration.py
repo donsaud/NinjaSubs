@@ -163,11 +163,10 @@ async def test_e2e_tv_house_of_the_dragon_ranking_and_rejection(client):
             assert idx_a < idx_d, "Exact WEB-DL source must rank ahead of WEBRip"
 
             # 6. Arabic candidates remain ahead of English candidates
-            ara_indices = [i for i, s in enumerate(subtitles) if s["lang"] == "ara"]
-            eng_indices = [i for i, s in enumerate(subtitles) if s["lang"] == "eng"]
-            assert max(ara_indices) < min(
-                eng_indices
-            ), "All Arabic candidates must precede English candidates"
+            scores = [int(s["title"].split("%", 1)[0][1:]) for s in subtitles]
+            assert scores == sorted(scores, reverse=True)
+            assert subtitles[0]["lang"] == "ara" and subtitles[1]["lang"] == "eng"
+
 
 
 # ============================================================================
@@ -211,7 +210,7 @@ async def test_e2e_movie_dune_part_two_ranking_and_edition_rejection(client):
             lang="ara",
         ),
         SubtitleRelease(
-            release_name="Dune Part Two Extended Arabic.srt",
+            release_name="Dune Part Two 2024 Extended 1080p BluRay Arabic.srt",
             download_url="https://provider.test/m4.srt",
             provider="subdl",
             lang="ara",
@@ -271,8 +270,8 @@ async def test_e2e_movie_dune_part_two_ranking_and_edition_rejection(client):
             if any("Extended" in t for t in returned_releases):
                 idx_m4 = next(i for i, s in enumerate(subtitles) if "Extended" in get_release_name(s))
                 assert (
-                    idx_m4 == len(subtitles) - 1
-                ), "Extended cut subtitle must rank at the bottom on unmarked target"
+                    idx_m4 > idx_m1
+                ), "Missing target edition stays below a known source match"
 
             # Exact match with matcher output order and title formatting
             assert len(subtitles) == len(expected_ranked)
@@ -446,7 +445,7 @@ async def test_e2e_exact_hash_priority_over_filename_match(client):
             # Hash match must be rank 1 (index 0) with the Exact Hash label
             assert subtitles[0]["title"].startswith("[100%] [OpenSubtitles] ")
             assert get_release_name(subtitles[0]) == "Movie.Different.Filename.srt"
-            assert subtitles[1]["title"] == "[100%] [SubDL] Movie.2024.1080p.BluRay.x264-FLUX"
+            assert subtitles[1]["title"] == "[91%] [SubDL] Movie.2024.1080p.BluRay.x264-FLUX"
             assert get_release_name(subtitles[1]) == "Movie.2024.1080p.BluRay.x264-FLUX.srt"
 
 
@@ -509,10 +508,10 @@ async def test_e2e_language_preference_grouping(client):
             assert len(subtitles) == 2
 
             # Index 0 is Arabic, Index 1 is English
-            assert subtitles[0]["lang"] == "ara"
-            assert subtitles[1]["lang"] == "eng"
-            assert "HDTV" in get_release_name(subtitles[0])
-            assert "Remux" in get_release_name(subtitles[1])
+            assert subtitles[0]["lang"] == "eng"
+            assert subtitles[1]["lang"] == "ara"
+            assert "Remux" in get_release_name(subtitles[0])
+            assert "HDTV" in get_release_name(subtitles[1])
             assert re.match(r"^\[\d+%\] \[(?:SubDL|SubSource|OpenSubtitles)\] .+$", subtitles[0]["title"])
             assert re.match(r"^\[\d+%\] \[(?:SubDL|SubSource|OpenSubtitles)\] .+$", subtitles[1]["title"])
 

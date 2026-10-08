@@ -128,10 +128,11 @@ def test_e2e_movie_ranking_is_strictly_descending():
     )
     _assert_strictly_descending(ranked)
     assert ranked[0].release_name.endswith("H.265-FLUX.srt")
-    assert ranked[0].match_percentage == 100
+    assert 25 <= ranked[0].match_percentage < 100
     # The Theatrical cut conflicts with the (unmarked) stream and scores 0%.
     theatrical = next(s for s in ranked if "Theatrical" in s.release_name)
-    assert theatrical.match_percentage == 0
+    assert theatrical.compatibility.binding == "unknown"
+    assert 25 <= theatrical.match_percentage <= 64
     for sub in ranked:
         assert sub.lang == "ara" and normalize_to_iso639_2(sub.lang) == "ara"
 
@@ -142,7 +143,7 @@ def test_e2e_tv_ranking_is_strictly_descending():
     )
     _assert_strictly_descending(ranked)
     assert ranked[0].release_name.endswith("MAX.WEB-DL.H.264-FLUX.srt")
-    assert ranked[0].match_percentage == 100
+    assert 25 <= ranked[0].match_percentage < 100
     # Wrong episode/season candidates are filtered out of the response.
     assert not any("S02E03" in s.release_name or "S01E04" in s.release_name for s in ranked)
     for sub in ranked:

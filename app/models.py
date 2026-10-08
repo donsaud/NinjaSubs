@@ -115,20 +115,22 @@ class SubtitleRelease(BaseModel):
     uploader: str = ""  # Subtitle uploader/author username, when provided upstream
 
     # --- synchronization evidence (search-time) ------------------------- #
-    # These are separate from match_percentage, which continues to mean exactly
-    # what it always has: content compatibility. A high match_percentage never
+    # State claims remain separate from the binding-aware Compatibility Score.
+    # Only scoped trusted evidence can improve that score within its band. It never
     # implies synchronization; these fields carry that separate claim, and both
     # default to "no claim made" rather than to anything positive.
     sync_state: str | None = None  # e.g. "verified_synced" / "probable_sync"
     sync_verification: str | None = None  # "verified" / "cached" / "predicted" / "unknown"
+    sync_evidence_trusted: StrictBool = False
+    sync_target_binding: str | None = None
+    compatibility_quality_rank: int = 0
+    compatibility_hi_rank: int = 1
     sync_confidence: float | None = None
     sync_reasons: list[str] = Field(default_factory=list)
-    # Position assigned by the existing matcher, captured before any
-    # sync-evidence re-sort so content ordering has a single source of truth.
+    # Initial compatibility order retained for audit diagnostics only.
     sync_base_rank: int | None = None
     # Position of this candidate's language within the user's preferred list.
-    # User language preference is an explicit choice, so it outranks any
-    # synchronization evidence and is never overridden by it.
+    # Language preference breaks equal displayed Compatibility Scores.
     sync_lang_rank: int | None = None
 
     @model_validator(mode="after")

@@ -389,7 +389,7 @@ def test_sync_evidence_outranks_a_better_match_tier():
     assert ordered[0] is weak_but_verified
 
 
-def test_match_tier_still_decides_within_equal_sync_evidence():
+def test_displayed_score_overrides_legacy_tier_and_base_rank():
     """Content ordering defers to the matcher's own rank, not a second score.
 
     ``sync_base_rank`` is where the matcher's MatchTier/confidence/score
@@ -405,23 +405,24 @@ def test_match_tier_still_decides_within_equal_sync_evidence():
     )
     fallback.sync_base_rank = 1
     ordered = order_candidates([fallback, hash_match])
-    assert ordered[0] is hash_match
+    assert ordered[0] is fallback
 
 
-def test_missing_claim_never_outranks_a_real_claim():
+def test_raw_state_claim_does_not_override_score_ties():
     no_claim = _with_sync("A.srt", None, None, match_tier=MatchTier.CLOSE)
     probable = _with_sync(
         "B.srt", "probable_sync", "verified", match_tier=MatchTier.FALLBACK
     )
     ordered = order_candidates([no_claim, probable])
-    assert ordered[0] is probable
+    assert ordered[0] is no_claim
 
 
-def test_rejected_sorts_last():
+def test_ordering_preserves_rejected_state():
     rejected = _with_sync("A.srt", "rejected", "verified", match_tier=MatchTier.HASH)
     unverified = _with_sync("B.srt", "unverified", "unknown", match_tier=MatchTier.FALLBACK)
     ordered = order_candidates([rejected, unverified])
-    assert ordered[-1] is rejected
+    assert ordered[0] is rejected
+    assert rejected.sync_state == "rejected"
 
 
 def test_displayed_score_semantics_are_untouched():

@@ -61,7 +61,6 @@ from app.services.sync.matching import (
     prefer_meaningful_release_name,
 )
 from app.services.sync.orchestrator import SyncOrchestrator
-from app.services.sync.ordering import order_candidates
 from app.services.sync.predictor import SyncPredictor
 from app.services.sync_cache import SyncCache
 from app.services.sync_service import SubtitleSyncService
@@ -873,11 +872,10 @@ async def _fetch_subtitles_handler(
         # Capture the matcher's ordering before any sync-evidence re-sort, so
         # content order keeps a single source of truth.
         rel.sync_base_rank = position
-        rel_lang = str(getattr(rel, "lang", "") or "").lower()
-        # Explicit user language preference. This ranks ahead of every
-        # synchronization signal and is never reordered by one.
+        rel_lang = normalize_to_iso639_2(str(getattr(rel, "lang", "") or ""))
+        # Language preference breaks equal Compatibility Scores.
         try:
-            rel.sync_lang_rank = prefs.languages.index(rel_lang)
+            rel.sync_lang_rank = [normalize_to_iso639_2(lang) for lang in prefs.languages].index(rel_lang)
         except ValueError:
             rel.sync_lang_rank = len(prefs.languages)
 
@@ -913,6 +911,8 @@ async def _fetch_subtitles_handler(
             _sync_cache, verdict_fingerprint, rel_sub_id, rel
         )
         if verdict:
+            rel.sync_evidence_trusted = verdict.get("target_binding") in {"exact", "strong"}
+            rel.sync_target_binding = verdict.get("target_binding")
             rel.sync_state = verdict.get("sync_state")
             rel.sync_verification = "cached"
             rel.sync_confidence = verdict.get("sync_confidence")
@@ -963,10 +963,14 @@ async def _fetch_subtitles_handler(
                 )
             )
 
-    # Ordering: sync evidence first, then the matcher's own order. With no
-    # evidence anywhere, every key above is equal and the list is unchanged.
+    # Refresh the same Compatibility Score with scoped measured evidence.
+    # The displayed integer remains the primary ordering key.
     original_order = [rel.release_name for rel in ranked_releases]
-    ranked_releases = order_candidates(ranked_releases)
+    from app.services.subtitle_matcher import refresh_visible_compatibility
+
+    ranked_releases = refresh_visible_compatibility(ranked_releases, target_filename,
+        preferred_languages=prefs.languages, season=season, episode=episode,
+        hi_preference=getattr(prefs, "hi_preference", "neutral"))
     sync_aware_order = [rel.release_name for rel in ranked_releases]
     # Record only whether the visible order moved, and why - never re-rank from it.
     if original_order != sync_aware_order:

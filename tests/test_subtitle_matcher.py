@@ -60,7 +60,8 @@ def test_hmax_flux_vs_amzn_ntb_ranking():
     assert len(ranked) == 2
     assert ranked[0].release_name == sub_a.release_name
     assert ranked[1].release_name == sub_b.release_name
-    assert ranked[0].score > 130
+    assert ranked[0].score == ranked[0].match_percentage
+    assert ranked[0].score > ranked[1].score
 
 
 def test_bluray_vs_webrip_movie_ranking():
@@ -334,8 +335,8 @@ def test_multi_language_ranking():
     )
     assert len(ranked) == 4
     assert ranked[0].lang == "ara" and ranked[0].release_name == sub_ar_best.release_name
-    assert ranked[1].lang == "ara" and ranked[1].release_name == sub_ar_low.release_name
-    assert ranked[2].lang == "eng" and ranked[2].release_name == sub_en_best.release_name
+    assert ranked[1] is sub_en_best
+    assert ranked[2] is sub_ar_low
     assert ranked[3].lang == "eng" and ranked[3].release_name == sub_en_low.release_name
 
 

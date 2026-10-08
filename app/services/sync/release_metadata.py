@@ -21,7 +21,7 @@ from app.services.sync.release_knowledge import (
 )
 
 SCHEMA_VERSION = "1"
-PARSER_VERSION = "1"
+PARSER_VERSION = "2"
 GUESSIT_VERSION = version("guessit")
 SEMANTIC_VERSION = f"release-{SCHEMA_VERSION}-{PARSER_VERSION}-{KNOWLEDGE_VERSION}-{KNOWLEDGE_FINGERPRINT}-{GUESSIT_VERSION}"
 MAX_NAME_LENGTH = 2048
@@ -31,7 +31,7 @@ _TECH = re.compile(r"\b(?:2160p|1080[pi]|720p|480p|4k|blu ?ray|bd ?rip|br ?rip|w
 _RESOLUTION = re.compile(r"\b(2160p|1080[pi]|720p|480p|4k)\b", re.I)
 _CODEC = re.compile(r"\b(x26[45]|h ?26[45]|hevc|avc|av1|xvid)\b", re.I)
 _BITS = re.compile(r"\b(8|10|12) ?bit\b", re.I)
-_GROUP = re.compile(r"-([a-z0-9][a-z0-9-]{1,40})(?:\.[a-z]{2,3})?$", re.I)
+_GROUP = re.compile(r"-([a-z0-9][a-z0-9_-]{1,40})(?:\.[a-z]{2,3})?$", re.I)
 _TECHNICAL_DASH_PAIRS = (("web", "dl"), ("bd", "rip"), ("br", "rip"),
                          ("dts", "hd"), ("h", "264"), ("h", "265"),
                          ("e", "ac"), ("e-ac", "3"), ("ac", "3"))
@@ -124,6 +124,18 @@ def _parse_cached(base: str, semantic_version: str) -> ReleaseMetadata:
     region = text[first.start() if first is tech_match else first.end():].strip() if first else ""
     evidence = []
     guess = None
+    if first is tech_match and title:
+        guess = guess_metadata(base)
+        guessed_title = guess.get("title")
+        # For yearless structured releases, a recognized edition after a
+        # nonempty GuessIt title establishes the metadata delimiter. Whole
+        # titles such as Final Cut remain titles; no free substring scan.
+        if guess.get("edition") and isinstance(guessed_title, str):
+            title_words = words(guessed_title)
+            if title_words and title.startswith(title_words + " "):
+                region = text[len(title_words):].strip()
+                title = title_words
+                evidence.append(Evidence("title", title[:160], "guessit", "guessit.edition_context", "medium"))
     region_tech = _TECH.search(region)
     if episode_match and region_tech and any(
         pattern.search(region[:region_tech.start()])
@@ -163,12 +175,12 @@ def _parse_cached(base: str, semantic_version: str) -> ReleaseMetadata:
     # not need GuessIt. Ambiguous/incomplete names are locally enriched once.
     if not (title and (year or season is not None) and tech_match):
         guess = guess if guess is not None else guess_metadata(base)
-        if not title and isinstance(guess.get("title"), str):
+        if (not title or (episode_match is None and year is None and isinstance(guess.get("episode"), int))) and isinstance(guess.get("title"), str):
             title = words(guess["title"])
         if (year is None and isinstance(guess.get("year"), int)
                 and str(guess["year"]) not in (title or "").split()):
             year = guess["year"]
-        if season is None and isinstance(guess.get("season"), int):
+        if season is None and isinstance(guess.get("season"), int) and guess["season"] != year:
             season = guess["season"]
         if episode is None and isinstance(guess.get("episode"), int):
             episode = guess["episode"]
@@ -190,6 +202,17 @@ def _parse_cached(base: str, semantic_version: str) -> ReleaseMetadata:
         parenthetical = _PAREN.search(stem)
         if parenthetical and _RESOLUTION.search(words(parenthetical.group(1))) and _CODEC.search(words(parenthetical.group(1))):
             group = parenthetical.group(1).split()[-1]
+    if not group and first and tech_match:
+        # Reuse cached enrichment for conventional whitespace/dot group suffixes.
+        # Only an explicit GuessIt release_group at the filename suffix counts;
+        # technical/edition tokens remain excluded by the existing guard.
+        guess = guess if guess is not None else guess_metadata(base)
+        guessed_group = guess.get("release_group")
+        if (isinstance(guessed_group, str) and 1 < len(guessed_group) <= 40
+                and words(stem).endswith(" " + words(guessed_group))
+                and not _NON_GROUP.fullmatch(guessed_group)):
+            group = guessed_group
+            evidence.append(Evidence("release_group", group, "guessit", "guessit.group_suffix", "medium"))
     if group and _NON_GROUP.fullmatch(group):
         group = None
     def tags(category: str) -> tuple[str, ...]:

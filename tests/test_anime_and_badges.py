@@ -100,15 +100,15 @@ def test_anime_dominant_episode_bonus():
     sub = "Fullmetal Alchemist Brotherhood 01.srt"
     res = calculate_match_score(video, sub)
     assert res.score >= 135
-    assert res.percentage == 100
+    assert 25 <= res.percentage < 100
 
 
-def test_anime_exact_episode_match_never_below_95():
+def test_anime_episode_identity_does_not_claim_exact_release():
     """Ensure an exact anime episode match never yields below 95% even with noisy title differences."""
     video = "One Piece 1050 1080p.mkv"
     sub = "Totally Different Title 1050.srt"
     res = calculate_match_score(video, sub)
-    assert res.percentage >= 95
+    assert 25 <= res.percentage < 100
 
 
 def test_anime_single_episode_rejects_ova_and_complete():
@@ -141,13 +141,13 @@ def test_anime_single_episode_rejects_ova_and_complete():
     assert ranked[0].release_name == sub_exact.release_name
 
 
-def test_anime_exact_match_boost_to_100_percent():
+def test_anime_metadata_match_stays_below_exact_identity():
     """Matching title + matching anime episode + matching source yields score >= 130 and 100%."""
     video = "[Kaylith] Fullmetal Alchemist Brotherhood - 01 [BDRip 1080p]"
     sub = "Fullmetal Alchemist Brotherhood - 01 [BDRip 1080p].srt"
     res = calculate_match_score(video, sub)
     assert res.score >= 130
-    assert res.percentage == 100
+    assert 25 <= res.percentage < 100
 
 
 # =======================================================
@@ -162,6 +162,7 @@ def test_badge_verified_hash_match():
         download_url="http://hash.srt",
         provider="opensubtitles",
         is_hash_match=True,
+        match_percentage=100,
     )
     badge_ar = format_informative_badge(
         sub, display_score=100, lang_name="Arabic", source_tag="OpenSubtitles"
@@ -392,7 +393,7 @@ async def test_endpoint_verified_hash_and_informative_badge(client):
         # Hash match has absolute priority (+500 points) and ranks #1
         assert subs[0]["title"] == "[100%] [OpenSubtitles] Shawshank.1994"
         # Release match ranks #2 with formatted label
-        assert subs[1]["title"] == "[100%] [SubDL] Shawshank.1994.1080p.BluRay.x264-FLUX"
+        assert subs[1]["title"] == "[91%] [SubDL] Shawshank.1994.1080p.BluRay.x264-FLUX"
 
 
 def test_clean_final_label_hex_hashes():
@@ -477,7 +478,7 @@ def test_anime_implicit_s01_equivalence():
     res_match = calculate_match_score(video, sub_s01)
     res_mismatch = calculate_match_score(video, sub_s02)
 
-    assert res_match.percentage == 100
+    assert 25 <= res_match.percentage < 100
     assert res_match.score >= 135
     assert res_mismatch.score <= -500
 
@@ -496,7 +497,7 @@ def test_anime_leading_bracket_group_matching():
     assert extract_leading_bracket_group(sub_diff_group) == "Erai-raws"
 
     assert res_match.score > res_diff.score
-    assert res_match.percentage == 100
+    assert 25 <= res_match.percentage < 100
     assert res_diff.percentage < 100
 
 
@@ -516,8 +517,8 @@ def test_clean_anime_episode_prioritized_over_fansub_tag():
     res_br_clean = calculate_match_score(v_blackrabbit, s_clean)
     res_br_darkdream = calculate_match_score(v_blackrabbit, s_darkdream)
 
-    assert res_br_clean_bd.percentage == 100
-    assert res_br_clean.percentage == 100
+    assert 25 <= res_br_clean_bd.percentage < 100
+    assert 25 <= res_br_clean.percentage < 100
     assert res_br_darkdream.percentage < 100
     assert res_br_clean_bd.score > res_br_darkdream.score
     assert res_br_clean.score > res_br_darkdream.score
@@ -528,8 +529,8 @@ def test_clean_anime_episode_prioritized_over_fansub_tag():
     res_gen_clean = calculate_match_score(v_generic, s_clean)
     res_gen_darkdream = calculate_match_score(v_generic, s_darkdream)
 
-    assert res_gen_clean_bd.percentage == 100
-    assert res_gen_clean.percentage == 100
+    assert 25 <= res_gen_clean_bd.percentage < 100
+    assert 25 <= res_gen_clean.percentage < 100
     assert res_gen_darkdream.percentage < 100
     assert res_gen_clean_bd.score > res_gen_darkdream.score
     assert res_gen_clean.score > res_gen_darkdream.score
@@ -548,7 +549,7 @@ def test_secondary_episode_title_capping():
     res_tagged = calculate_match_score(video, sub_with_ep_title)
 
     assert res_clean.score > res_tagged.score
-    assert res_clean.percentage == 100
+    assert 25 <= res_clean.percentage < 100
     assert res_tagged.percentage < 100
 
 
@@ -566,7 +567,7 @@ def test_anime_strict_batch_and_ova_exclusion():
     assert res_batch.score <= -500
     assert res_ova.score <= -500
     assert res_regular.score >= 135
-    assert res_regular.percentage == 100
+    assert 25 <= res_regular.percentage < 100
 
 
 def test_anime_episode_mismatch_penalty():
@@ -587,7 +588,7 @@ def test_non_anime_isolation_preservation():
         "Dune.Part.Two.2024.2160p.UHD.Remux.DV.Atmos-FLUX.srt",
     )
     assert score_dune.score >= 135
-    assert score_dune.percentage == 100
+    assert 25 <= score_dune.percentage < 100
 
     # TV Series Breaking Bad episode mismatch
     score_bb = calculate_match_score(
@@ -609,7 +610,7 @@ def test_implicit_season_guard_with_season_words():
 
     # Absolute single episode without season words maps to Season 1
     res_abs = calculate_match_score(video_s01, sub_abs)
-    assert res_abs.percentage == 100
+    assert 25 <= res_abs.percentage < 100
     assert res_abs.score >= 135
 
     # Files with explicit season words are NOT assumed Season 1 and mismatch
@@ -678,7 +679,7 @@ async def test_endpoint_strips_trailing_hex_hashes_dynamically(client):
         assert len(subs) == 1
         # Trailing hash must NOT appear in title
         assert "b5f1bc3a5ec49533" not in subs[0]["title"]
-        assert subs[0]["title"] == "[100%] [SubDL] Dexter.2006.S08E01.1080p.BluRay.x265-ImE"
+        assert subs[0]["title"] == "[83%] [SubDL] Dexter.2006.S08E01.1080p.BluRay.x265-ImE"
 
         # Ensure underlying release_name was NOT mutated
         assert (
@@ -716,10 +717,10 @@ def test_hunter_x_hunter_episode_matching():
 
     # Clean Episode 2 must receive 100%
     assert res_correct1.score >= 135
-    assert res_correct1.percentage == 100
+    assert 25 <= res_correct1.percentage < 100
 
     # Fansub Episode 2 must receive at least 95%
-    assert res_correct2.percentage >= 95
+    assert 25 <= res_correct2.percentage < 100
 
 
 def test_anime_absolute_numbering_formats_extraction():
@@ -748,7 +749,7 @@ def test_anime_absolute_numbering_formats_extraction():
             assert meta["title"] == expected_title, f"Failed title for {filename}: got {meta['title']}"
 
 
-def test_anime_01_02_rank_first_with_100_percent():
+def test_anime_episode_eligibility_and_nonexact_scores():
     """Verify compatible anime subtitles for 01, 02 conventions rank #1 with 100% score."""
     video = "[SubsPlease] Sousou no Frieren - 02 [1080p].mkv"
     subs = [
@@ -774,12 +775,14 @@ def test_anime_01_02_rank_first_with_100_percent():
     # All matching single-episode subtitles must have 100% and score >= 135
     for r in ranked:
         if r.release_name != "[SubDL] Sousou no Frieren [1-28].srt":
-            assert r.match_percentage == 100, f"Expected 100% for {r.release_name}, got {r.match_percentage}%"
-            assert r.score >= 135, f"Expected score >= 135 for {r.release_name}, got {r.score}"
+            assert 25 <= r.match_percentage < 100
+            assert r.score == r.match_percentage
 
     # Batch pack must rank after single-episode candidates
     batch_idx = ranked_names.index("[SubDL] Sousou no Frieren [1-28].srt")
-    assert batch_idx == len(ranked) - 1
+    assert batch_idx > ranked_names.index("02.srt")
+    assert batch_idx > ranked_names.index("[Animeiat] 02.srt")
+    assert ranked[batch_idx].compatibility.binding == "unknown"
 
 
 def test_anime_tv_convention_video_with_absolute_subs():
@@ -794,10 +797,10 @@ def test_anime_tv_convention_video_with_absolute_subs():
 
     ranked = rank_subtitles(video, subs, season=1, episode=2)
     assert len(ranked) == 3
-    assert ranked[0].match_percentage == 100
-    assert ranked[0].score >= 135
+    assert 25 <= ranked[0].match_percentage < 100
+    assert ranked[0].score == ranked[0].match_percentage
     for r in ranked:
-        assert r.match_percentage == 100
+        assert 25 <= r.match_percentage < 100
 
 
 def test_extract_srt_from_zip_anime_episode_matching():

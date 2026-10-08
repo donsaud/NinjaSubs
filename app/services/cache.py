@@ -84,7 +84,10 @@ def build_cache_key(
     k2 = hashlib.sha256((subsource_key or "").strip().encode("utf-8")).hexdigest()[:8]
     k3 = hashlib.sha256((opensubtitles_key or "").strip().encode("utf-8")).hexdigest()[:8]
 
+    from app.services.visible_compatibility import VISIBLE_COMPATIBILITY_VERSION
+
     parts = [
+        VISIBLE_COMPATIBILITY_VERSION,
         str(media_type or "").strip().lower(),
         clean_id,
         s_str,

@@ -552,7 +552,7 @@ async def test_endpoint_respects_badge_parts_uploader(client):
         subs = resp.json()["subtitles"]
         assert len(subs) == 1
         assert subs[0]["title"] == (
-            "[100%] Shawshank.1994.1080p.BluRay.x264-FLUX (by subsmaster)"
+            "[91%] Shawshank.1994.1080p.BluRay.x264-FLUX (by subsmaster)"
         )
 
 

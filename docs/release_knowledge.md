@@ -102,8 +102,8 @@ patterns compile once. Conventional year/episode plus technical releases use
 the local fast path; ambiguous/incomplete names call cached GuessIt enrichment.
 No new unbounded request tasks or remote metadata work were added.
 
-Sync verdict engine is now **5**, payload/resolution namespace
-**v8-release-knowledge-v1**. This is an intentional semantic invalidation:
+Sync verdict engine is now **6**, payload/resolution namespace
+**v9-release-context-v2**. This is an intentional semantic invalidation:
 title words previously mistaken for edition tags must not retain old verified
 trust. No existing cache or REAL evidence file is deleted or rewritten. Capture
 V2 subtitle parser fingerprints are separate and unchanged. Future semantic
@@ -143,3 +143,75 @@ titles can remain UNKNOWN; multi-episode ranges and additional vocabulary need
 explicit future rules/tests. No release metadata system proves identical cuts
 without independent alignment evidence. Boundary remains shadow-only and its
 promotion evidence gate is unchanged.
+
+
+## User-visible Compatibility Score
+
+The existing percentage and primary subtitle-list order now use one local engine:
+`app/services/visible_compatibility.py::compatibility_score`. `rank_subtitles`
+applies identity/episode/anime eligibility and existing deduplication, then scores
+cached ReleaseMetadata. After scoped cache verdict enrichment,
+`refresh_visible_compatibility` reuses the parsed objects and the same engine.
+`presentation_key` orders the displayed integer descending; the badge formatter
+only formats it. No second verification ranking can override that percentage.
+The legacy additive execution score remains for existing reference execution
+consumers, separate from the visible score; it is not a visible sorting key.
+
+This is an ordinal Compatibility Score, not a calibrated sync probability.
+The non-overlapping bands are EXACT 100, STRONG 85–99, WEAK 65–84,
+UNKNOWN 25–64, CONFLICT 0–24. The old system normalized additive points by 135,
+assigned 100 for same-group matches, and sorted on language/tier/sync state before
+percentage. The bands replace that unsafe accumulation: exact proof is isolated;
+strong metadata has limited verification headroom; partial positive evidence
+cannot catch strong identity; missing evidence stays above proven contradiction.
+The band boundaries are policy caps, not empirical probability estimates.
+
+100 requires literal true pre-existing exact MovieHash provenance. Filename,
+group, excellent alignment, or a transformed-output badge cannot manufacture it.
+Current visible candidates have no embedded extraction provenance. Target binding
+is authoritative: conflicting exclusive cuts score 10 (identity conflicts 0),
+regardless of group/resolution/codec. Missing fields add no penalty. Differing
+technical encodes add no contradiction penalty. Unsupported master differences
+remain UNKNOWN rather than inventing new conflict rules.
+
+Within a band, shared cut/label/presentation/master evidence has hierarchical
+priority, followed by compatible source/group and identity. Technical matches have
+at most two points (one in STRONG); resolution/codec/HDR/audio cannot compensate
+for cuts. Existing REPACK/PROPER alignment contributes one point. Trusted scoped
+verified/cached target-bound EXACT/STRONG evidence adds at most three points
+within the existing band. Prediction, unverified transforms, failure/fallback,
+and the Large Offset delivery exception add nothing. Alignment confidence and
+identity confidence remain distinct.
+
+Equal displayed scores use configured language order (normalized language codes),
+HI preference, existing micro-rip/single-episode/technical quality signals,
+release name, provider and download identity. Provider is only deterministic tie identity, never compatibility
+credit. HI exclusion remains eligibility; HI preference and language preference
+break ties rather than overriding a better score. Enabled-provider/language
+filtering is retained upstream. Existing explicit cut-conflict eligibility filtering is preserved; diagnostic
+requests that retain mismatches receive the low CONFLICT score.
+All candidates are ranked before serialization;
+there is no separate visible-result truncation in the current handler.
+
+Aggregation keys include `visible-compatibility-v1` and the ReleaseMetadata
+semantic version to prevent old scores from being reused. Parser version 2 adds
+cached GuessIt edition context only for structured yearless filenames such as
+`Movie.Directors.Cut.2160p...`; whole titles such as `Final.Cut` remain protected.
+Because this affects binding input, verdict engine 6 and payload/resolution
+namespace v9 prevent older interpretation-dependent results retaining trust.
+Parser v2 also retains GuessIt group suffix enrichment (including normalized
+underscore groups), resolves anime title context, and prevents a guessed release
+year from being interpreted as a season. Multi-episode visible projections are
+explicitly ambiguous rather than falsely claiming one exact episode.
+Raw provider caches and subtitle parser/Capture V2 fingerprints are unchanged.
+No cache or REAL artifact is deleted or rewritten.
+
+Calibration examples are in `tests/test_visible_compatibility.py`: Criterion
+96/94 > generic PublicHD 37 > WEB 29; Whiplash/FraMeSToR disc 90 without hash;
+same-group Director's/Theatrical conflict 10. These are illustrative policy
+indices and may evolve only with versioned evidence-backed semantics.
+Future signals must belong to eligibility, compatibility, preference/quality,
+or verified evidence explicitly; add band/monotonicity/trust tests and review
+cache versions. Never add a provider-name or download-time bonus to compatibility.
+Run the existing offline benchmark to measure visible cold/warm ranking, cached
+refresh, final sorting and GuessIt invocation counts at 10/50/100 candidates.

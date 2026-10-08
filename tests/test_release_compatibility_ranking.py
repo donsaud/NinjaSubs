@@ -1,13 +1,7 @@
-"""Release compatibility must outweigh the generic percentage.
+"""Release compatibility percentages and visible ordering agree.
 
-A micro-rip rendition carries a high generic match score simply by sharing the
-title, the year and a source token. Those tests are about *release
-compatibility*, and the tier hierarchy already exists to express that; these
-cases pin the precedence so a lower percentage can never outrank a materially
-more compatible release.
-
-None of this rejects anything. A micro-rip stays in the result set and is still
-returned when nothing better exists -- that is asserted explicitly below.
+Micro-rip quality breaks equal scores without excluding a selectable subtitle.
+Execution diagnostics retain their existing tier semantics independently.
 """
 
 from __future__ import annotations
@@ -51,8 +45,8 @@ def test_uhd_target_prefers_compatible_bluray_over_microrip():
     assert order.index(UHD_ALT_GROUP) < order.index(YIFY)
     assert order.index(BLURAY_1080) < order.index(YIFY)
     assert order.index(BLURAY_1080) < order.index(RARBG)
-    # And the inversion is real, not vacuous: percentage alone would disagree.
-    assert _pct(UHD_TARGET, YIFY) > _pct(UHD_TARGET, UHD_ALT_GROUP)
+    # The displayed percentage must agree with this semantic direction.
+    assert _pct(UHD_TARGET, YIFY) <= _pct(UHD_TARGET, UHD_ALT_GROUP)
 
 
 def test_microrip_is_demoted_one_tier_not_rejected():

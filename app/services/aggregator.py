@@ -134,13 +134,9 @@ def format_informative_badge(
     if pct is None:
         pct = getattr(release, "score", 0)
 
-    try:
-        pct_int = int(round(float(pct))) if pct is not None else 0
-    except (ValueError, TypeError):
-        pct_int = 0
+    from app.services.visible_compatibility import displayed_score
 
-    if getattr(release, "is_hash_match", False):
-        pct_int = 100
+    pct_int = displayed_score(pct)
 
     prov = (getattr(release, "provider", None) or source_tag or "SubDL").strip().lower()
     if prov == "subsource":

@@ -243,7 +243,7 @@ async def test_subtitles_fallback_when_one_provider_fails(client):
             assert resp.status_code == 200
             subs = resp.json()["subtitles"]
             assert len(subs) == 1
-            assert subs[0]["title"] == "[100%] [SubSource] Breaking.Bad.S05E16.720p.HDTV"
+            assert subs[0]["title"] == "[29%] [SubSource] Breaking.Bad.S05E16.720p.HDTV"
 
 
 @pytest.mark.asyncio
@@ -426,7 +426,7 @@ async def test_subtitles_endpoint_with_extra_path(client):
             assert resp.status_code == 200
             data = resp.json()
             assert len(data["subtitles"]) == 1
-            assert data["subtitles"][0]["title"] == "[100%] [SubDL] Series.S01E01.720p"
+            assert data["subtitles"][0]["title"] == "[29%] [SubDL] Series.S01E01.720p"
 
 
 def test_health_endpoint(client):
@@ -708,13 +708,13 @@ async def test_standardized_subtitle_response(client):
             sub = resp.json()["subtitles"][0]
             assert sub["lang"] == "ara"
             assert "id" in sub and len(sub["id"]) > 0
-            assert sub["title"] == "[55%] [SubDL] Gladiator.2000.1080p.BluRay"
+            assert sub["title"] == "[25%] [SubDL] Gladiator.2000.1080p.BluRay"
 
             # Direct server-wide route
             resp_direct = client.get("/subtitles/movie/tt0172495.json")
             sub_direct = resp_direct.json()["subtitles"][0]
             assert sub_direct["lang"] == "ara"
-            assert sub_direct["title"] == "[55%] [SubDL] Gladiator.2000.1080p.BluRay"
+            assert sub_direct["title"] == "[25%] [SubDL] Gladiator.2000.1080p.BluRay"
 
 
 @pytest.mark.asyncio
@@ -768,14 +768,14 @@ async def test_release_matching_scoring_and_ranking_with_extra(client):
 
             # FLUX 2160p BluRay should be ranked first at index 0 with score = 100%
             best_match = subs[0]
-            assert best_match["title"] == "[100%] [SubDL] Dune.Part.Two.2024.2160p.UHD.BluRay.x265-FLUX"
+            assert best_match["title"] == "[79%] [SubDL] Dune.Part.Two.2024.2160p.UHD.BluRay.x265-FLUX"
             assert best_match["lang"] == "ara"
 
             # Subsource WEB-DL item
-            assert subs[1]["title"] == "[0%] [SubSource] Dune.Part.Two.2024.1080p.WEB-DL.x264-NTb"
+            assert subs[1]["title"] == "[29%] [SubSource] Dune.Part.Two.2024.1080p.WEB-DL.x264-NTb"
 
             # HDTV with penalty should be ranked last
-            assert subs[2]["title"] == "[0%] [SubDL] Dune.Part.Two.2024.720p.HDTV.x264-AVS"
+            assert subs[2]["title"] == "[29%] [SubDL] Dune.Part.Two.2024.720p.HDTV.x264-AVS"
 
 
 @pytest.mark.asyncio
@@ -846,14 +846,14 @@ async def test_multi_language_sorting_and_deduplication(client):
 
             # Index 0: Top match for Arabic (primary language)
             assert subs[0]["lang"] == "ara"
-            assert subs[0]["title"] == "[100%] [SubDL] Oppenheimer.2023.1080p.BluRay.x264-FLUX"
+            assert subs[0]["title"] == "[91%] [SubDL] Oppenheimer.2023.1080p.BluRay.x264-FLUX"
 
             # Index 1: Lower match for Arabic
-            assert subs[1]["lang"] == "ara"
+            assert subs[1]["lang"] == "eng"
 
             # Index 2: Top match for English (secondary category head)
-            assert subs[2]["lang"] == "eng"
-            assert subs[2]["title"] == "[100%] [SubSource] Oppenheimer.2023.1080p.BluRay.x264-FLUX"
+            assert subs[2]["lang"] == "ara"
+            assert subs[1]["title"] == "[91%] [SubSource] Oppenheimer.2023.1080p.BluRay.x264-FLUX"
 
             # Index 3: Lower match for English
             assert subs[3]["lang"] == "eng"

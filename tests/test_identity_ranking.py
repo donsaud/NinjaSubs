@@ -1,20 +1,7 @@
-"""Same-video identity as an explicit ranking dimension.
+"""Identity provenance and score-first presentation regression tests.
 
-``_identity_rank`` reads the existing ``SubtitleRelease.is_hash_match`` field and
-nothing else. That field is set in exactly one place -- ``OpenSubtitlesProvider``,
-and only when the request carried a ``moviehash`` AND OpenSubtitles returned
-``attributes.moviehash_match is True`` -- and it is a ``StrictBool``, so a truthy
-string cannot reach it.
-
-The ordering it was added to is strict lexicographic, and the position matters:
-identity sits BELOW synchronization state and evidence, so a hash-exact subtitle
-with unverified timing never outranks a hashless subtitle the verifier actually
-confirmed. It sits ABOVE sync confidence, compatibility percentage and
-provider/release, because among candidates with comparable timing evidence, proof
-that the subtitle belongs to THIS video is the next strongest discriminator.
-
-These tests use the project's real ``SubtitleRelease`` and the existing ordering
-helpers rather than a parallel fake model, so they exercise the production path.
+Fixtures provide the authoritative displayed scores. Ordering consumes those
+scores without inferring hash identity or independently promoting sync states.
 """
 
 from __future__ import annotations
@@ -58,8 +45,9 @@ def _release(
         accepted=True, match_tier=tier, match_method="filename"
     )
     release.match_tier = tier
-    if score is not None:
-        release.match_percentage = score
+    release.match_percentage = score if score is not None else (100 if hash_match else
+        {MatchTier.HASH: 100, MatchTier.EXACT: 90, MatchTier.SOURCE_FAMILY: 75,
+         MatchTier.CLOSE: 40, MatchTier.FALLBACK: 10}[tier])
     return release
 
 
@@ -85,12 +73,12 @@ def _attach(
 # ===========================================================================
 
 
-def test_case_a_verified_sync_beats_hash_identity():
+def test_exact_score_beats_unscoped_verified_claim():
     a = _attach(_release("hash.srt", hash_match=True), UNKNOWN_STATE, AV_UNKNOWN)
     b = _attach(_release("nosync.srt", hash_match=False), VERIFIED, AV_VERIFIED)
 
-    assert order_candidates([a, b]) == [b, a]
-    assert comparison_key(b) < comparison_key(a)
+    assert order_candidates([a, b]) == [a, b]
+    assert comparison_key(a) < comparison_key(b)
 
 
 # ===========================================================================
@@ -98,7 +86,7 @@ def test_case_a_verified_sync_beats_hash_identity():
 # ===========================================================================
 
 
-def test_case_b_verified_sync_beats_hash_tier():
+def test_exact_score_beats_strong_metadata_even_when_verified():
     a = _attach(
         _release("hash.srt", hash_match=True, tier=MatchTier.HASH),
         UNKNOWN_STATE,
@@ -110,7 +98,7 @@ def test_case_b_verified_sync_beats_hash_tier():
         AV_VERIFIED,
     )
 
-    assert order_candidates([a, b]) == [b, a]
+    assert order_candidates([a, b]) == [a, b]
 
 
 # ===========================================================================
@@ -162,7 +150,7 @@ def test_case_d_weak_prediction_cannot_leapfrog_verified():
     assert order_candidates([strong, verified]) == [verified, strong]
 
 
-def test_a_hash_candidate_does_not_beat_a_strong_prediction():
+def test_exact_score_beats_prediction_without_identity():
     """Identity is below sync state: a predicted candidate is not UNKNOWN."""
     predicted = _attach(
         _release("pred.srt", hash_match=False),
@@ -172,7 +160,7 @@ def test_a_hash_candidate_does_not_beat_a_strong_prediction():
     )
     hashed = _attach(_release("hash.srt", hash_match=True), UNKNOWN_STATE, AV_UNKNOWN)
 
-    assert order_candidates([predicted, hashed]) == [predicted, hashed]
+    assert order_candidates([predicted, hashed]) == [hashed, predicted]
 
 
 def test_prediction_floor_cannot_be_bypassed_via_identity():
@@ -236,7 +224,7 @@ def test_a_hashless_verified_candidate_can_rank_first():
         AV_VERIFIED,
     )
     weaker = [
-        _attach(_release("x.srt", hash_match=True), UNKNOWN_STATE, AV_UNKNOWN),
+        _attach(_release("x.srt", hash_match=False), UNKNOWN_STATE, AV_UNKNOWN),
         _attach(_release("y.srt"), PREDICTED, AV_PREDICTED, confidence=0.9),
         _attach(_release("z.srt", tier=MatchTier.FALLBACK), UNKNOWN_STATE, AV_UNKNOWN),
     ]
@@ -250,8 +238,9 @@ def test_no_hash_penalty_is_applied_to_every_candidate():
         _attach(_release("b.srt", tier=MatchTier.EXACT), UNKNOWN_STATE, AV_UNKNOWN),
     ]
     keys = [comparison_key(r) for r in plain]
-    for key in keys:
-        assert key[5] == 1, "identity rank is neutral when no hash is present"
+    for key, release in zip(keys, plain, strict=True):
+        assert key[0] == -release.match_percentage
+        assert release.is_hash_match is False
 
 
 # ===========================================================================
@@ -299,7 +288,8 @@ def test_identity_is_not_inferred_from_provider_or_name():
     )
     subdl_plain = _release("other.srt", hash_match=False, provider="subdl")
     keys = [comparison_key(r) for r in (opensubtitles_plain, subdl_plain)]
-    assert keys[0][5] == keys[1][5] == 1
+    assert keys[0][0] == keys[1][0] == -40
+    assert not opensubtitles_plain.is_hash_match and not subdl_plain.is_hash_match
 
 
 # ===========================================================================
@@ -320,7 +310,7 @@ def test_fallback_disclosure_survives_ranking():
     assert fallback.match_tier == MatchTier.FALLBACK
 
 
-def test_a_verified_fallback_can_still_rank_above_an_unverified_exact():
+def test_unscoped_verified_fallback_does_not_override_compatibility():
     """Strong sync evidence may lift a fallback, without erasing its disclosure."""
     fallback_verified = _attach(
         _release("fbv.srt", tier=MatchTier.FALLBACK, hash_match=False),
@@ -332,7 +322,7 @@ def test_a_verified_fallback_can_still_rank_above_an_unverified_exact():
         UNKNOWN_STATE,
         AV_UNKNOWN,
     )
-    assert order_candidates([exact_unverified, fallback_verified])[0] is fallback_verified
+    assert order_candidates([exact_unverified, fallback_verified])[0] is exact_unverified
     assert fallback_verified.match_tier == MatchTier.FALLBACK
 
 
@@ -341,7 +331,7 @@ def test_a_verified_fallback_can_still_rank_above_an_unverified_exact():
 # ===========================================================================
 
 
-def test_stronger_verified_evidence_beats_better_compatibility():
+def test_raw_verifier_confidence_does_not_override_compatibility():
     """Among candidates with the same sync state and availability, stronger
     measured evidence ranks first even when compatibility is worse."""
     strong = _attach(
@@ -358,7 +348,7 @@ def test_stronger_verified_evidence_beats_better_compatibility():
         base=0,
         confidence=72.0,
     )
-    assert order_candidates([weak, strong])[0] is strong
+    assert order_candidates([weak, strong])[0] is weak
 
 
 def test_demoted_prediction_carries_no_confidence_into_ranking():
@@ -374,7 +364,7 @@ def test_demoted_prediction_carries_no_confidence_into_ranking():
         confidence=40.0,
     )
     assert _ranked_confidence(demoted, "unknown") == -1.0
-    unknown = _attach(_release("u.srt"), UNKNOWN_STATE, AV_UNKNOWN, base=0)
+    unknown = _attach(_release("u.srt", score=41), UNKNOWN_STATE, AV_UNKNOWN, base=0)
     assert order_candidates([demoted, unknown])[0] is unknown
 
 
@@ -409,7 +399,7 @@ def test_rejected_still_sorts_last():
     assert order_candidates([rejected, good]) == [good, rejected]
 
 
-def test_language_preference_still_dominates_everything():
+def test_language_preference_does_not_override_compatibility():
     """An explicit user choice outranks any amount of sync evidence."""
     arabic_verified = _attach(
         _release("ar.srt", lang="ara", hash_match=False),
@@ -423,7 +413,7 @@ def test_language_preference_still_dominates_everything():
         AV_VERIFIED,
         lang_rank=1,
     )
-    assert order_candidates([english_hashed, arabic_verified])[0] is arabic_verified
+    assert order_candidates([english_hashed, arabic_verified])[0] is english_hashed
 
 
 def test_match_tier_remains_the_compatibility_source_of_truth():

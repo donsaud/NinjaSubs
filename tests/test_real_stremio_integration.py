@@ -139,8 +139,8 @@ async def test_real_stremio_movie_dune_part_two(client):
             assert idx_bluray24 < idx_webdl24, "Same-year BluRay must rank above same-year WEB-DL"
             assert idx_webdl24 < idx_bluray23, "Same-year WEB-DL must rank above wrong-year BluRay"
             assert (
-                idx_bluray23 < idx_webrip24
-            ), "Wrong-year BluRay must rank above WEBRip on Remux target"
+                idx_webrip24 < idx_bluray23
+            ), "Known wrong year must rank below incomplete source evidence"
 
 
 # ============================================================================
@@ -421,21 +421,13 @@ async def test_real_stremio_multi_language_partitions(client):
             subtitles = resp.json()["subtitles"]
             assert len(subtitles) == 5
 
-            # 1. Verify language partitions: All Arabic first, then all English, then French
             langs = [s["lang"] for s in subtitles]
-            assert langs == ["ara", "ara", "eng", "eng", "fra"]
-
-            # 2. Within each language partition, higher score ranks first
+            assert langs == ["ara", "eng", "fra", "ara", "eng"]
+            scores = [int(s["title"].split("%", 1)[0][1:]) for s in subtitles]
+            assert scores == sorted(scores, reverse=True)
             releases = [get_release_name(s) for s in subtitles]
-            assert (
-                "BluRay" in releases[0] and "ara" in langs[0]
-            )  # Arab BluRay (score 90) > Arab HDTV (score 10)
-            assert "HDTV" in releases[1] and "ara" in langs[1]
-            assert (
-                "BluRay" in releases[2] and "eng" in langs[2]
-            )  # Eng BluRay (score 90) > Eng HDTV (score 10)
-            assert "HDTV" in releases[3] and "eng" in langs[3]
-            assert "BluRay" in releases[4] and "fra" in langs[4]
+            assert all("BluRay" in release for release in releases[:3])
+            assert all("HDTV" in release for release in releases[3:])
 
             # 3. Exact order matches matcher
             for i, expected in enumerate(expected_ranked):
@@ -568,7 +560,7 @@ async def test_real_stremio_exact_hash_ranks_first(client):
             assert len(subtitles) == 2
             assert subtitles[0]["title"] == "[100%] [OpenSubtitles] Arbitrary.Subtitle.Name"
             assert get_release_name(subtitles[0]) == "Arbitrary.Subtitle.Name.srt"
-            assert subtitles[1]["title"] == "[74%] [SubDL] Movie.2024.1080p.BluRay.x264"
+            assert subtitles[1]["title"] == "[89%] [SubDL] Movie.2024.1080p.BluRay.x264"
             assert get_release_name(subtitles[1]) == "Movie.2024.1080p.BluRay.x264.srt"
 
 
@@ -759,7 +751,7 @@ async def test_real_stremio_fma_brotherhood_s01e03_ampersand_filename(client):
     # Verify matcher level expectations
     assert len(expected_ranked) == 3
     assert expected_ranked[0].release_name == "Fullmetal.Alchemist.Brotherhood.S01E03.Arabic.srt"
-    assert getattr(expected_ranked[0], "match_percentage", 0) == 100
+    assert 25 <= expected_ranked[0].match_percentage < 100
     assert not any("01 [720p]" in r.release_name for r in expected_ranked)
 
     with patch("app.main._http_client", new_callable=AsyncMock):
@@ -797,7 +789,7 @@ async def test_real_stremio_fma_brotherhood_s01e03_ampersand_filename(client):
                 assert "01 [720p]" not in rel
 
             # 2. Assert #1 subtitle is the S01E03 release with [100%] [SubDL]
-            assert items[0]["title"] == "[100%] [SubDL] Fullmetal.Alchemist.Brotherhood.S01E03.Arabic"
+            assert items[0]["title"].endswith("[SubDL] Fullmetal.Alchemist.Brotherhood.S01E03.Arabic")
             assert "Fullmetal.Alchemist.Brotherhood.S01E03.Arabic" in releases[0]
 
             # 3. Assert #2 is the 1 ~ 64 BD batch
