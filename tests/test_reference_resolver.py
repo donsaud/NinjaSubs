@@ -352,7 +352,7 @@ async def test_resolver_logs_tiered_candidates(caplog):
                 target_filename="Dexter.S08E01.1080p.BluRay.x265-GRP.mkv",
             )
         )
-    assert "candidate tier=" in caplog.text
+    assert "candidate semantic_rank=" in caplog.text
     assert "selected reference" in caplog.text
 
 

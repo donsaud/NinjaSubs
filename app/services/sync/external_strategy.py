@@ -34,16 +34,17 @@ from app.services.sync.decode import (
 )
 from app.services.sync.matching import (
     _release_group,
-    _season_number,
     _source_kind,
     candidate_episode_number,
     guess_metadata,
     is_informative_release_name,
     is_retail_disc_source,
     normalize_release_group,
+    parse_release_identity,
 )
 from app.services.sync.query import ResolvedReference
 from app.services.sync.reference_v2 import release_family_key as _release_family_key
+from app.services.sync.release_ranking import semantic_rank
 from app.services.sync.telemetry import current_sync_timing
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -260,11 +261,10 @@ def _is_exact_episode(release, query: ReferenceQuery) -> bool:
 
 
 def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
-    """Return all season/episode-matched reference candidates sorted by rank descending.
+    """Order the complete identity-eligible pool by semantic evidence.
 
-    Eligible candidates (matching season/episode) are sorted by score
-    descending; ties keep provider order. A byte-exact MovieHash match always
-    wins.
+    Quota eligibility is checked before consuming bounded plan slots downstream.
+    Hash flags remain the strongest ranking hint, independently verified later.
     """
     pool = list(releases or [])
     if not pool:
@@ -272,14 +272,14 @@ def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
     if query and query.target_download_url:
         pool = [rel for rel in pool if getattr(rel, "download_url", None) != query.target_download_url]
     if query and query.target_sub_release_name:
-        tgt_group = (_release_group(query.target_sub_release_name) or "").lower()
-        stream_group = (_release_group(query.target_filename) or "").lower()
+        tgt_group = normalize_release_group(parse_release_identity(query.target_sub_release_name).release_group)
+        stream_group = normalize_release_group(parse_release_identity(query.target_filename).release_group)
         if not (tgt_group and stream_group and tgt_group == stream_group):
             pool = [rel for rel in pool if _release_name(rel) != query.target_sub_release_name]
     if not pool:
         return []
     if query.season is not None:
-        matched = [rel for rel in pool if _season_number(_release_name(rel)) == query.season]
+        matched = [rel for rel in pool if parse_release_identity(_release_name(rel)).season == query.season]
         if not matched:
             return []
         pool = matched
@@ -292,17 +292,17 @@ def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
         pool = [
             rel
             for rel in pool
-            if candidate_episode_number(_release_name(rel)) in (None, query.episode)
+            if parse_release_identity(_release_name(rel)).episode in (None, query.episode)
         ]
     if not pool:
         return []
 
-    tiered = [(reference_tier(query.target_filename, rel), rel) for rel in pool]
-    # Strict tier hierarchy first; every remaining key is a deterministic
-    # tie-breaker used only *within* a tier:
-    #   tier > healthy provider > exact-episode over season pack >
-    #   English reference anchor > non-HI > standard scene naming >
-    #   provider quota priority > release name.
+    target = parse_release_identity(query.target_filename)
+    tiered = [(semantic_rank(
+        target, parse_release_identity(_release_name(rel)),
+        hash_match=bool(getattr(rel, "is_hash_match", False) or getattr(rel, "matched_by_hash", False)),
+    ), rel) for rel in pool]
+    # Semantic hierarchy first, then the existing operational tie-breakers.
     target_langs = tuple(
         str(lang).lower()
         for lang in (query.languages if query and query.languages else ("ara", "ar"))
@@ -311,7 +311,7 @@ def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
         key=lambda item: (
             item[0],
             1 if _is_rel_provider_broken(item[1]) else 0,
-            0 if _is_exact_episode(item[1], query) else 1,
+            0 if query.episode is None or parse_release_identity(_release_name(item[1])).episode == query.episode else 1,
             0 if str(getattr(item[1], "lang", "")).lower().startswith("en") else 1,
             0 if str(getattr(item[1], "lang", "")).lower() in target_langs else 1,
             1 if getattr(item[1], "hearing_impaired", False) else 0,
@@ -322,15 +322,12 @@ def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
             _release_name(item[1]),
         )
     )
-    for tier, rel in tiered[:5]:
+    # Bounded semantic diagnostics, with no raw release strings or URLs.
+    for rank, rel in tiered[:5]:
+        metadata = parse_release_identity(_release_name(rel))
         logger.info(
-            "[reference] candidate tier=%d (%s) lang=%s hash=%s provider=%s %r",
-            tier,
-            tier_label(tier),
-            getattr(rel, "lang", "?"),
-            bool(getattr(rel, "is_hash_match", False)),
-            getattr(rel, "provider", "?"),
-            _release_name(rel),
+            "[reference] candidate semantic_rank=%s source=%s labels=%s cuts=%s",
+            rank, metadata.source_family or "unknown", metadata.label_tags, metadata.cut_tags,
         )
     return [rel for _, rel in tiered]
 

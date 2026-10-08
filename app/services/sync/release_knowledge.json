@@ -1,0 +1,437 @@
+{
+  "schema_version": 1,
+  "version": "1",
+  "attribution": "Independently authored; no TRaSH or GuessIt rule data copied.",
+  "rules": [
+    {
+      "id": "cut.directors_cut.v1",
+      "category": "cut",
+      "canonical": "directors_cut",
+      "pattern": "director ?s cut|directors cut",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "cut.extended.v1",
+      "category": "cut",
+      "canonical": "extended",
+      "pattern": "extended(?: cut| edition)?",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "cut.theatrical.v1",
+      "category": "cut",
+      "canonical": "theatrical",
+      "pattern": "theatrical(?: cut| edition)?",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "cut.unrated.v1",
+      "category": "cut",
+      "canonical": "unrated",
+      "pattern": "unrated",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "supplemental",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "cut.uncut.v1",
+      "category": "cut",
+      "canonical": "uncut",
+      "pattern": "uncut",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "supplemental",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "cut.final_cut.v1",
+      "category": "cut",
+      "canonical": "final_cut",
+      "pattern": "final cut",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "cut.international_cut.v1",
+      "category": "cut",
+      "canonical": "international_cut",
+      "pattern": "international (?:cut|version)",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "cut.alternate_cut.v1",
+      "category": "cut",
+      "canonical": "alternate_cut",
+      "pattern": "alternate cut",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "cut.alternate_version.v1",
+      "category": "cut",
+      "canonical": "alternate_version",
+      "pattern": "alternate version",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "label.criterion_collection.v1",
+      "category": "label",
+      "canonical": "criterion_collection",
+      "pattern": "criterion(?: collection)?",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "label.arrow.v1",
+      "category": "label",
+      "canonical": "arrow",
+      "pattern": "arrow(?: video)?",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "label.bfi.v1",
+      "category": "label",
+      "canonical": "bfi",
+      "pattern": "bfi",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "label.shout_factory.v1",
+      "category": "label",
+      "canonical": "shout_factory",
+      "pattern": "shout factory",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "presentation.imax.v1",
+      "category": "presentation",
+      "canonical": "imax",
+      "pattern": "imax",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "presentation.open_matte.v1",
+      "category": "presentation",
+      "canonical": "open_matte",
+      "pattern": "open matte",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "presentation.fullscreen.v1",
+      "category": "presentation",
+      "canonical": "fullscreen",
+      "pattern": "full ?screen",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "presentation.widescreen.v1",
+      "category": "presentation",
+      "canonical": "widescreen",
+      "pattern": "wide ?screen",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "master.remastered.v1",
+      "category": "master",
+      "canonical": "remastered",
+      "pattern": "remaster(?:ed)?",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "master.restored.v1",
+      "category": "master",
+      "canonical": "restored",
+      "pattern": "restored|restoration",
+      "confidence": "high",
+      "timing_relevance": "high",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "packaging.special_edition.v1",
+      "category": "packaging",
+      "canonical": "special_edition",
+      "pattern": "special edition",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "packaging.collectors_edition.v1",
+      "category": "packaging",
+      "canonical": "collectors_edition",
+      "pattern": "collector ?s edition",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "packaging.anniversary_edition.v1",
+      "category": "packaging",
+      "canonical": "anniversary_edition",
+      "pattern": "(?:[0-9]+(?:th|st|nd|rd) )?anniversary edition",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "source.uhd_bluray.v1",
+      "category": "source",
+      "canonical": "uhd_bluray",
+      "pattern": "(?:uhd|ultra hd|4k) blu ?ray",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "source.bluray.v1",
+      "category": "source",
+      "canonical": "bluray",
+      "pattern": "blu ?ray|bd ?rip|br ?rip|bd25|bd50",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "source.webdl.v1",
+      "category": "source",
+      "canonical": "webdl",
+      "pattern": "web ?dl",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "source.webrip.v1",
+      "category": "source",
+      "canonical": "webrip",
+      "pattern": "web ?rip",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "source.hdtv.v1",
+      "category": "source",
+      "canonical": "hdtv",
+      "pattern": "hdtv|pdtv",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "source.dvd.v1",
+      "category": "source",
+      "canonical": "dvd",
+      "pattern": "dvd(?: rip)?",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "service.amazon.v1",
+      "category": "service",
+      "canonical": "amazon",
+      "pattern": "amzn|amazon",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "service.netflix.v1",
+      "category": "service",
+      "canonical": "netflix",
+      "pattern": "nf|netflix",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "service.disney_plus.v1",
+      "category": "service",
+      "canonical": "disney_plus",
+      "pattern": "dsnp|disney ?\\+|disney plus",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "service.apple_tv_plus.v1",
+      "category": "service",
+      "canonical": "apple_tv_plus",
+      "pattern": "atvp|apple ?tv ?\\+|apple tv plus",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "service.hbo_max.v1",
+      "category": "service",
+      "canonical": "hbo_max",
+      "pattern": "hmax|hbo max",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "service.hulu.v1",
+      "category": "service",
+      "canonical": "hulu",
+      "pattern": "hulu",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "service.peacock.v1",
+      "category": "service",
+      "canonical": "peacock",
+      "pattern": "pcok|peacock",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "service.itunes.v1",
+      "category": "service",
+      "canonical": "itunes",
+      "pattern": "itunes",
+      "confidence": "high",
+      "timing_relevance": "medium",
+      "conflict_policy": "exclusive",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "audio.dts.v1",
+      "category": "audio",
+      "canonical": "dts",
+      "pattern": "dts",
+      "confidence": "high",
+      "timing_relevance": "low",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "audio.truehd.v1",
+      "category": "audio",
+      "canonical": "truehd",
+      "pattern": "truehd|true hd",
+      "confidence": "high",
+      "timing_relevance": "low",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "audio.atmos.v1",
+      "category": "audio",
+      "canonical": "atmos",
+      "pattern": "atmos",
+      "confidence": "high",
+      "timing_relevance": "low",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "audio.aac.v1",
+      "category": "audio",
+      "canonical": "aac",
+      "pattern": "aac",
+      "confidence": "high",
+      "timing_relevance": "low",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "audio.ac3.v1",
+      "category": "audio",
+      "canonical": "ac3",
+      "pattern": "ac3|ac 3|dd",
+      "confidence": "high",
+      "timing_relevance": "low",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "audio.eac3.v1",
+      "category": "audio",
+      "canonical": "eac3",
+      "pattern": "eac3|e ac 3|ddp",
+      "confidence": "high",
+      "timing_relevance": "low",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    },
+    {
+      "id": "audio.flac.v1",
+      "category": "audio",
+      "canonical": "flac",
+      "pattern": "flac",
+      "confidence": "high",
+      "timing_relevance": "low",
+      "conflict_policy": "unknown_when_different",
+      "source": "NinjaSubs independently authored release vocabulary"
+    }
+  ]
+}

@@ -65,7 +65,7 @@ def test_no_broad_aliases(label):
 
 def test_supporting_metadata_is_not_cut_identity():
     parsed = parse_release_identity("Film.2020.UHD.BluRay.REMUX.2160p.HEVC.10bit.HDR10+.DV-GRP [1h46m57m]")
-    assert parsed.source_family == "bluray" and parsed.remux
+    assert parsed.source_family == "uhd_bluray" and parsed.remux
     assert parsed.resolution == "2160p" and parsed.bit_depth == 10
     assert "hdr10_plus" in parsed.hdr_flags and "dolby_vision" in parsed.hdr_flags
     assert parsed.duration_hint_seconds == 6417
@@ -164,7 +164,7 @@ async def test_cache_semantic_version_and_binding_safety():
     cache = SyncCache()
     key = cache.build_key("tt1", "movie", "video", "sub", "edition")
     assert SYNC_PAYLOAD_VERSION in key
-    assert SYNC_VERDICT_ENGINE_VERSION == 4
+    assert SYNC_VERDICT_ENGINE_VERSION == 5
     cache._local["final_sub:tt1:movie:video:sub:edition"] = b"old"
     assert await cache.find_synced_for_target("tt1", "movie", "video", "sub") is None
     alias = cache.build_verdict_alias_key("video", "sub")
