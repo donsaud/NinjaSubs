@@ -302,10 +302,10 @@ def test_quoted_arabic_leading_period_moves_after_closing_quote():
     )
 
 
-def test_quoted_arabic_trailing_period_inside_quote_moves_outside():
+def test_quoted_arabic_trailing_period_inside_quote_is_preserved():
     assert (
         fix_rtl_punctuation('"نطلق عليه صندوق السماء."')
-        == f'"نطلق عليه صندوق السماء".{RLM}'
+        == f'"نطلق عليه صندوق السماء."{RLM}'
     )
 
 

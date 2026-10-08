@@ -42,7 +42,7 @@ _RTL_BIDI_CLASSES = frozenset({"R", "AL", "AN"})
 _DIALOGUE_DASHES = frozenset({"-", "–", "—"})
 
 # Neutral punctuation/symbols that legacy files wrongly prepend.
-_LEADING_PUNCTUATION = frozenset(".!?,:;…،؛۔")
+_LEADING_PUNCTUATION = frozenset(".!?؟,:;…،؛۔")
 
 # Bidi-mirrored bracket pairs (logical opening -> logical closing).
 _BRACKET_PAIRS = {
@@ -85,7 +85,6 @@ _QUOTE_WRAPPERS: tuple[tuple[str, str], ...] = (
 )
 # Misplaced edge punctuation inside a quoted phrase.
 _EDGE_DOTS_LEADING_REGEX = re.compile(r"^[.…]+")
-_EDGE_DOTS_TRAILING_REGEX = re.compile(r"[.…]+$")
 
 # ASS/SSA inline override tags: {\i1}, {\pos(1,2)}, etc.
 _LEADING_TAGS_REGEX = re.compile(r"^(?:\{[^}]*\})+")
@@ -103,6 +102,7 @@ _INVERTED_LEADING_REGEX = re.compile(
 _ANY_TAG_PART = r"(?:\{[^}]*\}|<[^>]*>)"
 _LEADING_ANY_TAG_REGEX = re.compile(rf"^(?:{_ANY_TAG_PART})+")
 _TRAILING_ANY_TAG_REGEX = re.compile(rf"(?:{_ANY_TAG_PART})+$")
+_FORMATTING_TAG_REGEX = re.compile(r"<[^>]*>|\{\\[^}]*\}")
 # A line qualified for the inverted-leading-quote fix must end on an Arabic letter
 # (so properly quoted lines ending in a quote/ellipsis keep their existing handling).
 _ENDS_WITH_ARABIC_LETTER_REGEX = re.compile(r"[\u0621-\u064a][\u064b-\u0652]*$")
@@ -118,6 +118,36 @@ def _bidi_class(char: str) -> str:
 def contains_rtl(text: str) -> bool:
     """Return True if the text contains any strong Right-to-Left character."""
     return any(_bidi_class(ch) in _RTL_BIDI_CLASSES for ch in text)
+
+
+def _arabic_dialogue_only(text: str) -> bool:
+    """Require actual Arabic letters and refuse mixed-script relocation.
+
+    Formatting attributes, RTL punctuation and Arabic digits alone are not
+    evidence of legacy dialogue. This is an admission guard, not language or
+    author-intent detection.
+    """
+    visible = _FORMATTING_TAG_REGEX.sub("", text)
+    letters = [char for char in visible if unicodedata.category(char).startswith("L")]
+    return bool(letters) and all("ARABIC" in unicodedata.name(char, "") for char in letters)
+
+
+def _legacy_punctuation_body(text: str) -> bool:
+    """Arabic-only body with no already-correct terminal punctuation.
+
+    First/last Arabic letters and wrappers constrain the existing prefix
+    heuristic. A leading pause on an already-terminated line stays untouched.
+    """
+    if not _arabic_dialogue_only(text):
+        return False
+    visible = _FORMATTING_TAG_REGEX.sub("", text).strip().strip(RLM).strip()
+    visible = visible.lstrip("([{\"'«“ ").rstrip(")]}\"'»” ")
+    visible = visible.rstrip(RLM).rstrip()
+    visible = visible.rstrip("\u064b\u064c\u064d\u064e\u064f\u0650\u0651\u0652")
+    return bool(visible) and all(
+        unicodedata.category(char).startswith("L") and "ARABIC" in unicodedata.name(char, "")
+        for char in (visible[0], visible[-1])
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +271,10 @@ def _normalize_brackets(core: str) -> str:
       entity exists (e.g. ``)آسفة ... يا كوبر`` -> ``آسفة ... يا (كوبر)``).
     - A stray bracket with a distinct trailing entity wraps that trailing entity.
     """
+    # Word-span heuristics do not distinguish tag attributes from dialogue.
+    # Refuse ambiguous bracket repairs rather than risk damaging markup.
+    if _FORMATTING_TAG_REGEX.search(core) or not _arabic_dialogue_only(core):
+        return core
     positions = _visible_bracket_positions(core)
     if not positions:
         return core
@@ -407,6 +441,12 @@ def _relocate_leading_quote(core: str) -> str:
     cluster = match.group(0)
     if not any(char in _QUOTE_CHARS for char in cluster):
         return core
+    if (
+        not any(char in ".…" for char in cluster)
+        or not _arabic_dialogue_only(core)
+        or _FORMATTING_TAG_REGEX.search(core)
+    ):
+        return core
     if _quotes_are_balanced(core):
         return core
 
@@ -445,7 +485,7 @@ def _normalize_quoted_edges(core: str) -> str:
     period visually flips to the front of the line. The period is moved across
     the closing quote (``"نطلق عليه صندوق السماء".``); the trailing RLM is then
     appended by :func:`_append_trailing_rlm` so the dot stays locked on the left.
-    Also normalises the mirrored ``"نص."`` form and ``«...»`` quotation marks.
+    Correctly placed punctuation inside the closing quote is preserved.
     """
     leading_ws = core[: len(core) - len(core.lstrip())]
     trailing_ws = core[len(core.rstrip()) :]
@@ -461,17 +501,15 @@ def _normalize_quoted_edges(core: str) -> str:
     if not body:
         return core
 
-    has_leading_dot = _EDGE_DOTS_LEADING_REGEX.match(body) is not None
-    has_trailing_dot = _EDGE_DOTS_TRAILING_REGEX.search(body) is not None
-    if not (has_leading_dot or has_trailing_dot):
+    match = _EDGE_DOTS_LEADING_REGEX.match(body)
+    if match is None:
+        return core
+    punctuation = match.group(0)
+    body = body[match.end():].strip()
+    if not _legacy_punctuation_body(body):
         return core
 
-    body = _EDGE_DOTS_LEADING_REGEX.sub("", body)
-    body = _EDGE_DOTS_TRAILING_REGEX.sub("", body).strip()
-    if not body or not contains_rtl(body):
-        return core
-
-    return f"{leading_ws}{opener}{body}{closer}.{trailing_ws}"
+    return f"{leading_ws}{opener}{body}{closer}{punctuation}{trailing_ws}"
 
 
 _DIALOGUE_DASH_CHARS = "-\u2013\u2014"
@@ -510,8 +548,8 @@ def _normalize_pre_reversed_dialogue(core: str) -> str:
     # Pattern B (leading dash + stray leading dot): "- .أجل" -> "- أجل."
     match = _LEADING_DASH_DOT_REGEX.match(text)
     if match:
-        body = match.group(2).strip().rstrip(".")
-        if body and contains_rtl(body):
+        body = match.group(2).strip()
+        if _legacy_punctuation_body(body):
             return f"{leading_ws}{match.group(1)} {body}.{trailing_ws}"
         return core
 
@@ -526,8 +564,12 @@ def _normalize_pre_reversed_dialogue(core: str) -> str:
     # Pattern B (stray leading dot on the body): ".أجل" -> "أجل."
     dot_prefix = _LEADING_DOT_REGEX.match(body)
     if dot_prefix:
-        body = dot_prefix.group(1).strip().rstrip(".")
+        if not _legacy_punctuation_body(dot_prefix.group(1)):
+            return core
+        body = dot_prefix.group(1).strip()
         body = f"{body}."
+    elif not (_arabic_dialogue_only(body) and body.endswith(tuple(_LEADING_PUNCTUATION))):
+        return core
 
     if not body or not contains_rtl(body):
         return core
@@ -579,7 +621,7 @@ def fix_inverted_leading_quote(line: str) -> str:
     quote = match.group("quote1") or match.group("quote2")
     punct = match.group("punct1") or match.group("punct2")
     body = core[match.end() :]
-    if not body or not contains_rtl(body):
+    if not body or not _arabic_dialogue_only(body) or _FORMATTING_TAG_REGEX.search(body):
         return line
 
     # Only relocate when the line ends on an Arabic letter. Lines ending in a
@@ -606,17 +648,21 @@ def _normalize_core(core: str) -> str:
     run = _leading_movable_run(core)
     if run:
         remainder = core[len(run) :].lstrip()
-        if contains_rtl(remainder):
+        paired_inversion = (
+            len(run) == 1
+            and run in _CLOSING_TO_OPENING
+            and remainder.rstrip().endswith(_CLOSING_TO_OPENING[run])
+            and _legacy_punctuation_body(remainder.rstrip()[:-1])
+        )
+        markup_bracket = bool(
+            _FORMATTING_TAG_REGEX.search(core) and any(char in _BRACKET_CHARS for char in run)
+        )
+        if not markup_bracket and (paired_inversion or _legacy_punctuation_body(remainder)):
             stripped_remainder = remainder.rstrip()
             trailing_whitespace = remainder[len(stripped_remainder) :]
 
             # Paired inversion, e.g. ")مرحبا(" -> "(مرحبا)".
-            if (
-                len(run) == 1
-                and run in _CLOSING_TO_OPENING
-                and stripped_remainder
-                and stripped_remainder[-1] == _CLOSING_TO_OPENING[run]
-            ):
+            if paired_inversion:
                 core = (
                     _CLOSING_TO_OPENING[run]
                     + stripped_remainder[:-1]
@@ -639,7 +685,11 @@ def _normalize_core(core: str) -> str:
 
 def _process_segment(segment: str, is_ass: bool) -> str:
     """Normalize one visual segment (a line, or an ASS ``\\N`` sub-segment)."""
-    if not contains_rtl(segment):
+    visible = _FORMATTING_TAG_REGEX.sub("", segment)
+    if not any(
+        unicodedata.category(char).startswith("L") and _bidi_class(char) in {"R", "AL"}
+        for char in visible
+    ):
         return segment
 
     leading_tags = ""
