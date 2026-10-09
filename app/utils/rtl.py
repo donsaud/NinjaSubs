@@ -91,8 +91,8 @@ _SIMPLE_EMPHASIS_REGEX = re.compile(
 )
 
 # ASS/SSA inline override tags: {\i1}, {\pos(1,2)}, etc.
-_LEADING_TAGS_REGEX = re.compile(r"^(?:\{[^}]*\})+")
-_TRAILING_TAGS_REGEX = re.compile(r"(?:\{[^}]*\})+$")
+_LEADING_TAGS_REGEX = re.compile(r"^(?:\{[^{}]*\})+")
+_ASS_TAG_REGEX = re.compile(r"\{[^{}]*\}")
 _ASS_DIALOGUE_REGEX = re.compile(r"^(?:Dialogue|Comment):", re.IGNORECASE)
 
 # Inverted leading quote + terminal punctuation (editor glitches), e.g. `".نص`, `."نص`.
@@ -103,10 +103,10 @@ _INVERTED_LEADING_REGEX = re.compile(
     r")(?=[\u0600-\u06FF])"
 )
 # HTML/`<font>` and ASS `{...}` tags that may wrap a dialogue line.
-_ANY_TAG_PART = r"(?:\{[^}]*\}|<[^>]*>)"
+_ANY_TAG_PART = r"(?:\{[^{}]*\}|<[^<>]*>)"
 _LEADING_ANY_TAG_REGEX = re.compile(rf"^(?:{_ANY_TAG_PART})+")
-_TRAILING_ANY_TAG_REGEX = re.compile(rf"(?:{_ANY_TAG_PART})+$")
-_FORMATTING_TAG_REGEX = re.compile(r"<[^>]*>|\{\\[^}]*\}")
+_ANY_TAG_REGEX = re.compile(_ANY_TAG_PART)
+_FORMATTING_TAG_REGEX = re.compile(r"<[^<>]*>|\{\\[^{}]*\}")
 # A line qualified for the inverted-leading-quote fix must end on an Arabic letter
 # (so properly quoted lines ending in a quote/ellipsis keep their existing handling).
 _ENDS_WITH_ARABIC_LETTER_REGEX = re.compile(r"[\u0621-\u064a][\u064b-\u0652]*$")
@@ -122,6 +122,17 @@ def _bidi_class(char: str) -> str:
 def contains_rtl(text: str) -> bool:
     """Return True if the text contains any strong Right-to-Left character."""
     return any(_bidi_class(ch) in _RTL_BIDI_CLASSES for ch in text)
+
+
+def _split_trailing_tags(text: str, *, ass_only: bool = False) -> tuple[str, str]:
+    """Find a consecutive suffix in one scan, without retrying tag runs."""
+    pattern = _ASS_TAG_REGEX if ass_only else _ANY_TAG_REGEX
+    start = end = 0
+    for match in pattern.finditer(text):
+        if match.start() != end:
+            start = match.start()
+        end = match.end()
+    return (text[:start], text[start:]) if end == len(text) and end else (text, "")
 
 
 def _arabic_dialogue_only(text: str) -> bool:
@@ -638,10 +649,7 @@ def fix_inverted_leading_quote(line: str) -> str:
         leading_tags = leading_match.group(0)
         core = core[len(leading_tags) :]
 
-    trailing_match = _TRAILING_ANY_TAG_REGEX.search(core)
-    if trailing_match:
-        trailing_tags = trailing_match.group(0)
-        core = core[: trailing_match.start()]
+    core, trailing_tags = _split_trailing_tags(core)
 
     if core.lstrip().startswith(("-", "\u0640")):
         return line
@@ -716,6 +724,119 @@ def _normalize_core(core: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_SAFE_DIALOGUE_TAG = re.compile(
+    r"</?(?:[ibu]|font)\b[^<>]*>", re.IGNORECASE
+)
+_SAFE_FONT_OPEN = re.compile(r"<font\s+color\s*=\s*([\"'])#[0-9a-f]{6}\1\s*>", re.IGNORECASE)
+_TRANSPARENT_BIDI = frozenset({RLM, "\u200e"})
+_DIALOGUE_PAIRS = {"(": ")", "[": "]", '"': '"', "'": "'", "«": "»", "“": "”", "‹": "›"}
+
+
+def _dialogue_structure(text: str) -> tuple[bool, str, dict[int, tuple[int, int, int]]]:
+    """Validate wrapper nesting and derive visible text without rewriting markup.
+
+    Maps each opening offset to (content start, closing start, closing end),
+    allowing an existing inside-wrapper dialogue marker to stay inside it.
+    Unknown HTML/attributes are conservatively refused.
+    """
+    stack: list[tuple[str, int, int]] = []
+    spans: dict[int, tuple[int, int, int]] = {}
+    visible: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        char = text[cursor]
+        if char in _TRANSPARENT_BIDI:
+            cursor += 1
+            continue
+        if char == "<":
+            match = _SAFE_DIALOGUE_TAG.match(text, cursor)
+            if match is None:
+                return False, "", spans
+            token = match.group().lower()
+            closing = token.startswith("</")
+            name = token[2 if closing else 1:].split(">", 1)[0].split()[0]
+            if token not in {f"<{name}>", f"</{name}>"} and not (
+                name == "font" and not closing and _SAFE_FONT_OPEN.fullmatch(token)
+            ):
+                return False, "", spans
+            if closing:
+                if not stack or stack[-1][0] != f"</{name}>":
+                    return False, "", spans
+                _, start, content_start = stack.pop()
+                spans[start] = content_start, cursor, match.end()
+            else:
+                stack.append((f"</{name}>", cursor, match.end()))
+            cursor = match.end()
+            continue
+        if char == ">":
+            return False, "", spans
+        if stack and char == stack[-1][0]:
+            _, start, content_start = stack.pop()
+            spans[start] = content_start, cursor, cursor + 1
+        elif char in _DIALOGUE_PAIRS:
+            stack.append((_DIALOGUE_PAIRS[char], cursor, cursor + 1))
+        elif char in _DIALOGUE_PAIRS.values():
+            return False, "", spans
+        visible.append(char)
+        cursor += 1
+    return not stack, "".join(visible), spans
+
+
+def _structural_dialogue(core: str) -> str | None:
+    """Handle separated markers before legacy punctuation heuristics can guess.
+
+    None delegates non-dialogue input to existing punctuation repair. Any
+    malformed/ambiguous dialogue structure is preserved, with bidi anchoring
+    only. A single marker can move within an existing whole-line wrapper.
+    """
+    transparent = "".join(char for char in core if char not in _TRANSPARENT_BIDI)
+    if not any(char in _DIALOGUE_DASHES for char in transparent):
+        return None
+    balanced, visible, spans = _dialogue_structure(core)
+    if not balanced:
+        return _append_trailing_rlm(core)
+    # Keep existing special leading-dot repair, constrained by its old guard.
+    legacy = _normalize_pre_reversed_dialogue(core)
+    if legacy != core and core.strip().startswith((".", "- .", "– .", "— .")):
+        return _append_trailing_rlm(_isolate_leading_dash(legacy))
+    has_arabic = any(unicodedata.category(char).startswith("L")
+                     and "ARABIC" in unicodedata.name(char, "") for char in visible)
+    if not has_arabic:
+        return core
+    start, end = 0, len(core)
+
+    def trim(left: int, right: int) -> tuple[int, int]:
+        while left < right and (core[left].isspace() or core[left] in _TRANSPARENT_BIDI):
+            left += 1
+        while right > left and (core[right - 1].isspace() or core[right - 1] in _TRANSPARENT_BIDI):
+            right -= 1
+        return left, right
+
+    start, end = trim(start, end)
+    while start < end:
+        if core[end - 1] in _DIALOGUE_DASHES:
+            break
+        span = spans.get(start)
+        if span is None or span[2] != end:
+            break
+        start, end = trim(span[0], span[1])
+    marker = core[end - 1] if end > start else ""
+    # Refuse ranges, glued hyphens, internal separators, or multiple markers.
+    if marker in _DIALOGUE_DASHES and sum(char in _DIALOGUE_DASHES for char in visible) == 1:
+        separator = end - 2
+        while separator >= start and core[separator] in _TRANSPARENT_BIDI:
+            separator -= 1
+        if separator >= start and core[separator].isspace():
+            body_end = end - 1
+            while body_end > start and core[body_end - 1].isspace():
+                body_end -= 1
+            body = core[start:body_end]
+            fixed = core[:start] + _isolate_leading_dash(marker + " " + body) + core[end:]
+            return _append_trailing_rlm(_isolate_leading_dash(fixed))
+    # Correct leading markers and internal/ambiguous separators retain structure.
+    return _append_trailing_rlm(_isolate_leading_dash(core))
+
+
 def _process_segment(segment: str, is_ass: bool) -> str:
     """Normalize one visual segment (a line, or an ASS ``\\N`` sub-segment)."""
     visible = _FORMATTING_TAG_REGEX.sub("", segment)
@@ -735,11 +856,11 @@ def _process_segment(segment: str, is_ass: bool) -> str:
             leading_tags = leading_match.group(0)
             core = core[len(leading_tags) :]
 
-        trailing_match = _TRAILING_TAGS_REGEX.search(core)
-        if trailing_match:
-            trailing_tags = trailing_match.group(0)
-            core = core[: trailing_match.start()]
+        core, trailing_tags = _split_trailing_tags(core, ass_only=True)
 
+    structural = _structural_dialogue(core)
+    if structural is not None:
+        return f"{leading_tags}{structural}{trailing_tags}"
     core = fix_inverted_leading_quote(core)
     core = _normalize_pre_reversed_dialogue(core)
     return f"{leading_tags}{_normalize_core(core)}{trailing_tags}"

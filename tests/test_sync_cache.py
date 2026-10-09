@@ -8,13 +8,13 @@ from app.services.sync_cache import SyncCache
 def test_build_key_format():
     assert (
         SyncCache.build_key("tt0111161", "s1e2", "vhash1234", "abc123", "team")
-        == "final_sub:v9-release-context-v2:tt0111161:s1e2:vhash1234:abc123:team"
+        == "final_sub:v10-ass-safety:tt0111161:s1e2:vhash1234:abc123:team"
     )
 
 
 def test_build_key_binds_exact_payload():
     key = SyncCache.build_key("tt1", "s1e1", "vhash", "sub1", "edition", "deadbeef12345678")
-    assert key == "final_sub:v9-release-context-v2:tt1:s1e1:vhash:sub1:edition:deadbeef12345678"
+    assert key == "final_sub:v10-ass-safety:tt1:s1e1:vhash:sub1:edition:deadbeef12345678"
     # Fingerprint, decision, and content hash isolate media, editions, payloads.
     assert SyncCache.build_key("tt1", "s1e1", "other", "sub1", "team") != SyncCache.build_key(
         "tt1", "s1e1", "vhash", "sub1", "team"

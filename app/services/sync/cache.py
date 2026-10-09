@@ -17,6 +17,7 @@ from app.services.sync.query import ReferenceQuery, ResolvedReference
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TTL_SECONDS = 2592000.0  # 30 days
+# Version 6 rejects references already sanitized by the pre-safety ASS converter.
 
 # Decision kinds that prove the exact edition (vs. best-effort edition timing).
 EXACT_KINDS = frozenset({"team", "hash", "embedded"})
@@ -138,7 +139,7 @@ class ReferenceDiskCache:
             or meta.get("kind") != kind
             or meta.get("content_sha") != hashlib.sha256(text.encode("utf-8")).hexdigest()
             or (getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True) and meta.get("strict") is not True)
-            or int(meta.get("engine_version", 1)) < 5
+            or int(meta.get("engine_version", 1)) < 6
         ):
             return None
         return (
@@ -237,7 +238,7 @@ class ReferenceDiskCache:
                 "partial": bool(partial),
                 "strict": bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True)),
                 "content_sha": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "engine_version": 5,
+                "engine_version": 6,
             }
             self._atomic_write(self._sidecar_path(path), json.dumps(meta))
             logger.info(

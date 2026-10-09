@@ -60,15 +60,9 @@ def is_zip_slip_attempt(filename: str) -> bool:
 
 def is_ass_subtitle(raw_bytes: bytes) -> bool:
     """Detect if raw bytes represent ASS or SSA subtitle format."""
-    if not raw_bytes:
-        return False
-    sample = raw_bytes[:4096].lower()
-    return (
-        b"[script info]" in sample
-        or b"[v4+ styles]" in sample
-        or b"[v4 styles]" in sample
-        or b"dialogue:" in sample
-    )
+    from app.utils.ass_converter import is_ass_text
+
+    return is_ass_text(raw_bytes.decode("utf-8-sig", errors="replace"))
 
 
 def is_vtt_subtitle(raw_bytes: bytes) -> bool:

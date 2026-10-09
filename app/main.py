@@ -2033,6 +2033,8 @@ async def _sync_subtitle_for_response(
             # alass emits SRT; keep the user's native ASS styling preference.
             return payload
         payload = convert_ass_to_srt_bytes(payload, apply_rtl=False)
+        if is_ass_subtitle(payload):
+            return payload  # Conversion failed safely; do not sync native ASS.
     sync_meta = _sync_meta_for_user(meta, context, prefs)
     begin_capture(payload, sync_meta, auto_sync)
     synced = await _maybe_sync_subtitle(payload, sync_meta, target_id, auto_sync)
@@ -2211,23 +2213,30 @@ def _build_subtitle_response(
         sub_bytes = fix_subtitle_encoding_bytes(sub_bytes)
 
     converted_from_ass = False
+    conversion_failed = False
     if convert_ass and (is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa")):
+        original_bytes = sub_bytes
         sub_bytes = convert_ass_to_srt_bytes(sub_bytes, apply_rtl=False)
-        req_format = "srt"
-        converted_from_ass = True
+        conversion_failed = is_ass_subtitle(sub_bytes) or (
+            sub_bytes == original_bytes and b"-->" not in sub_bytes
+        )
+        if not conversion_failed:
+            req_format = "srt"
+            converted_from_ass = True
 
     # 2. Feed the (possibly converted) payload through the shared optimization
     #    pipeline, governed entirely by the user's preferences.
-    sub_bytes = _run_subtitle_optimization_pipeline(
-        sub_bytes,
-        enable_rtl_fix=enable_rtl_fix,
-        enable_ad_removal=enable_ad_removal,
-        keep_translator_credits=keep_translator_credits,
-        options=options,
-        strip_hi=strip_hi,
-        eastern_arabic_numerals=eastern_arabic_numerals,
-        strip_diacritics=strip_diacritics,
-    )
+    if not conversion_failed:
+        sub_bytes = _run_subtitle_optimization_pipeline(
+            sub_bytes,
+            enable_rtl_fix=enable_rtl_fix,
+            enable_ad_removal=enable_ad_removal,
+            keep_translator_credits=keep_translator_credits,
+            options=options,
+            strip_hi=strip_hi,
+            eastern_arabic_numerals=eastern_arabic_numerals,
+            strip_diacritics=strip_diacritics,
+        )
 
     # 3. Native ASS / SSA detection (raw passthrough only when conversion is off)
     if (not converted_from_ass) and (is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa")):

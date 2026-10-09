@@ -32,10 +32,10 @@ _DEFAULT_TTL = 86_400  # 24 hours
 # Short TTL for "no reference could be resolved" verdicts, so client retries
 # stop re-running the whole provider fan-out but a transient outage self-heals.
 _NEGATIVE_TTL = 300  # 5 minutes
-# Bump when the verification/ordering logic changes so stale verdicts written by
-# an older engine are never reused. Mirrors ReferenceDiskCache's engine_version.
-SYNC_VERDICT_ENGINE_VERSION = 6
-SYNC_PAYLOAD_VERSION = "v9-release-context-v2"
+# Bump when verification/ordering or reference parsing semantics change so
+# verdicts measured against an older sanitized reference are never reused.
+SYNC_VERDICT_ENGINE_VERSION = 7
+SYNC_PAYLOAD_VERSION = "v10-ass-safety"
 # Verdict TTL. Shorter than the payload TTL: a positive synchronization claim
 # should be re-derived reasonably often rather than trusted for a full day.
 _VERDICT_TTL = 7 * 86_400  # 7 days

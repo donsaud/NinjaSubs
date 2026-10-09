@@ -276,7 +276,7 @@ def test_synced_cache_key_binds_payload():
     key_a = build_synced_cache_key(meta, "s", content_hash="a", decision="team")
     key_b = build_synced_cache_key(meta, "s", content_hash="b", decision="team")
     assert key_a != key_b
-    assert key_a == "final_sub:v9-release-context-v2:tt1:s1e1:vh:s:team:a"
+    assert key_a == "final_sub:v10-ass-safety:tt1:s1e1:vh:s:team:a"
 
 
 @pytest.mark.asyncio

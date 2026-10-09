@@ -331,14 +331,14 @@ def sanitize_subtitle(text: str) -> str:
     text = strip_kashida(text)
 
     leading = text.lstrip()[:200].lower()
-    if (
-        leading.startswith("[script info]")
-        or leading.startswith("[v4")
-        or "dialogue:" in text.lower()
-    ):
-        from app.utils.ass_converter import convert_ass_to_srt
+    from app.utils.ass_converter import convert_ass_result, is_ass_text
 
-        text = convert_ass_to_srt(text, apply_rtl=False)
+    if is_ass_text(text):
+        result = convert_ass_result(text, apply_rtl=False)
+        if not result.converted:
+            # A failed native ASS conversion must never reach the SRT-only ALASS path.
+            return ""
+        text = result.data
     elif leading.startswith("webvtt"):
         text = _vtt_to_srt(text)
     elif "<sami" in leading or re.search(r"<sync\s+start\s*=", leading):

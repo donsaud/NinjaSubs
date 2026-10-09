@@ -232,13 +232,9 @@ _SPEAKER_LABEL_REGEX = re.compile(
 
 def _looks_like_ass(content: str) -> bool:
     """ASS/SSA is not cue-based like SRT/VTT; skip it to avoid corrupting styles."""
-    lowered = content[:8192].lower()
-    return (
-        "[script info]" in lowered
-        or "[v4+ styles]" in lowered
-        or "[v4 styles]" in lowered
-        or "dialogue:" in lowered
-    )
+    from app.utils.ass_converter import is_ass_text
+
+    return is_ass_text(content)
 
 
 # Encoding fallback chain for legacy Arabic subtitle files.
@@ -873,7 +869,7 @@ def clean_subtitle(content: str, options: CleanOptions | None = None) -> str:
             current = cleaned_cues[index]
             following = cleaned_cues[index + 1]
             overlap = current["end"] - following["start"]
-            if 0 < overlap < _MAX_OVERLAP_MS:
+            if 0 < overlap < _MAX_OVERLAP_MS and following["start"] > current["start"]:
                 current["end"] = following["start"]
                 changed = True
 

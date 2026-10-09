@@ -164,7 +164,7 @@ async def test_cache_semantic_version_and_binding_safety():
     cache = SyncCache()
     key = cache.build_key("tt1", "movie", "video", "sub", "edition")
     assert SYNC_PAYLOAD_VERSION in key
-    assert SYNC_VERDICT_ENGINE_VERSION == 6
+    assert SYNC_VERDICT_ENGINE_VERSION == 7
     cache._local["final_sub:tt1:movie:video:sub:edition"] = b"old"
     assert await cache.find_synced_for_target("tt1", "movie", "video", "sub") is None
     alias = cache.build_verdict_alias_key("video", "sub")

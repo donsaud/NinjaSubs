@@ -374,7 +374,7 @@ def test_key_is_stable_for_identical_inputs():
 def test_build_synced_cache_key_shape_is_unchanged():
     """The documented key layout must not drift silently."""
     key = build_synced_cache_key(dict(META), SUB_ID, content_hash="c0ffee", decision="edition")
-    assert key.startswith(f"final_sub:v9-release-context-v2:{IMDB}:s{SEASON}e{EPISODE}:")
+    assert key.startswith(f"final_sub:v10-ass-safety:{IMDB}:s{SEASON}e{EPISODE}:")
     assert key.endswith(":edition:c0ffee")
 
 

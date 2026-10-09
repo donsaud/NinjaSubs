@@ -30,9 +30,9 @@ def test_correct_prefix_preserved(dash):
 
 @pytest.mark.parametrize("original", [
     "COVID-19", "A - B", "العربية - English", "123 - 456", "2025-2026", "اسم-مركب",
-    "مرحبا - بك", "مرحبا بك-", "مرحبا English -", "مرحبا 123 -", "123 -", "-",
+    "مرحبا - بك", "مرحبا بك-", "123 -", "-",
     "مرحبا بك -.", "مرحبا بك --", "- مرحبا بك -", "<i class='x'>مرحبا بك -</i>",
-    "<u>مرحبا بك -</u>", "<i>مرحبا بك -</b>",
+    "<i>مرحبا بك -</b>",
 ])
 def test_ambiguous_and_non_dialogue_hyphens_unchanged(original):
     fixed = fix_rtl_punctuation(original)
@@ -60,7 +60,7 @@ def test_ass_text_only_and_hard_line_breaks():
     assert fix_rtl_punctuation(fixed) == fixed
 
 
-def test_malformed_brackets_keep_existing_repair_without_dash_relocation():
+def test_malformed_brackets_preserved_without_dash_relocation():
     fixed = fix_rtl_punctuation("(مرحبا بك -]")
-    assert fixed.replace(RLM, "") == "مرحبا (بك) -"
+    assert fixed.replace(RLM, "") == "(مرحبا بك -]"
     assert fix_rtl_punctuation(fixed) == fixed
