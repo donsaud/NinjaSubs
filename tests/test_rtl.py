@@ -65,8 +65,8 @@ def test_inverted_paired_bracket_is_mirrored():
     assert fix_rtl_punctuation(")مرحبا(") == f"(مرحبا){RLM}"
 
 
-def test_lone_leading_closing_bracket_moved_and_mirrored():
-    assert fix_rtl_punctuation(")مرحبا") == f"مرحبا({RLM}"
+def test_lone_leading_closing_parenthesis_is_not_guessed():
+    assert fix_rtl_punctuation(")مرحبا") == ")مرحبا"
 
 
 def test_correct_opening_bracket_is_preserved():
@@ -74,9 +74,9 @@ def test_correct_opening_bracket_is_preserved():
 
 
 def test_same_direction_boundary_brackets_are_wrapped():
-    """Legacy lines with the same bracket direction at both ends (e.g. ``(نص(``)."""
-    assert fix_rtl_punctuation("(نص(") == f"(نص){RLM}"
-    assert fix_rtl_punctuation(")نص)") == f"(نص){RLM}"
+    """Ambiguous empty parenthesis spans are declined; square-bracket policy stays."""
+    assert fix_rtl_punctuation("(نص(") == f"(نص({RLM}"
+    assert fix_rtl_punctuation(")نص)") == f")نص){RLM}"
     assert fix_rtl_punctuation("[نص[") == f"[نص]{RLM}"
 
 
@@ -86,9 +86,9 @@ def test_inner_name_bracket_is_wrapped_not_whole_line():
     # Inner opening bracket with a stray sentence-leading bracket.
     assert fix_rtl_punctuation("(آسفة بشأن زوجتك يا سيّد (كوبر") == expected
     assert fix_rtl_punctuation(")آسفة بشأن زوجتك يا سيّد (كوبر") == expected
-    # Lone inner opening and lone trailing closing (missing counterpart).
-    assert fix_rtl_punctuation("آسفة بشأن زوجتك يا سيّد (كوبر") == expected
-    assert fix_rtl_punctuation("آسفة بشأن زوجتك يا سيّد كوبر)") == expected
+    # One-off missing counterparts lack the required two-marker evidence.
+    assert fix_rtl_punctuation("آسفة بشأن زوجتك يا سيّد (كوبر") == "آسفة بشأن زوجتك يا سيّد (كوبر"
+    assert fix_rtl_punctuation("آسفة بشأن زوجتك يا سيّد كوبر)") == f"آسفة بشأن زوجتك يا سيّد كوبر){RLM}"
 
 
 def test_inner_bracket_is_not_moved_to_outer_boundary():
@@ -98,13 +98,13 @@ def test_inner_bracket_is_not_moved_to_outer_boundary():
     assert "(آسفة بشأن زوجتك يا سيّد كوبر)" not in fixed
 
 
-def test_leading_stray_bracket_wraps_trailing_name():
-    """A stray leading bracket must wrap the trailing name, never the first word."""
+def test_only_preexisting_paired_inversion_wraps_trailing_name():
+    """One-off stray parentheses stay visible; older paired inversion is unchanged."""
     expected = f"آسفة لما حصل لزوجتك، يا (كوبر).{RLM}"
-    assert fix_rtl_punctuation(")آسفة لما حصل لزوجتك، يا كوبر.") == expected
+    assert fix_rtl_punctuation(")آسفة لما حصل لزوجتك، يا كوبر.") == f")آسفة لما حصل لزوجتك، يا كوبر.{RLM}"
     assert fix_rtl_punctuation(")آسفة لما حصل لزوجتك، يا (كوبر.") == expected
     # Same corruption but with the bracket glued after the first word.
-    assert fix_rtl_punctuation("آسفة) لما حصل لزوجتك، يا كوبر.") == expected
+    assert fix_rtl_punctuation("آسفة) لما حصل لزوجتك، يا كوبر.") == f"آسفة) لما حصل لزوجتك، يا كوبر.{RLM}"
 
 
 def test_first_word_is_never_parenthesized():
@@ -117,13 +117,14 @@ def test_first_word_is_never_parenthesized():
         fixed = fix_rtl_punctuation(line)
         assert not fixed.startswith("(آسفة")
         assert "(آسفة)" not in fixed
-        assert fixed.startswith("آسفة")
+        if line.count("(") != line.count(")"):
+            assert fixed.replace(RLM, "") == line
 
 
-def test_leading_stray_bracket_without_period_wraps_trailing_name():
+def test_leading_stray_parenthesis_without_period_is_not_guessed():
     assert (
         fix_rtl_punctuation(")آسفة لما حصل لزوجتك، يا كوبر")
-        == f"آسفة لما حصل لزوجتك، يا (كوبر){RLM}"
+        == ")آسفة لما حصل لزوجتك، يا كوبر"
     )
 
 
@@ -250,10 +251,10 @@ def test_ass_override_tag_parentheses_are_not_treated_as_text():
     assert fix_rtl_punctuation(line) == line
 
 
-def test_ass_override_tag_with_inverted_brackets():
+def test_ass_override_tag_with_ambiguous_parentheses_preserves_text():
     line = "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,{\\i1}(نص("
     fixed = fix_rtl_punctuation(line)
-    assert fixed.endswith(f"{{\\i1}}(نص){RLM}")
+    assert fixed.endswith(f"{{\\i1}}(نص({RLM}")
 
 
 # ============================================================================

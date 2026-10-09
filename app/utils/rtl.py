@@ -732,6 +732,21 @@ _TRANSPARENT_BIDI = frozenset({RLM, "\u200e"})
 _DIALOGUE_PAIRS = {"(": ")", "[": "]", '"': '"', "'": "'", "«": "»", "“": "”", "‹": "›"}
 
 
+def _safe_dialogue_tag(text: str, cursor: int) -> tuple[str, bool, int] | None:
+    """Shared token grammar for safe emphasis and generated color markup."""
+    match = _SAFE_DIALOGUE_TAG.match(text, cursor)
+    if match is None:
+        return None
+    token = match.group().lower()
+    closing = token.startswith("</")
+    name = token[2 if closing else 1:].split(">", 1)[0].split()[0]
+    if token not in {f"<{name}>", f"</{name}>"} and not (
+        name == "font" and not closing and _SAFE_FONT_OPEN.fullmatch(token)
+    ):
+        return None
+    return name, closing, match.end()
+
+
 def _dialogue_structure(text: str) -> tuple[bool, str, dict[int, tuple[int, int, int]]]:
     """Validate wrapper nesting and derive visible text without rewriting markup.
 
@@ -749,24 +764,18 @@ def _dialogue_structure(text: str) -> tuple[bool, str, dict[int, tuple[int, int,
             cursor += 1
             continue
         if char == "<":
-            match = _SAFE_DIALOGUE_TAG.match(text, cursor)
-            if match is None:
+            tag = _safe_dialogue_tag(text, cursor)
+            if tag is None:
                 return False, "", spans
-            token = match.group().lower()
-            closing = token.startswith("</")
-            name = token[2 if closing else 1:].split(">", 1)[0].split()[0]
-            if token not in {f"<{name}>", f"</{name}>"} and not (
-                name == "font" and not closing and _SAFE_FONT_OPEN.fullmatch(token)
-            ):
-                return False, "", spans
+            name, closing, tag_end = tag
             if closing:
                 if not stack or stack[-1][0] != f"</{name}>":
                     return False, "", spans
                 _, start, content_start = stack.pop()
-                spans[start] = content_start, cursor, match.end()
+                spans[start] = content_start, cursor, tag_end
             else:
-                stack.append((f"</{name}>", cursor, match.end()))
-            cursor = match.end()
+                stack.append((f"</{name}>", cursor, tag_end))
+            cursor = tag_end
             continue
         if char == ">":
             return False, "", spans
@@ -837,6 +846,380 @@ def _structural_dialogue(core: str) -> str | None:
     return _append_trailing_rlm(_isolate_leading_dash(core))
 
 
+def _legacy_visible_text(core: str) -> tuple[str, list[int], bool]:
+    """Project safe markup to visible offsets; never repair or rewrite tags.
+
+    Unpaired boundary tags are permitted for the evidenced orphan emphasis
+    forms. Crossed tags, unknown attributes and interior orphan tags fail closed.
+    """
+    visible: list[str] = []
+    offsets: list[int] = []
+    stack: list[tuple[str, bool]] = []
+    seen_text = False
+    orphan_suffix = False
+    index = 0
+    while index < len(core):
+        char = core[index]
+        if char == "{" and core[index + 1:index + 2] == "\\":
+            override = _ASS_TAG_REGEX.match(core, index)
+            if override is None:
+                return "", [], False
+            index = override.end()
+            continue
+        if char == "<":
+            tag = _safe_dialogue_tag(core, index)
+            if tag is None:
+                return "", [], False
+            name, closing, tag_end = tag
+            if closing:
+                if stack:
+                    if stack[-1][0] != name:
+                        return "", [], False
+                    stack.pop()
+                else:
+                    orphan_suffix = True
+            else:
+                if orphan_suffix:
+                    return "", [], False
+                stack.append((name, seen_text))
+            index = tag_end
+            continue
+        if char == ">":
+            return "", [], False
+        if char not in _TRANSPARENT_BIDI:
+            if not char.isspace():
+                if orphan_suffix:
+                    return "", [], False
+                seen_text = True
+            visible.append(char)
+            offsets.append(index)
+        index += 1
+    return "".join(visible), offsets, not any(interior for _, interior in stack)
+
+
+def _legacy_visual_order(core: str, preserve_ellipsis: bool = False) -> tuple[str, bool]:
+    """Normalize evidenced two-marker mirrors; flag unsafe legacy candidates.
+
+    The flag prevents a declined candidate from reaching old generic bracket
+    guesses. Existing balanced text and punctuation-only repairs are unaffected.
+    """
+    if "(" not in core and ")" not in core:
+        return core, False
+    visible, offsets, safe = _legacy_visible_text(core)
+    if not safe:
+        return core, True
+    imbalance = visible.count("(") - visible.count(")")
+    if imbalance == 0:
+        return core, False
+    if imbalance not in {-2, 2}:
+        return core, True
+    left, right = 0, len(visible)
+
+    def trim(start: int, end: int) -> tuple[int, int]:
+        while start < end and visible[start].isspace():
+            start += 1
+        while end > start and visible[end - 1].isspace():
+            end -= 1
+        return start, end
+
+    left, right = trim(left, right)
+    if right - left >= 2 and visible[right - 1] in _DIALOGUE_DASHES:
+        if not visible[right - 2].isspace() or sum(char in _DIALOGUE_DASHES for char in visible) != 1:
+            return core, True
+        left, right = trim(left, right - 1)
+    quote_chars = frozenset("\"'«»“”‹›")
+    quotes = [(index, char) for index, char in enumerate(visible[left:right], left)
+              if char in quote_chars]
+    if quotes:
+        if (len(quotes) != 2 or quotes[0][0] != left or quotes[1][0] != right - 1
+                or _DIALOGUE_PAIRS.get(quotes[0][1]) != quotes[1][1]):
+            return core, True
+        left, right = trim(left + 1, right - 1)
+    body = visible[left:right]
+    if not any(unicodedata.category(char).startswith("L")
+               and "ARABIC" in unicodedata.name(char, "") for char in body):
+        return core, True
+    punctuation = next((token for token in ("...", "…", "،") if body.startswith(token)), "")
+    punctuation_start = left
+    left, right = trim(left + len(punctuation), right)
+    if left >= right:
+        return core, True
+    body = visible[left:right]
+    if imbalance == 2:
+        if (not body.startswith("(") or punctuation == "،"
+                or not body[1:].lstrip()
+                or unicodedata.category(body[1:].lstrip()[0])[0] not in {"L", "N"}):
+            return core, True
+        proposal = body[1:] + ")"
+    else:
+        if (not body.endswith(")") or body[:-1].rstrip().endswith(")")
+                or unicodedata.category(body[0])[0] not in {"L", "N"}):
+            return core, True
+        proposal = "(" + body[:-1]
+    balanced, _, spans = _dialogue_structure(proposal)
+    depth = 0
+    for char in proposal:
+        if char == "(":
+            depth += 1
+            if depth > 1:
+                return core, True
+        elif char == ")":
+            depth -= 1
+    if not balanced or any(
+        not any(unicodedata.category(char)[0] in {"L", "N"}
+                for char in proposal[start:end])
+        for opening, (start, end, _) in spans.items() if proposal[opening] == "("
+    ):
+        return core, True
+    # The strict dialogue rule owns ellipsis placement after parenthesis repair.
+    if preserve_ellipsis and punctuation in {"...", "…"}:
+        punctuation = ""
+    # Offset edits place new punctuation inside the original style boundary.
+    edits = {offsets[index]: "" for index in range(punctuation_start,
+                                                  punctuation_start + len(punctuation))}
+    inserts: dict[int, str] = {}
+    if imbalance == 2:
+        edits[offsets[left]] = ""
+        terminal = next((token for token in ("...", "…") if body.endswith(token)), "")
+        end = right
+        if punctuation and terminal:
+            end -= len(terminal)
+            for index in range(end, right):
+                edits[offsets[index]] = ""
+        inserts[offsets[end - 1] + 1] = ")" + (terminal if punctuation and terminal else punctuation)
+    else:
+        edits[offsets[right - 1]] = ""
+        inserts[offsets[left]] = "("
+        if punctuation:
+            first_close = visible.index(")", left, right - 1)
+            destination = visible[first_close + 1:right - 1].lstrip()
+            cluster_end = 0
+            while cluster_end < len(destination) and destination[cluster_end] in "،.…":
+                cluster_end += 1
+            cluster = destination[:cluster_end]
+            existing = "،" in cluster if punctuation == "،" else "..." in cluster or "…" in cluster
+            if not existing:
+                inserts[offsets[first_close] + 1] = punctuation
+    pieces: list[str] = []
+    for index, char in enumerate(core):
+        pieces.append(inserts.get(index, ""))
+        pieces.append(edits.get(index, char))
+    pieces.append(inserts.get(len(core), ""))
+    return "".join(pieces), False
+
+
+def normalize_legacy_visual_order(text: str) -> str:
+    """Pure line-level legacy normalization without bidi anchoring or dash moves."""
+    return _legacy_visual_order(text)[0]
+
+
+def _safe_style_at(text: str, stop: int) -> tuple[str, ...]:
+    stack: list[str] = []
+    cursor = 0
+    while cursor < stop:
+        if text[cursor] == "<":
+            tag = _safe_dialogue_tag(text, cursor)
+            if tag is not None:
+                _, closing, tag_end = tag
+                if closing:
+                    if stack:
+                        stack.pop()
+                else:
+                    stack.append(text[cursor:tag_end].lower())
+                cursor = tag_end
+                continue
+        cursor += 1
+    return tuple(stack)
+
+
+def _ellipsis_dialogue_shape(core: str) -> tuple[str, int, int, list[int]] | None:
+    """Recognize exact leading ellipsis and one separated terminal marker."""
+    visible, offsets, safe = _legacy_visible_text(core)
+    if not safe or "{\\" in core or any(char in "\"'«»“”‹›" for char in visible):
+        return None
+    left = len(visible) - len(visible.lstrip())
+    right = len(visible.rstrip())
+    body = visible[left:right]
+    token = next((item for item in ("...", "…") if body.startswith(item)), "")
+    if not token or body[len(token):].startswith((".", "…")):
+        return None
+    if (len(body) <= len(token) + 2 or body[-1] not in _DIALOGUE_DASHES
+            or not body[-2].isspace() or sum(char in _DIALOGUE_DASHES for char in body) != 1):
+        return None
+    end = right - 1
+    while end > left and visible[end - 1].isspace():
+        end -= 1
+    if not any(unicodedata.category(char).startswith("L")
+               and "ARABIC" in unicodedata.name(char, "")
+               for char in visible[left + len(token):end]):
+        return None
+    if core[offsets[left]:offsets[left] + len(token)] != token:
+        return None
+    return token, left, end, offsets
+
+
+def _normalize_dialogue_ellipsis(core: str) -> str:
+    """Move only evidenced dialogue ellipsis; dash movement stays downstream."""
+    shape = _ellipsis_dialogue_shape(core)
+    if shape is None:
+        return core
+    token, left, end, offsets = shape
+    visible, _, _ = _legacy_visible_text(core)
+    if not _dialogue_structure(visible[left + len(token):end])[0]:
+        return core
+    source = offsets[left]
+    destination = offsets[end - 1] + 1
+    if _safe_style_at(core, source) != _safe_style_at(core, destination):
+        return core
+    # Preserve existing destination punctuation instead of duplicating it.
+    suffix = "" if visible[left:end].endswith(("...", "…")) else token
+    content_start = left + len(token)
+    while content_start < end and visible[content_start].isspace():
+        content_start += 1
+    # Delete only the leading token and its whitespace inside one style span.
+    removal_end = offsets[content_start]
+    if _safe_style_at(core, removal_end) != _safe_style_at(core, source):
+        removal_end = source + len(token)
+    if "<" in core[source:removal_end] or "{" in core[source:removal_end]:
+        removal_end = source + len(token)
+    return core[:source] + core[removal_end:destination] + suffix + core[destination:]
+
+
+def normalize_legacy_dialogue_ellipsis(text: str) -> str:
+    """Structural parenthesis + strict dialogue ellipsis pass, without dash moves."""
+    shape = _ellipsis_dialogue_shape(text)
+    if shape is None:
+        return text
+    normalized, ambiguous = _legacy_visual_order(text, preserve_ellipsis=True)
+    return text if ambiguous else _normalize_dialogue_ellipsis(normalized)
+
+
+def _quote_boundary(line: str, opening: bool) -> str | None:
+    """Relocate one visible quote only within the same safe style context."""
+    visible, offsets, safe = _legacy_visible_text(line)
+    if not safe or visible.count('"') != 1 or "{\\" in line:
+        return None
+    left = len(visible) - len(visible.lstrip())
+    right = len(visible.rstrip())
+    if left >= right:
+        return None
+    quote = visible.index('"')
+    if quote not in {left, right - 1}:
+        return None
+    remaining = line[:offsets[quote]] + line[offsets[quote] + 1:]
+    body, positions, _ = _legacy_visible_text(remaining)
+    start = len(body) - len(body.lstrip())
+    end = len(body.rstrip())
+    if start >= end:
+        return None
+    destination = positions[start] if opening else positions[end - 1] + 1
+
+    if _safe_style_at(line, offsets[quote]) != _safe_style_at(remaining, destination):
+        return None
+    return remaining[:destination] + '"' + remaining[destination:]
+
+
+def _multiline_quote_body(line: str, mirrored_comma: bool, process: bool) -> str:
+    """Reuse line-level mirrors while shielding continuation ellipses."""
+    if process and _ellipsis_dialogue_shape(line) is not None:
+        return _process_segment(line, is_ass=False)
+    visible, offsets, _ = _legacy_visible_text(line)
+    start = len(visible) - len(visible.lstrip())
+    token = next((item for item in ("...", "…") if visible[start:].startswith(item)), "")
+    prefix = ""
+    if token:
+        # Contiguous punctuation only; retain its original style boundary.
+        position = offsets[start]
+        if line[position:position + len(token)] != token:
+            return line
+        prefix = line[:position + len(token)]
+        line = line[position + len(token):]
+    visible, offsets, _ = _legacy_visible_text(line)
+    start = len(visible) - len(visible.lstrip())
+    end = len(visible.rstrip())
+    if mirrored_comma and visible[start:end].startswith("،") and (
+        visible.count("(") == visible.count(")")
+        and _dialogue_structure(visible[start + 1:end])[0]
+    ):
+        position = offsets[start]
+        suffix = "" if visible[start:end].endswith("،") else "،"
+        insertion = offsets[end - 1] + 1
+        line = line[:position] + line[position + 1:insertion] + suffix + line[insertion:]
+    line = normalize_legacy_visual_order(line)
+    if process:
+        line = _process_segment(line, is_ass=False)
+    return prefix + line
+
+
+def _multiline_quote_pair(first: str, second: str, process: bool = False) -> tuple[str, str] | None:
+    projections = [_legacy_visible_text(line) for line in (first, second)]
+    if any(not safe or visible.count('"') != 1 or not any(
+        unicodedata.category(char).startswith("L") and "ARABIC" in unicodedata.name(char, "")
+        for char in visible
+    ) for visible, _, safe in projections):
+        return None
+    a, b = (projection[0].strip() for projection in projections)
+    reversed_quotes = a.endswith('"') and b.startswith('"')
+    modern_quotes = a.startswith('"') and b.endswith('"')
+    if not reversed_quotes and not (process and modern_quotes):
+        return None
+    moved = (_quote_boundary(first, True), _quote_boundary(second, False))
+    if any(line is None for line in moved):
+        return None
+    result: list[str] = []
+    for index, line in enumerate(moved):
+        assert line is not None
+        visible, offsets, _ = _legacy_visible_text(line)
+        quote = offsets[visible.index('"')]
+        body = line[:quote] + line[quote + 1:]
+        body = _multiline_quote_body(body, reversed_quotes and index == 0, process)
+        visible, offsets, _ = _legacy_visible_text(body)
+        start = len(visible) - len(visible.lstrip())
+        end = len(visible.rstrip())
+        destination = offsets[start] if index == 0 else offsets[end - 1] + 1
+        restored = body[:destination] + '"' + body[destination:]
+        result.append(_append_trailing_rlm(restored) if process else restored)
+    return result[0], result[1]
+
+
+_SRT_CUE_TIME = re.compile(
+    r"[0-9]{2,}:[0-9]{2}:[0-9]{2},[0-9]{3} --> "
+    r"[0-9]{2,}:[0-9]{2}:[0-9]{2},[0-9]{3}"
+)
+
+
+def _srt_quote_lines(text: str, process: bool) -> tuple[list[str], set[int]]:
+    """Select adjacent text lines inside complete numbered SRT blocks only."""
+    lines = text.split("\n")
+    protected: set[int] = set()
+    cursor = 0
+    while cursor < len(lines):
+        end = cursor
+        while end < len(lines) and lines[end].strip():
+            end += 1
+        if (end - cursor >= 4 and lines[cursor].lstrip("\ufeff").strip().isdigit()
+                and _SRT_CUE_TIME.fullmatch(lines[cursor + 1].rstrip("\r"))):
+            index = cursor + 2
+            while index + 1 < end:
+                endings = ["\r" if lines[i].endswith("\r") else "" for i in (index, index + 1)]
+                pair = _multiline_quote_pair(lines[index].rstrip("\r"),
+                                             lines[index + 1].rstrip("\r"), process)
+                if pair is not None:
+                    for offset, body in enumerate(pair):
+                        lines[index + offset] = body + endings[offset]
+                        protected.add(index + offset)
+                    index += 2
+                else:
+                    index += 1
+        cursor = end + 1
+    return lines, protected
+
+
+def normalize_legacy_multiline_quotes(text: str) -> str:
+    """Pure SRT cue-level quote normalization; never cross cue boundaries."""
+    return "\n".join(_srt_quote_lines(text, process=False)[0])
+
+
 def _process_segment(segment: str, is_ass: bool) -> str:
     """Normalize one visual segment (a line, or an ASS ``\\N`` sub-segment)."""
     visible = _FORMATTING_TAG_REGEX.sub("", segment)
@@ -858,6 +1241,12 @@ def _process_segment(segment: str, is_ass: bool) -> str:
 
         core, trailing_tags = _split_trailing_tags(core, ass_only=True)
 
+    core, ambiguous_legacy = _legacy_visual_order(
+        core, preserve_ellipsis=_ellipsis_dialogue_shape(core) is not None
+    )
+    if ambiguous_legacy:
+        return f"{leading_tags}{_append_trailing_rlm(core)}{trailing_tags}"
+    core = _normalize_dialogue_ellipsis(core)
     structural = _structural_dialogue(core)
     if structural is not None:
         return f"{leading_tags}{structural}{trailing_tags}"
@@ -887,7 +1276,11 @@ def fix_rtl_punctuation(text: str) -> str:
         return text
 
     fixed_lines: list[str] = []
-    for raw_line in text.split("\n"):
+    cue_lines, protected = _srt_quote_lines(text, process=True)
+    for index, raw_line in enumerate(cue_lines):
+        if index in protected:
+            fixed_lines.append(raw_line)
+            continue
         carriage_return = ""
         line = raw_line
         if line.endswith("\r"):
