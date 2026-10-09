@@ -51,7 +51,7 @@ def test_legacy_repairs_preserve_content_and_are_idempotent(original: str, expec
         '<font color="#fff">مرحبا بك.</font>',
         '<font face="Family (A) [B]" color="#fff">مرحبا بك.</font>',
         ".NET يعمل جيدًا.", "!John مرحبا", ".مرحبا John", "…مرحبا بك.",
-        "- .مرحبا بك...", '"مرحبا', "مرحبا -", "؟Hello.",
+        "- .مرحبا بك...", '"مرحبا', "مرحبا-", "؟Hello.",
         "- مرحبا\n- كيف حالك؟",
         ")<font face=\"Family (A)\">مرحبا بك</font>",
         "<i>آسفة يا كوبر)</i>",

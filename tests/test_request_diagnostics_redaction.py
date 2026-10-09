@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 
-from app.utils.config_parser import encode_user_config
 from app.utils.request_diagnostics import (
     ConfigRedactingFilter,
     describe_configuration,
@@ -35,14 +34,11 @@ def _token(**overrides) -> str:
         "opensubtitles_password": SECRET_PASS,
     }
     base.update(overrides)
-    return encode_user_config(
-        base["subdl_key"],
-        base["subsource_key"],
-        opensubtitles_key=base["opensubtitles_key"],
-        opensubtitles_username=base["opensubtitles_username"],
-        opensubtitles_password=base["opensubtitles_password"],
-        **overrides,
-    )
+    # Build a historical token directly: new serializers omit account fields.
+    import base64
+    import json
+    return base64.urlsafe_b64encode(json.dumps(base).encode()).decode().rstrip("=")
+
 
 
 # --- the token really does carry the secrets (so redaction is not vacuous) ---
@@ -127,8 +123,8 @@ def test_configuration_summary_reports_presence_only():
     assert summary["config_present"] is True
     assert summary["config_decoded"] is True
     assert summary["opensubtitles_key_present"] is True
-    assert summary["opensubtitles_username_present"] is True
-    assert summary["opensubtitles_password_present"] is True
+    assert "opensubtitles_username_present" not in summary
+    assert "opensubtitles_password_present" not in summary
     # No value, in any field, may equal or contain a secret.
     for value in summary.values():
         assert not (isinstance(value, str) and SECRET_KEY in value)

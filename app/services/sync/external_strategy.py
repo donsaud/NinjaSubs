@@ -496,7 +496,7 @@ class ExternalExactStrategy:
                 continue
 
             # Quota protection: every OpenSubtitles download is metered against
-            # the account's daily allowance, and a speculative reference
+            # the provider's download budget, and a speculative reference
             # evaluation can walk through many candidates before one validates.
             # Speculating on a metered download burns that allowance for a guess
             # we have no proof for, so it is only spent when OpenSubtitles has
@@ -1231,7 +1231,7 @@ class ExternalExactStrategy:
         if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
             return ResolvedReference(None)
         # Preserve the existing quota rule exactly: a non-hash OpenSubtitles
-        # download spends the account's metered daily allowance, so it stays
+        # download consumes provider quota, so it stays
         # reserved for MovieHash-exact references.
         if not self._download_allowed(cand, cand_provider, query):
             logger.info("[reference] download skipped reason=non_hash_quota")
@@ -1519,8 +1519,6 @@ class ExternalExactStrategy:
                 target_filename=self._match_filename(query),
                 moviehash=query.video_hash,
                 moviebytesize=query.video_size,
-                username=query.api_keys.get("opensubtitles_username") or None,
-                password=query.api_keys.get("opensubtitles_password") or None,
             )
 
         return await self._search_tiers(_search, query, "opensubtitles")

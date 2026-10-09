@@ -287,15 +287,6 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
     initial_opensubtitles = (
         prefs.opensubtitles_key if prefs.opensubtitles_key != settings.OPENSUBTITLES_API_KEY else ""
     )
-    # The username may be prefilled so an edit does not retype it. The password is
-    # deliberately never echoed back: the config token is base64, not encrypted,
-    # so anything that can render this page could also recover it -- and a
-    # password is the credential most likely to be reused elsewhere.
-    initial_os_username = (
-        prefs.opensubtitles_username
-        if prefs.opensubtitles_username != settings.OPENSUBTITLES_USERNAME
-        else ""
-    )
     initial_exclude_hi = "checked" if prefs.exclude_hi else ""
 
     # User-selectable subtitle badge style (prefilled on the config page)
@@ -356,7 +347,6 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
             .replace("{{initial_subdl}}", initial_subdl)
             .replace("{{initial_subsource}}", initial_subsource)
             .replace("{{initial_opensubtitles}}", initial_opensubtitles)
-        .replace("{{initial_os_username}}", initial_os_username)
             .replace("{{initial_exclude_hi}}", initial_exclude_hi)
             .replace("{{initial_phase2_json}}", initial_phase2_json)
             .replace("{{language_options_html}}", language_options_html)
@@ -492,19 +482,8 @@ async def verify_subsource_endpoint(api_key: str | None = None):
         }
 
 
-async def _verify_opensubtitles(
-        api_key: str | None,
-        account_user: str = "",
-        account_pass: str = "",
-    ) -> dict:
-    """Shared body of the OpenSubtitles verification endpoints.
-
-    The key alone is what search and hash matching need, so a valid key with no
-    account is reported as valid. When a username *and* password are supplied the
-    login is exercised too, because a key can be fine while the account is wrong
-    -- and those are different failures a user needs told apart: the first costs
-    nothing, the second silently caps downloads at the anonymous quota.
-    """
+async def _verify_opensubtitles(api_key: str | None) -> dict:
+    """Validate an OpenSubtitles API key without account authentication."""
     if not api_key or not api_key.strip():
         return {"valid": False, "message": "API key is required"}
 
@@ -525,29 +504,7 @@ async def _verify_opensubtitles(
                 )
                 return {"valid": False, "status": resp.status_code, "detail": resp.text[:100]}
 
-            if not account_user or not account_pass:
-                return {"valid": True, "account_checked": False}
-
-            # Deliberately not cached here. This endpoint is a UI affordance
-            # fired on every keystroke; a cached token would make it report a
-            # stale success after the user mistypes their password.
-            login = await client.post(
-                "https://api.opensubtitles.com/api/v1/login",
-                headers={**headers, "Content-Type": "application/json"},
-                json={"username": account_user, "password": account_pass},
-            )
-            if login.status_code != 200:
-                # The key is still good; only the account failed. Reporting
-                # this as a flat failure would push the user to delete a
-                # working API key.
-                return {
-                    "valid": True,
-                    "account_checked": True,
-                    "account_valid": False,
-                    "account_status": login.status_code,
-                    "message": "API key is valid, but the account login was rejected",
-                }
-            return {"valid": True, "account_checked": True, "account_valid": True}
+            return {"valid": True}
         except Exception as e:
             logger.warning(f"OpenSubtitles verification connection error: {e}")
             return {"valid": False, "error": "Connection error", "message": str(e)}
@@ -555,30 +512,15 @@ async def _verify_opensubtitles(
 
 @app.get("/api/verify/opensubtitles")
 async def verify_opensubtitles_key(api_key: str | None = None):
-    """Validate an OpenSubtitles API key.
-
-    Key only, and it stays that way. This route takes no account credentials
-    because anything in a query string lands in the access log, and a password is
-    the one credential here a user is likely to have reused elsewhere. Use the
-    POST route for the account check.
-    """
+    """Validate an OpenSubtitles API key."""
     return await _verify_opensubtitles(api_key)
 
 
 @app.post("/api/verify/opensubtitles")
-async def verify_opensubtitles_account(payload: dict[str, Any] | None = None):
-    """Validate the API key and, optionally, the OpenSubtitles account login.
-
-    POST with a JSON body so the password is carried in the request content
-    rather than the URL, keeping it out of access logs, browser history and any
-    intermediate proxy log.
-    """
+async def verify_opensubtitles_key_body(payload: dict[str, Any] | None = None):
+    """Validate only the API key; legacy extra body fields are ignored."""
     body = payload if isinstance(payload, dict) else {}
-    return await _verify_opensubtitles(
-        str(body.get("api_key") or "") or None,
-        account_user=str(body.get("username") or "").strip(),
-        account_pass=str(body.get("password") or ""),
-    )
+    return await _verify_opensubtitles(str(body.get("api_key") or "") or None)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -692,15 +634,11 @@ async def _fetch_subtitles_handler(
         query_opensubtitles = request.query_params.get(
             "opensubtitles_key"
         ) or request.query_params.get("opensubtitles_api_key")
-        query_os_username = request.query_params.get("opensubtitles_username")
-        query_os_password = request.query_params.get("opensubtitles_password")
         prefs = parse_user_config(
             config_str,
             query_subdl=query_subdl,
             query_subsource=query_subsource,
             query_opensubtitles=query_opensubtitles,
-            query_opensubtitles_username=query_os_username,
-            query_opensubtitles_password=query_os_password,
         )
     except Exception:
         prefs = UserPreferences()
@@ -1068,8 +1006,6 @@ async def _fetch_subtitles_handler(
             "subdl_key": prefs.subdl_key,
             "subsource_key": prefs.subsource_key,
             "opensubtitles_key": prefs.opensubtitles_key,
-            "opensubtitles_username": prefs.opensubtitles_username,
-            "opensubtitles_password": prefs.opensubtitles_password,
             # Provenance of the credentials above, recorded by the config
             # parser where the precedence rule is applied. It is diagnostic
             # only: no digest or cache key reads it.
@@ -2506,11 +2442,6 @@ async def _serve_subtitle_handler(
     subdl_key = meta.get("subdl_key")
     subsource_key = meta.get("subsource_key")
     opensubtitles_key = meta.get("opensubtitles_key")
-    # Same rule as the keys: never read back from disk, resolve per request. The
-    # password is absent from metadata by design, so this is always empty until
-    # the config below supplies it.
-    opensubtitles_username = meta.get("opensubtitles_username") or ""
-    opensubtitles_password = meta.get("opensubtitles_password") or ""
 
     # If config_str is provided on the URL, it can override or supply missing keys
     if config_str:
@@ -2521,21 +2452,11 @@ async def _serve_subtitle_handler(
             subsource_key = cfg_prefs.subsource_key
         if not opensubtitles_key:
             opensubtitles_key = cfg_prefs.opensubtitles_key
-        if not opensubtitles_username:
-            opensubtitles_username = cfg_prefs.opensubtitles_username
-        if not opensubtitles_password:
-            opensubtitles_password = cfg_prefs.opensubtitles_password
 
     # Server-wide fallback so the un-configured route still authenticates.
     subdl_key = subdl_key or settings.SUBDL_API_KEY or ""
     subsource_key = subsource_key or settings.SUBSOURCE_API_KEY or ""
     opensubtitles_key = opensubtitles_key or getattr(settings, "OPENSUBTITLES_API_KEY", "") or ""
-    opensubtitles_username = (
-        opensubtitles_username or getattr(settings, "OPENSUBTITLES_USERNAME", "") or ""
-    )
-    opensubtitles_password = (
-        opensubtitles_password or getattr(settings, "OPENSUBTITLES_PASSWORD", "") or ""
-    )
 
     if not download_url:
         raise HTTPException(status_code=404, detail="Missing download URL for subtitle")
@@ -2553,8 +2474,6 @@ async def _serve_subtitle_handler(
         raw_archive = await provider.download_archive(
                 download_url,
                 api_key=opensubtitles_key,
-                username=opensubtitles_username,
-                password=opensubtitles_password,
             )
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider_name}")

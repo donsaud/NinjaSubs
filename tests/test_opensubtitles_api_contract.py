@@ -5,12 +5,9 @@ rather than an assumption:
 
 * ``POST /download`` takes ``attributes.files[].file_id``, never the top-level
   ``id``/``subtitle_id``;
-* ``/download`` needs ``Api-Key`` *and* ``Authorization: Bearer <jwt>``;
-* the login ``base_url`` is a bare host, not a URL;
 * HTTP 406 is overloaded -- quota exhausted *or* ``Invalid file_id`` -- and the
   ``message`` field is what tells them apart;
 * HTTP 429 is a request-rate limit and carries ``Retry-After``;
-* the JWT lives 24h with no refresh, so a 401 must force a fresh login;
 * error bodies are sometimes a JSON *array*, not an object.
 
 No network access. Credentials are dummies; nothing here resolves a real key.
@@ -32,8 +29,6 @@ from app.providers.opensubtitles import (
 )
 
 KEY = "dummy-key-not-real"
-USER = "dummy-user"
-PASSWORD = "dummy-password"
 BASE = "https://api.opensubtitles.com/api/v1"
 
 SRT = (
@@ -242,54 +237,8 @@ async def test_an_unrecognised_language_is_not_reported_as_arabic():
     assert results[0].lang != "ara"
 
 
-@pytest.mark.asyncio
-async def test_a_401_invalidates_the_cached_token_so_the_next_call_re_authenticates():
-    """Tokens last 24h with no refresh; a 401 must force a fresh login."""
-    from app.providers.opensubtitles_auth import OPENSUBTITLES_TOKENS
-
-    OPENSUBTITLES_TOKENS.invalidate(KEY, USER, PASSWORD)
-
-    def post(url, headers, json, kw):
-        if url.endswith("/login"):
-            return Response(200, {"token": "JWT", "base_url": "api.opensubtitles.com"})
-        return Response(401, [{"message": "No token in request", "status": 401}])
-
-    def get(url, headers, params, kw):
-        return Response(401, [{"message": "No token in request", "status": 401}])
-
-    stub = Stub(post=post, get=get)
-    result = await provider(stub).search_subtitles(
-        imdb_id="tt1",
-        is_series=False,
-        api_key=KEY,
-        username=USER,
-        password=PASSWORD,
-    )
-    assert result == []
-    # A login was attempted, so the stale token cannot be replayed indefinitely.
-    assert any(u.endswith("/login") for u, _h, _j, _k in stub.posts)
 
 
-@pytest.mark.asyncio
-async def test_a_403_leaves_the_token_alone_because_the_key_is_at_fault():
-    """403 is gateway-level; re-authenticating cannot fix a bad Api-Key."""
-    from app.providers.opensubtitles_auth import OPENSUBTITLES_TOKENS
-
-    OPENSUBTITLES_TOKENS.invalidate(KEY, USER, PASSWORD)
-
-    def post(url, headers, json, kw):
-        return Response(200, {"token": "JWT", "base_url": "api.opensubtitles.com"})
-
-    stub = Stub(post=post, get=lambda *a: Response(403, []))
-    await provider(stub).search_subtitles(
-        imdb_id="tt1",
-        is_series=False,
-        api_key=KEY,
-        username=USER,
-        password=PASSWORD,
-    )
-    # Still holds the token we just obtained: no pointless re-login loop.
-    assert OPENSUBTITLES_TOKENS._tokens
 
 
 @pytest.mark.asyncio
@@ -342,26 +291,20 @@ async def test_search_without_an_api_key_makes_no_request():
 
 
 @pytest.mark.asyncio
-async def test_download_sends_both_the_api_key_and_the_bearer_token():
-    """`/download` documents that BOTH headers are required."""
-    from app.providers.opensubtitles_auth import OPENSUBTITLES_TOKENS
+async def test_download_sends_only_the_api_key():
+    """Downloads use the key without a login or account token."""
 
-    OPENSUBTITLES_TOKENS.invalidate(KEY, USER, PASSWORD)
 
     def post(url, headers, json, kw):
-        if url.endswith("/login"):
-            return Response(200, {"token": "JWT-123", "base_url": "api.opensubtitles.com"})
         assert json == {"file_id": 7144860}
         assert headers.get("Api-Key") == KEY
-        assert headers.get("Authorization") == "JWT-123"
+        assert "Authorization" not in headers
         return Response(200, {"link": "https://www.opensubtitles.com/download/tok/f.srt"})
 
     stub = Stub(post=post, get=lambda *a: Response(200, content=SRT))
     data = await provider(stub).download_archive(
         "/sub/opensubtitles/7144860.srt",
         api_key=KEY,
-        username=USER,
-        password=PASSWORD,
     )
     assert data == SRT
 
@@ -369,14 +312,10 @@ async def test_download_sends_both_the_api_key_and_the_bearer_token():
 @pytest.mark.asyncio
 async def test_download_uses_the_file_id_for_non_srt_formats():
     """The old regex matched only '.srt', so every ASS/VTT download failed."""
-    from app.providers.opensubtitles_auth import OPENSUBTITLES_TOKENS
 
-    OPENSUBTITLES_TOKENS.invalidate(KEY, USER, PASSWORD)
     seen: list[dict] = []
 
     def post(url, headers, json, kw):
-        if url.endswith("/login"):
-            return Response(200, {"token": "JWT", "base_url": "api.opensubtitles.com"})
         seen.append(json)
         return Response(200, {"link": "https://x/f.ass"})
 
@@ -390,30 +329,6 @@ async def test_download_uses_the_file_id_for_non_srt_formats():
     assert [c["file_id"] for c in seen] == [999, 999, 999]
 
 
-@pytest.mark.asyncio
-async def test_download_threads_settings_credentials_to_the_login(monkeypatch):
-    """Credentials configured only in settings used to be dropped, silently
-    demoting the download to the anonymous 5/24h per-IP quota."""
-    from app.config import settings
-    from app.providers.opensubtitles_auth import OPENSUBTITLES_TOKENS
-
-    monkeypatch.setattr(settings, "OPENSUBTITLES_API_KEY", KEY, raising=False)
-    monkeypatch.setattr(settings, "OPENSUBTITLES_USERNAME", USER, raising=False)
-    monkeypatch.setattr(settings, "OPENSUBTITLES_PASSWORD", PASSWORD, raising=False)
-    OPENSUBTITLES_TOKENS.invalidate(KEY, USER, PASSWORD)
-
-    logins: list[dict] = []
-
-    def post(url, headers, json, kw):
-        if url.endswith("/login"):
-            logins.append(json)
-            return Response(200, {"token": "JWT", "base_url": "api.opensubtitles.com"})
-        return Response(200, {"link": "https://x/f.srt"})
-
-    stub = Stub(post=post, get=lambda *a: Response(200, content=SRT))
-    # No credentials passed: everything must come from settings.
-    assert await provider(stub).download_archive("/sub/opensubtitles/7144860.srt") == SRT
-    assert logins and logins[0]["username"] == USER and logins[0]["password"] == PASSWORD
 
 
 @pytest.mark.asyncio
@@ -616,9 +531,6 @@ async def test_no_credential_appears_in_the_returned_reference(caplog):
         data = await provider(stub).download_archive(
             "/sub/opensubtitles/7144860.srt",
             api_key=KEY,
-            username=USER,
-            password=PASSWORD,
         )
     blob = (data or b"").decode("utf-8", "replace") + caplog.text
     assert KEY not in blob
-    assert PASSWORD not in blob

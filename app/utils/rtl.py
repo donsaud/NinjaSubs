@@ -492,14 +492,14 @@ def _relocate_inner_terminal(text: str) -> str:
 def _repair_wrapped_body(inner: str) -> str:
     """Repair plain content or one attribute-free i/b emphasis layer only."""
     if "<" not in inner and ">" not in inner:
-        return _relocate_inner_terminal(inner)
+        return _relocate_inner_terminal(_normalize_pre_reversed_dialogue(inner))
     stripped = inner.strip()
     prefix = stripped[:1] if stripped[:1] in _INNER_TERMINAL_PUNCTUATION else ""
     emphasis = _SIMPLE_EMPHASIS_REGEX.fullmatch(stripped[len(prefix):])
     if emphasis is None:
         return inner
     content = prefix + emphasis.group("body")
-    repaired = _relocate_inner_terminal(content)
+    repaired = _relocate_inner_terminal(_normalize_pre_reversed_dialogue(content))
     if repaired == content:
         return inner
     leading_ws = inner[: len(inner) - len(inner.lstrip())]
@@ -590,7 +590,18 @@ def _normalize_pre_reversed_dialogue(core: str) -> str:
         body = dot_prefix.group(1).strip()
         body = f"{body}."
     elif not (_arabic_dialogue_only(body) and body.endswith(tuple(_LEADING_PUNCTUATION))):
-        return core
+        # New unpunctuated dialogue form: require a separated, single marker
+        # and plain Arabic-only text. Numbers, markup and nested wrappers are
+        # too ambiguous to relocate. Preserve the legacy punctuated rule above.
+        if (
+            not text[:match.start(2)].endswith(tuple(" \t"))
+            or not _arabic_dialogue_only(body)
+            or any(char in _DIALOGUE_DASH_CHARS or char in _BRACKET_CHARS | _QUOTE_CHARS
+                   or char in "<>" or unicodedata.category(char)[0] in {"N", "C"}
+                   for char in body)
+            or not _legacy_punctuation_body(body)
+        ):
+            return core
 
     if not body or not contains_rtl(body):
         return core

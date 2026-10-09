@@ -378,7 +378,7 @@ async def test_opensubtitles_download_archive_success():
 
 @pytest.mark.asyncio
 async def test_opensubtitles_download_archive_direct_http_fallback():
-    """When download_ref is already a direct HTTP link and no key or post needed."""
+    """An existing direct link needs an API key but no link-resolution POST."""
     mock_client = AsyncMock(spec=httpx.AsyncClient)
 
     def mock_get(url, timeout=None, follow_redirects=True):
@@ -392,7 +392,7 @@ async def test_opensubtitles_download_archive_direct_http_fallback():
     provider = OpenSubtitlesProvider(mock_client)
     content = await provider.download_archive(
         "https://cdn.opensubtitles.org/subtitles/direct.srt",
-        api_key="",
+        api_key="valid_key",
     )
 
     assert content is not None
@@ -526,15 +526,10 @@ async def test_opensubtitles_serve_subtitle_endpoint(client, monkeypatch):
         assert resp.headers["content-type"].startswith("application/x-subrip")
         assert b"Subtitle delivered successfully" in resp.content
         # Authentication still works, resolved from the environment...
-        # The account credentials are forwarded as well (empty here, because
-        # none were configured); they are optional and only raise the download
-        # quota. What matters for this route is that the key is resolved from the
-        # environment and that the persisted key was not reused.
+        # Only the effective API key is forwarded.
         mock_dl.assert_called_once_with(
             "/sub/opensubtitles/77777.srt",
             api_key="env_os_key",
-            username="",
-            password="",
         )
     # ...and the cached secret is gone from disk, not merely unused.
     import json as _json

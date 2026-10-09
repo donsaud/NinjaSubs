@@ -25,8 +25,6 @@ def encode_user_config(
     nuvio_mode: bool = False,
     opensubtitles_key: str | None = None,
     opensubtitles_api_key: str | None = None,
-    opensubtitles_username: str | None = None,
-    opensubtitles_password: str | None = None,
     hi_preference: str | None = None,
     badge_parts: list[str] | None = None,
     badge_format: str | None = None,
@@ -68,15 +66,6 @@ def encode_user_config(
     os_key = opensubtitles_key or opensubtitles_api_key
     if os_key and os_key.strip():
         payload["opensubtitles_key"] = os_key.strip()
-    # Account credentials travel as a pair or not at all: half a login decodes
-    # into a request that can only fail.
-    if (
-        opensubtitles_username
-        and opensubtitles_username.strip()
-        and opensubtitles_password
-    ):
-        payload["opensubtitles_username"] = opensubtitles_username.strip()
-        payload["opensubtitles_password"] = opensubtitles_password
     if languages:
         payload["languages"] = [
             language.strip().lower() for language in languages if language.strip()
@@ -154,8 +143,6 @@ def parse_user_config(
     query_subdl: str | None = None,
     query_subsource: str | None = None,
     query_opensubtitles: str | None = None,
-    query_opensubtitles_username: str | None = None,
-    query_opensubtitles_password: str | None = None,
 ) -> UserPreferences:
     """
     Extract UserPreferences from URL path or query params.
@@ -165,12 +152,6 @@ def parse_user_config(
     user_subdl: str | None = query_subdl.strip() if query_subdl else None
     user_subsource: str | None = query_subsource.strip() if query_subsource else None
     user_opensubtitles: str | None = query_opensubtitles.strip() if query_opensubtitles else None
-    user_os_username: str | None = (
-        query_opensubtitles_username.strip() if query_opensubtitles_username else None
-    )
-    user_os_password: str | None = (
-        query_opensubtitles_password if query_opensubtitles_password else None
-    )
     languages: list[str] = []
     exclude_hi: bool = False
     nuvio_mode: bool = False
@@ -229,19 +210,6 @@ def parse_user_config(
                         or data.get("opensubtitles")
                         or data.get("opensubtitlesKey")
                     )
-                if not user_os_username:
-                    user_os_username = (
-                        data.get("opensubtitles_username")
-                        or data.get("opensubtitles_user")
-                        or data.get("opensubtitlesUsername")
-                    )
-                if not user_os_password:
-                    user_os_password = (
-                        data.get("opensubtitles_password")
-                        or data.get("opensubtitles_pass")
-                        or data.get("opensubtitlesPassword")
-                    )
-
                 cfg_langs = data.get("languages") or data.get("langs")
                 if isinstance(cfg_langs, list):
                     languages = [
@@ -387,24 +355,6 @@ def parse_user_config(
                         if k in parsed_qs:
                             user_opensubtitles = parsed_qs[k][0]
                             break
-                    if not user_os_username:
-                        for k in (
-                            "opensubtitles_username",
-                            "opensubtitles_user",
-                            "opensubtitlesUsername",
-                        ):
-                            if k in parsed_qs:
-                                user_os_username = parsed_qs[k][0]
-                                break
-                    if not user_os_password:
-                        for k in (
-                            "opensubtitles_password",
-                            "opensubtitles_pass",
-                            "opensubtitlesPassword",
-                        ):
-                            if k in parsed_qs:
-                                user_os_password = parsed_qs[k][0]
-                                break
                 if not languages and "languages" in parsed_qs:
                     languages = [
                         language.strip().lower()
@@ -528,19 +478,6 @@ def parse_user_config(
     effective_opensubtitles = (
         user_opensubtitles or getattr(settings, "OPENSUBTITLES_API_KEY", "") or ""
     ).strip()
-    # Account credentials. Per-request wins; the environment is the fallback for
-    # a single-user self-hosted instance. A half-pair is discarded rather than
-    # half-applied: OpenSubtitles authenticates the two together, and a lone half
-    # would just burn a login attempt against a 30/hour limit.
-    _os_user = (
-        user_os_username or getattr(settings, "OPENSUBTITLES_USERNAME", "") or ""
-    ).strip()
-    _os_pass = user_os_password or getattr(settings, "OPENSUBTITLES_PASSWORD", "") or ""
-    if _os_user and _os_pass:
-        effective_os_username, effective_os_password = _os_user, _os_pass
-    else:
-        effective_os_username, effective_os_password = "", ""
-
     # Provenance of the EFFECTIVE credentials, recorded here because this is
     # the only point where the choice between the manifest value and the
     # environment value still exists. Downstream, the resolved value lands in
@@ -551,18 +488,16 @@ def parse_user_config(
     # This is a label only. It never participates in the credential digest, so
     # recording it cannot change cache identity or hit rates.
     _manifest = bool(
-        user_subdl or user_subsource or user_opensubtitles or user_os_username
+        user_subdl or user_subsource or user_opensubtitles
     )
     _env = bool(
         settings.SUBDL_API_KEY or settings.SUBSOURCE_API_KEY
         or getattr(settings, "OPENSUBTITLES_API_KEY", "")
-        or getattr(settings, "OPENSUBTITLES_USERNAME", "")
     )
     _any = bool(
         effective_subdl
         or effective_subsource
         or effective_opensubtitles
-        or effective_os_username
     )
     if not _any:
         credential_source_label = "default"
@@ -578,10 +513,7 @@ def parse_user_config(
 
     logger.info(
         f"[Config Check] Exclude HI: {exclude_hi} | Languages: {languages} | "
-        f"OpenSubtitles: {'Yes' if effective_opensubtitles else 'No'} | "
-        # Presence only. The account credentials are never logged, not even
-        # truncated: a log line is the wrong place for either.
-        f"OpenSubtitles account: {'Yes' if effective_os_username else 'No'}"
+        f"OpenSubtitles: {'Yes' if effective_opensubtitles else 'No'}"
     )
 
     if hi_preference == "neutral" and exclude_hi:
@@ -591,8 +523,6 @@ def parse_user_config(
         subdl_key=effective_subdl,
         subsource_key=effective_subsource,
         opensubtitles_key=effective_opensubtitles,
-        opensubtitles_username=effective_os_username,
-        opensubtitles_password=effective_os_password,
         credential_source=credential_source_label,
         languages=languages,
         exclude_hi=exclude_hi,

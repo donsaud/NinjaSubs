@@ -107,7 +107,7 @@ def test_configure_legacy_token_shows_exactly_three_key_required_providers(clien
     assert re.findall(r'<span class="provider-name">([^<]+)</span>', body) == [
         "SubDL", "SubSource", "OpenSubtitles"]
     assert body.count("Requires Key") == 2
-    assert body.count("API Key + Account") == 1
+    assert body.count("API Key</span>") == 1
     assert "Free / No Key" not in body
     for toggle in ("enableGestdown", "enableIsubtitles", "enableYifysubtitles", "enableSubtitlecat"):
         assert toggle not in body

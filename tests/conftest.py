@@ -79,8 +79,6 @@ def no_ambient_opensubtitles_credentials(monkeypatch):
 
     for name in (
         "OPENSUBTITLES_API_KEY",
-        "OPENSUBTITLES_USERNAME",
-        "OPENSUBTITLES_PASSWORD",
     ):
         monkeypatch.setattr(settings, name, "", raising=False)
         monkeypatch.delenv(name, raising=False)

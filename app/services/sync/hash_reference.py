@@ -137,7 +137,7 @@ class OpenSubtitlesHashReferenceStrategy:
             )
             return ResolvedReference(None)
 
-        api_key, username, password = self._credentials(query)
+        api_key = self._api_key(query)
 
         # 2. No API key means the upstream search cannot succeed at all. Skip
         #    before the request rather than after.
@@ -186,8 +186,6 @@ class OpenSubtitlesHashReferenceStrategy:
                     exclude_hi=False,
                     moviehash=video_hash,
                     moviebytesize=query.video_size,
-                    username=username,
-                    password=password,
                 ),
                 self.timeout,
             )
@@ -229,10 +227,8 @@ class OpenSubtitlesHashReferenceStrategy:
             getattr(best, "format", "?"),
         )
 
-        # 7. Download exactly one candidate. The full credential set is
-        #    forwarded: an API key alone authenticates search, but the download
-        #    endpoint exchanges a session token and is quota-metered per account.
-        raw = await self._download(best, api_key, username, password)
+        # 7. Download exactly one candidate using its API key.
+        raw = await self._download(best, api_key)
         if not raw:
             logger.warning(
                 "[hashref] download of hash-matched reference %r failed -> fallback",
@@ -310,24 +306,10 @@ class OpenSubtitlesHashReferenceStrategy:
             reference_trust=ReferenceTrust.STRONG.value,
         )
 
-    def _credentials(self, query: ReferenceQuery) -> tuple[str, str, str]:
-        """Resolve the effective key/account, request config winning over env.
-
-        The settings attribute names are spelled out rather than derived from
-        the query keys: the query uses ``opensubtitles`` while the setting is
-        ``OPENSUBTITLES_API_KEY``, so an upper-cased lookup would silently find
-        nothing and disable the whole path.
-        """
-        keys = query.api_keys or {}
-
-        def pick(key: str, attr: str) -> str:
-            return str(keys.get(key) or getattr(settings, attr, "") or "").strip()
-
-        return (
-            pick("opensubtitles", "OPENSUBTITLES_API_KEY"),
-            pick("opensubtitles_username", "OPENSUBTITLES_USERNAME"),
-            pick("opensubtitles_password", "OPENSUBTITLES_PASSWORD"),
-        )
+    def _api_key(self, query: ReferenceQuery) -> str:
+        """Resolve the API key, request config winning over the environment."""
+        return str((query.api_keys or {}).get("opensubtitles")
+                   or settings.OPENSUBTITLES_API_KEY or "").strip()
 
     def _breaker_open(self) -> bool:
         checker = getattr(self._provider, "is_breaker_open", None)
@@ -337,7 +319,7 @@ class OpenSubtitlesHashReferenceStrategy:
             return False
 
     async def _download(
-        self, release: Any, api_key: str, username: str, password: str
+        self, release: Any, api_key: str
     ) -> bytes | None:
         """Download the single selected reference, or ``None`` on any failure."""
         reference = getattr(release, "download_url", None)
@@ -347,16 +329,7 @@ class OpenSubtitlesHashReferenceStrategy:
             return await self._provider.download_archive(
                 reference,
                 api_key=api_key,
-                username=username,
-                password=password,
             )
-        except TypeError:
-            # A provider or test double that predates the credential keywords.
-            try:
-                return await self._provider.download_archive(reference, api_key=api_key)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[hashref] reference download failed: %s", exc)
-                return None
         except Exception as exc:  # noqa: BLE001 - fall back, never fail the request
             logger.warning("[hashref] reference download failed: %s", exc)
             return None

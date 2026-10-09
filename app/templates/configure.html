@@ -557,13 +557,6 @@
             opacity: 1;
             margin-top: 12px;
         }
-        /* The OpenSubtitles card carries three inputs and two explanatory notes,
-           so the single-field height above would clip it. Applied alongside
-           `.expanded`, which the toggle script adds and removes on its own, so
-           this class must never be toggled with it. */
-        .provider-key.expanded.expanded-tall {
-            max-height: 520px;
-        }
         .provider-key-wrap { position: relative; }
         .provider-key-wrap .mono-input { padding-right: 158px !important; }
         .provider-key.credentials-disabled {
@@ -571,7 +564,6 @@
             margin-top: 12px;
             opacity: .45;
         }
-        .provider-key.credentials-disabled.expanded-tall { max-height: 520px; }
         .credentials-disabled input, .credentials-disabled button { cursor: not-allowed; }
         .credentials-disabled .provider-key-action { pointer-events: none; cursor: not-allowed; }
         .credential-reveal {
@@ -606,9 +598,6 @@
             border-radius: 10px !important;
         }
         .credential-input:-webkit-autofill:focus { border-color: var(--line-h) !important; }
-        .account-credentials { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
-        .account-credentials-title { margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--w2); }
-        .account-credentials-note { margin-bottom: 8px; font-size: 11px; line-height: 1.5; color: var(--g2); }
         @media (max-width: 480px) {
             .provider-id { display: grid; grid-template-columns: 22px minmax(0, 1fr); column-gap: 10px; row-gap: 4px; }
             .provider-id img { grid-row: 1 / span 2; }
@@ -995,14 +984,14 @@
                                 <div class="provider-id">
                                     <img src="/static/opensubtitles.png" alt="OpenSubtitles">
                                     <span class="provider-name">OpenSubtitles</span>
-                                    <span class="badge-tag bg-amber-500/10 text-amber-400 border-amber-500/20">API Key + Account</span>
+                                    <span class="badge-tag bg-amber-500/10 text-amber-400 border-amber-500/20">API Key</span>
                                 </div>
                                 <label class="toggle">
                                     <input type="checkbox" id="enableOpensubtitles" checked class="peer sr-only">
                                     <span class="toggle-track"></span>
                                 </label>
                             </div>
-                            <div id="opensubtitlesKey" class="provider-key expanded-tall">
+                            <div id="opensubtitlesKey" class="provider-key">
                                 <div class="provider-key-wrap">
                                     <input type="password" id="opensubtitles-key" aria-label="OpenSubtitles API key" value="{{initial_opensubtitles}}" placeholder="Paste your OpenSubtitles API key" class="mono-input credential-input w-full" autocomplete="off">
                                     <button type="button" class="credential-reveal" data-reveal="opensubtitles-key" data-label="OpenSubtitles API key" aria-controls="opensubtitles-key" aria-label="Show OpenSubtitles API key" title="Show OpenSubtitles API key" aria-pressed="false">
@@ -1011,18 +1000,6 @@
                                     <a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="provider-key-action">Get API Key <span class="text-[10px]">&#8599;</span></a>
                                 </div>
                                 <div id="opensubtitles-status" class="mt-2"></div>
-                                <div class="account-credentials">
-                                    <div class="account-credentials-title">Account</div>
-                                    <p class="account-credentials-note">Optional credentials for authenticated access.</p>
-                                    <div>
-                                        <label for="opensubtitles-username" class="block text-xs text-slate-400 mb-1.5">Username</label>
-                                        <input type="text" id="opensubtitles-username" value="{{initial_os_username}}" placeholder="your OpenSubtitles username" class="mono-input credential-input w-full" autocomplete="username">
-                                    </div>
-                                    <div class="mt-2">
-                                        <label for="opensubtitles-password" class="block text-xs text-slate-400 mb-1.5">Password</label>
-                                        <input type="password" id="opensubtitles-password" value="" placeholder="your OpenSubtitles password" class="mono-input credential-input w-full" autocomplete="current-password">
-                                    </div>
-                                </div>
                             </div>
                         </div>
 
@@ -1754,17 +1731,6 @@
             return document.getElementById("opensubtitles-key") || document.getElementById("opensubtitlesKey");
         }
 
-        // Account credentials. Read separately from the API key because they are
-        // optional and have a different consequence: the key identifies the
-        // application, the account only raises the download quota.
-        function getOpenSubtitlesUsernameInput() {
-            return document.getElementById("opensubtitles-username") || document.getElementById("opensubtitlesUsername");
-        }
-
-        function getOpenSubtitlesPasswordInput() {
-            return document.getElementById("opensubtitles-password") || document.getElementById("opensubtitlesPassword");
-        }
-
         function getSubdlStatus() {
             return document.getElementById("subdl-status") || document.getElementById("subdlStatus");
         }
@@ -1784,13 +1750,6 @@
             const subdl = subdlEl ? subdlEl.value.trim() : "";
             const subsource = subsourceEl ? subsourceEl.value.trim() : "";
             const opensubtitles = opensubtitlesEl ? opensubtitlesEl.value.trim() : "";
-            const osUserEl = getOpenSubtitlesUsernameInput();
-            const osPassEl = getOpenSubtitlesPasswordInput();
-            const osUsername = osUserEl ? osUserEl.value.trim() : "";
-            // Not trimmed: a password may legitimately begin or end with
-            // whitespace, and silently trimming it would lock the user out of
-            // their own account.
-            const osPassword = osPassEl ? osPassEl.value : "";
             const excludeHi = document.getElementById("excludeHi").checked;
 
             const langs = getSelectedLanguages();
@@ -1799,12 +1758,6 @@
             if (subdl) configObj.subdl_key = subdl;
             if (subsource) configObj.subsource_key = subsource;
             if (opensubtitles) configObj.opensubtitles_key = opensubtitles;
-            // Both or neither. Half a pair decodes into a login that can only
-            // fail, and each attempt burns OpenSubtitles' 30/hour login budget.
-            if (osUsername && osPassword) {
-                configObj.opensubtitles_username = osUsername;
-                configObj.opensubtitles_password = osPassword;
-            }
             if (langs.length > 0) configObj.languages = langs;
             if (excludeHi) configObj.exclude_hi = true;
 
@@ -2161,12 +2114,6 @@
 
         function openSubtitlesVerificationLabel(data) {
             if (data.valid !== true) return "API not verified";
-            if (data.account_checked === true && data.account_valid === true) {
-                return "API & account verified";
-            }
-            if (data.account_checked === true && data.account_valid === false) {
-                return "API verified; account login rejected";
-            }
             return "API verified";
         }
 
@@ -2181,27 +2128,16 @@
                 statusEl.innerHTML = `<span class="flex items-center gap-1.5 text-xs text-[#8b929a]">${spinIconSvg}<span>Checking...</span></span>`;
             }
             try {
-                // POST with a JSON body, not a query string. A password in the URL
-                // ends up in the server access log, browser history and any
-                // intermediate proxy log; in the request body it does not.
-                const uEl = getOpenSubtitlesUsernameInput();
-                const pEl = getOpenSubtitlesPasswordInput();
-                const username = uEl ? uEl.value.trim() : "";
-                const password = pEl ? pEl.value : "";
                 const res = await fetch("/api/verify/opensubtitles", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         api_key: trimmedKey,
-                        username,
-                        password,
                     }),
                 });
                 const data = await res.json();
-                // Never apply a login verdict to credentials changed during the request.
-                if (getOpenSubtitlesInput().value.trim() !== trimmedKey ||
-                    (uEl ? uEl.value.trim() : "") !== username ||
-                    (pEl ? pEl.value : "") !== password) return;
+                // Discard a verdict if the API key changed during validation.
+                if (getOpenSubtitlesInput().value.trim() !== trimmedKey) return;
                 const curStatus = getOpenSubtitlesStatus();
                 if (!curStatus) return;
                 if (data.valid === true) {
@@ -2248,18 +2184,6 @@
                 updateUrls();
             });
         }
-
-        [getOpenSubtitlesUsernameInput(), getOpenSubtitlesPasswordInput()].forEach((input) => {
-            if (!input) return;
-            input.addEventListener("input", () => {
-                clearTimeout(opensubtitlesDebounceTimer);
-                updateUrls();
-                const status = getOpenSubtitlesStatus();
-                if (status) status.innerHTML = "";
-                const key = getOpenSubtitlesInput().value.trim();
-                if (key) opensubtitlesDebounceTimer = setTimeout(() => verifyOpenSubtitlesKey(key), 600);
-            });
-        });
 
         document.getElementById("excludeHi").addEventListener("change", () => {
             updateBadgePreview();

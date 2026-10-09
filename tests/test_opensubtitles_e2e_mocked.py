@@ -7,7 +7,6 @@ construction:
     Stremio request params
       -> OpenSubtitlesProvider.search_subtitles(moviehash, moviebytesize)
       -> attributes.moviehash_match == true  (the only accepted proof)
-      -> POST /login  (Api-Key plus username/password)
       -> POST /download  {"file_id": files[].file_id}
       -> GET the returned link
       -> payload screened as real subtitle content
@@ -30,15 +29,12 @@ import httpx
 import pytest
 
 from app.providers.opensubtitles import OPENSUBTITLES_BREAKER, OpenSubtitlesProvider
-from app.providers.opensubtitles_auth import OPENSUBTITLES_TOKENS
 from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.hash_reference import OpenSubtitlesHashReferenceStrategy
 from app.services.sync.orchestrator import SyncOrchestrator
 from app.services.sync_service import SubtitleSyncService
 
 KEY = "dummy-key-not-real"
-USER = "dummy-user"
-PASSWORD = "dummy-password"
 HASH = "239f938f5b1d6ebd"
 SIZE = 8410835756
 FILE_ID = 7144860
@@ -116,11 +112,6 @@ class FakeOpenSubtitles:
         raise AssertionError(f"unexpected GET {url}")
 
     async def post(self, url, headers=None, json=None, **kw):
-        if url.endswith("/login"):
-            self.logins += 1
-            return _json_response(
-                200, {"token": "JWT-abc", "base_url": "api.opensubtitles.com"}
-            )
         if url.endswith("/download"):
             self.downloads.append({"body": json, "headers": headers})
             return _json_response(200, {"link": DOWNLOAD_LINK})
@@ -130,11 +121,8 @@ class FakeOpenSubtitles:
 @pytest.fixture(autouse=True)
 def _reset():
     OPENSUBTITLES_BREAKER.reset()
-    OPENSUBTITLES_TOKENS.invalidate(KEY, USER, PASSWORD)
-    OPENSUBTITLES_TOKENS.invalidate(KEY, "", "")
     yield
     OPENSUBTITLES_BREAKER.reset()
-    OPENSUBTITLES_TOKENS.invalidate(KEY, USER, PASSWORD)
 
 
 class RecordingSyncService(SubtitleSyncService):
@@ -170,8 +158,6 @@ async def _run(tmp_path: Path, fake: FakeOpenSubtitles, target_text: str):
             "video_hash": HASH,
             "video_size": SIZE,
             "opensubtitles_key": KEY,
-            "opensubtitles_username": USER,
-            "opensubtitles_password": PASSWORD,
         },
         "target-sub-id",
         True,
@@ -198,13 +184,13 @@ async def test_full_flow_reaches_alass_with_the_reference_in_argv1(tmp_path, mon
     assert str(sent["moviebytesize"]) == str(SIZE)
     assert "languages" not in sent, "the reference search must not filter by language"
 
-    # 2. Logged in, then downloaded with BOTH required headers and the file_id.
-    assert fake.logins == 1
+    # 2. Downloaded with the API key and file_id, without login.
+    assert fake.logins == 0
     assert len(fake.downloads) == 1
     assert fake.downloads[0]["body"] == {"file_id": FILE_ID}
     headers = fake.downloads[0]["headers"]
     assert headers["Api-Key"] == KEY
-    assert headers["Authorization"] == "JWT-abc"
+    assert "Authorization" not in headers
 
     # 3. The link was fetched exactly once.
     assert fake.link_fetches == 1
@@ -234,8 +220,7 @@ async def test_a_result_without_moviehash_match_never_becomes_a_reference(tmp_pa
 
     _orch, sync, _out = await _run(tmp_path, fake, target)
 
-    # A search-time login is expected and harmless (the JWT raises the search
-    # quota). What must not happen is spending a *download*, or running alass.
+    # Search does not spend a download or run ALASS.
     assert fake.downloads == []
     assert sync.calls == []
 
@@ -295,7 +280,7 @@ async def test_a_second_request_reuses_the_cached_reference_without_any_call(tmp
     assert len(fake.searches) == 1, "cache hit must not re-search OpenSubtitles"
     assert len(fake.downloads) == 1, "cache hit must not re-download"
     assert fake.link_fetches == 1
-    assert fake.logins == 1
+    assert fake.logins == 0
 
 
 @pytest.mark.asyncio
@@ -320,8 +305,6 @@ async def test_the_cache_does_not_leak_across_videos(tmp_path, monkeypatch):
         "video_size": SIZE,
         "api_keys": {
             "opensubtitles": KEY,
-            "opensubtitles_username": USER,
-            "opensubtitles_password": PASSWORD,
         },
     }
     await strategy.resolve_with_provenance(ReferenceQuery(video_hash=HASH, **base))
@@ -353,9 +336,6 @@ async def test_opensubtitles_failing_never_breaks_the_request(tmp_path, monkeypa
     # path is never exercised.
     class Quota(FakeOpenSubtitles):
         async def post(self, url, headers=None, json=None, **kw):
-            if url.endswith("/login"):
-                self.logins += 1
-                return _json_response(200, {"token": "JWT", "base_url": "api.opensubtitles.com"})
             self.downloads.append({"body": json, "headers": headers})
             return _json_response(
                 406,
@@ -408,15 +388,12 @@ async def test_no_hash_metadata_means_no_opensubtitles_call_at_all(tmp_path, mon
 def test_no_real_credential_is_present_in_this_suite():
     """Guards the claim boundary: these tests never touch the live API.
 
-    Asserting on the literal JWT header prefix cannot live in this file, because
-    the assertion itself would contain it. The structural check is what matters:
     every credential here is an obvious dummy.
     """
     source = Path(__file__).read_text(encoding="utf-8")
     assert KEY == "dummy-key-not-real"
-    assert PASSWORD == "dummy-password"
-    for value in (KEY, USER, PASSWORD, "JWT-abc", "JWT"):
-        assert value.lower().startswith(("dummy", "jwt"))
+    for value in (KEY,):
+        assert value.lower().startswith(("dummy",))
         assert f'"{value}"' in source
     # Nothing resembling a real 40+ character OpenSubtitles consumer key.
     assert not re.search(r'"[A-Za-z0-9]{40,}"', source)

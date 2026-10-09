@@ -116,14 +116,10 @@ def test_credentials_remain_separate_from_the_enable_flag(enabled):
         "k1",
         "k2",
         opensubtitles_key="OSKEY",
-        opensubtitles_username="osuser",
-        opensubtitles_password="ospass",
         enable_opensubtitles=enabled,
     )
     prefs = parse_user_config(token)
     assert prefs.opensubtitles_key == "OSKEY"
-    assert prefs.opensubtitles_username == "osuser"
-    assert prefs.opensubtitles_password == "ospass"
     assert prefs.enable_opensubtitles is enabled
 
 
@@ -137,16 +133,12 @@ def test_a_credential_without_the_flag_does_not_enable_the_provider():
         "k1",
         "k2",
         opensubtitles_key="OSKEY",
-        opensubtitles_username="osuser",
-        opensubtitles_password="ospass",
     )
     assert parse_user_config(token).enable_opensubtitles is True
     off = encode_user_config(
         "k1",
         "k2",
         opensubtitles_key="OSKEY",
-        opensubtitles_username="osuser",
-        opensubtitles_password="ospass",
         enable_opensubtitles=False,
     )
     assert parse_user_config(off).enable_opensubtitles is False

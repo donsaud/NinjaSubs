@@ -72,7 +72,7 @@ def check_addon(base: str) -> dict:
         print(_c("  FAIL  no provider credentials configured.", RED))
         print(_c("  Stremio would list ZERO subtitles. Add a key to .env:", DIM))
         print(_c("    SUBDL_KEY=...  or  SUBSOURCE_KEY=...  "
-                 "or  OPENSUBTITLES_USERNAME/PASSWORD_HASH", DIM))
+                 "or  OPENSUBTITLES_API_KEY=...", DIM))
         return {"ok": False, "reason": "no-credentials", "health": health}
     if missing:
         print(_c(f"  note   not configured: {', '.join(missing)}", YELLOW))

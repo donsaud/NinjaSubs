@@ -310,21 +310,20 @@ async def test_provider_omits_the_language_filter_for_an_empty_list():
 
 
 @pytest.mark.asyncio
-async def test_download_forwards_the_full_credential_set(strategy_factory):
-    """An API key authenticates search; the download is what needs the session."""
+async def test_download_forwards_only_the_api_key(strategy_factory):
+    """Search and download both use API-key-only access."""
     provider = RecordingProvider([make_release()], payload=reference_text().encode())
     await strategy_factory(provider).resolve_with_provenance(make_query())
 
     _reference, api_key, username, password = provider.download_calls[0]
     assert api_key == API_KEY
-    assert username == USER
-    assert password == PASSWORD
+    assert username is None
+    assert password is None
 
 
 @pytest.mark.asyncio
 async def test_credentials_fall_back_to_environment(strategy_factory, monkeypatch):
     monkeypatch.setattr("app.services.sync.hash_reference.settings.OPENSUBTITLES_API_KEY", "env-key")
-    monkeypatch.setattr("app.services.sync.hash_reference.settings.OPENSUBTITLES_USERNAME", "env-user")
     provider = RecordingProvider([make_release()], payload=reference_text().encode())
     query = make_query(api_keys={})
 
@@ -332,7 +331,7 @@ async def test_credentials_fall_back_to_environment(strategy_factory, monkeypatc
 
     assert resolved.text is not None
     _reference, api_key, username, _password = provider.download_calls[0]
-    assert (api_key, username) == ("env-key", "env-user")
+    assert (api_key, username) == ("env-key", None)
 
 
 @pytest.mark.asyncio
@@ -429,7 +428,7 @@ async def test_quota_responses_trip_the_shared_breaker_not_a_local_retry():
     OPENSUBTITLES_BREAKER.reset()
     try:
         url = await OpenSubtitlesProvider.get_download_url(
-            provider, 1, API_KEY, username=USER, password=PASSWORD
+            provider, 1, API_KEY
         )
         assert url is None
         assert OPENSUBTITLES_BREAKER.is_open() is True

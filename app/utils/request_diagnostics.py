@@ -37,8 +37,6 @@ _CREDENTIAL_FIELDS = (
     "subdl_key",
     "subsource_key",
     "opensubtitles_key",
-    "opensubtitles_username",
-    "opensubtitles_password",
 )
 
 
@@ -192,14 +190,12 @@ class RequestDiagnosticsMiddleware(BaseHTTPMiddleware):
             summary = describe_configuration(token)
             logger.info(
                 "[diag] req=%s route=%s status=arriving config_present=1 "
-                "config_decoded=%s os_key_present=%s os_user_present=%s "
-                "os_pass_present=%s enable_os=%s",
+                "config_decoded=%s os_key_present=%s "
+                "enable_os=%s",
                 request_id,
                 route,
                 summary.get("config_decoded"),
                 summary.get("opensubtitles_key_present"),
-                summary.get("opensubtitles_username_present"),
-                summary.get("opensubtitles_password_present"),
                 summary.get("enable_opensubtitles", "(default)"),
             )
         else:

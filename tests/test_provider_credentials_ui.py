@@ -57,18 +57,18 @@ def test_masked_inputs_and_accessible_reveal_controls(client, provider, label):
 
 def test_credential_prefill_and_password_privacy_unchanged(client):
     token = encode_user_config(subdl_key="demo-subdl", subsource_key="demo-subsource",
-                               opensubtitles_key="demo-os", opensubtitles_username="demo-user",
-                               opensubtitles_password="demo-password", enable_subdl=False)
+                               opensubtitles_key="demo-os", enable_subdl=False)
     fields = Elements(client.get(f"/{token}/configure").text).ids
     for field, value in [("subdl-key", "demo-subdl"), ("subsource-key", "demo-subsource"),
-                         ("opensubtitles-key", "demo-os"), ("opensubtitles-username", "demo-user")]:
+                         ("opensubtitles-key", "demo-os")]:
         assert fields[field]["value"] == value
-    assert fields["opensubtitles-password"]["value"] == ""
+    assert "opensubtitles-username" not in fields
+    assert "opensubtitles-password" not in fields
 
 
 DOM_SETUP = r"""
 const assert = require('node:assert/strict');
-const fields = ['subdl-key','subsource-key','opensubtitles-key','opensubtitles-username','opensubtitles-password'];
+const fields = ['subdl-key','subsource-key','opensubtitles-key'];
 const makeElement = () => ({disabled:false,checked:true,value:'demo-value',type:'password',
     attrs:{},dataset:{},events:{},classes:new Set(),
     setAttribute(k,v){this.attrs[k]=v}, removeAttribute(k){delete this.attrs[k]},
@@ -84,7 +84,6 @@ for (const [toggleId,wrapperId] of Object.entries(wrappers)) {
     buttons.push(button);
     const link=makeElement();
     const controls=[input,button];
-    if(provider==='opensubtitles') controls.push(elements['opensubtitles-username'],elements['opensubtitles-password']);
     const wrapper=makeElement();
     wrapper.link=link; wrapper.controls=controls;
     wrapper.classList={toggle:(name,on)=>on?wrapper.classes.add(name):wrapper.classes.delete(name)};
@@ -123,8 +122,6 @@ for(const [toggleId,wrapperId] of Object.entries(wrappers)){
 const getSubdlInput=()=>elements['subdl-key'];
 const getSubsourceInput=()=>elements['subsource-key'];
 const getOpenSubtitlesInput=()=>elements['opensubtitles-key'];
-const getOpenSubtitlesUsernameInput=()=>elements['opensubtitles-username'];
-const getOpenSubtitlesPasswordInput=()=>elements['opensubtitles-password'];
 const DEFAULT_BADGE_PARTS=['score','provider','filename','uploader'];
 const getBadgeParts=()=>DEFAULT_BADGE_PARTS;
 const getSelectedLanguages=()=>['ara'];
@@ -144,15 +141,15 @@ console.log(JSON.stringify(token));
     token = run_js(DOM_SETUP + controls + serializer + actions)
     prefs = parse_user_config(token)
     assert prefs.subdl_key == prefs.subsource_key == prefs.opensubtitles_key == "demo-value"
-    assert prefs.opensubtitles_username == prefs.opensubtitles_password == "demo-value"
+    assert not hasattr(prefs, "opensubtitles_username")
     assert not prefs.enable_subdl and not prefs.enable_subsource and not prefs.enable_opensubtitles
 
 
 @pytest.mark.parametrize("data,expected", [
     ({"valid": True}, "API verified"),
     ({"valid": True, "account_checked": False}, "API verified"),
-    ({"valid": True, "account_checked": True, "account_valid": True}, "API & account verified"),
-    ({"valid": True, "account_checked": True, "account_valid": False}, "API verified; account login rejected"),
+    ({"valid": True, "account_checked": True, "account_valid": True}, "API verified"),
+    ({"valid": True, "account_checked": True, "account_valid": False}, "API verified"),
     ({"valid": True, "account_checked": True}, "API verified"),
     ({"valid": True, "account_checked": "true", "account_valid": "true"}, "API verified"),
     ({"valid": False, "account_checked": True, "account_valid": True}, "API not verified"),
@@ -172,31 +169,29 @@ def test_actual_os_validation_renders_truthfully_and_discards_stale_credentials(
                       template.index("if (opensubtitlesInput) {")]
     setup = """
 const status={innerHTML:''};
-const key={value:'demo-key'}, user={value:'demo-user'}, password={value:'demo-password'};
+const key={value:'demo-key'};
 const getOpenSubtitlesStatus=()=>status;
 const getOpenSubtitlesInput=()=>key;
-const getOpenSubtitlesUsernameInput=()=>user;
-const getOpenSubtitlesPasswordInput=()=>password;
 const checkIconSvg=crossIconSvg=spinIconSvg='';
 const updateUrls=()=>{};
 """
     setup += "const changed=" + json.dumps(changed) + ";"
     setup += """
-const fetch=async()=>{if(changed) password.value='edited'; return {json:async()=>({valid:true,account_checked:true,account_valid:false})}};
+const fetch=async()=>{if(changed) key.value='edited'; return {json:async()=>({valid:true,account_checked:true,account_valid:false})}};
 """
     result = run_js(setup + source + "verifyOpenSubtitlesKey(key.value).then(()=>console.log(JSON.stringify(status.innerHTML))); ")
     assert "API & account verified" not in result
     if changed:
         assert "API verified" not in result
     else:
-        assert "API verified; account login rejected" in result
+        assert "API verified" in result
         assert "Connection Error" not in result
 
 
 def test_dark_autofill_and_disabled_css_covers_all_credentials(client):
     html = client.get("/configure").text
     fields = Elements(html).ids
-    for field in [p + "-key" for p, _ in PROVIDERS] + ["opensubtitles-username", "opensubtitles-password"]:
+    for field in [p + "-key" for p, _ in PROVIDERS]:
         assert "credential-input" in fields[field]["class"]
     for suffix in ["", ":hover", ":focus", ":active"]:
         assert ".credential-input:-webkit-autofill" + suffix in html
@@ -206,10 +201,9 @@ def test_dark_autofill_and_disabled_css_covers_all_credentials(client):
     assert ".credential-input:-webkit-autofill:focus { border-color: var(--line-h)" in html
     assert ".provider-key.credentials-disabled" in html
     assert "opacity: .45" in html
-    assert ">Account</div>" in html
-    assert "Optional credentials for authenticated access." in html
-    assert ">Username</label>" in html
-    assert ">Password</label>" in html
+    assert "account-credentials" not in html
+    assert "opensubtitles-username" not in html
+    assert "opensubtitles-password" not in html
     assert re.findall(r'<span class="provider-name">([^<]+)</span>', html) == [label for _, label in PROVIDERS]
 
 
@@ -225,4 +219,4 @@ def test_account_simplification_preserves_mobile_geometry():
         r"@media[^}]+(?:}[^}]*})?", before)
     container = 'mx-auto w-full max-w-2xl px-4 sm:px-6 py-8 sm:py-12 pb-16 overflow-x-hidden'
     assert container in before and container in after
-    assert '.account-credentials { margin-top: 12px; padding-top: 10px;' in after
+    assert 'account-credentials' not in after
