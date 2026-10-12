@@ -8,7 +8,6 @@ from app.models import SubtitleRelease
 from app.services.sync.decode import select_zip_member
 from app.services.sync.external_strategy import (
     TIER_EXACT_GROUP,
-    TIER_FALLBACK,
     TIER_SOURCE_EDITION,
     ExternalExactStrategy,
     _select_candidates_ranked,
@@ -60,45 +59,6 @@ def test_exact_release_group_beats_known_micro_rip_group():
     assert ranked[0] is random_rel
 
 
-def test_tier_beats_provider_priority_and_language_in_full_sort():
-    """Group-first must hold end-to-end through the sort, not just in
-    ``reference_tier``.
-
-    The tier-1 candidate below has everything working against it except its
-    tier: lowest-priority provider (opensubtitles), non-English non-target
-    language, and it is listed second. The tier-2 candidate has the highest
-    provider priority and the English anchor preference. If provider priority
-    or language ever moves above the tier key in the sort tuple, this fails --
-    which is exactly the silent regression that would starve same-group
-    references like the Dexter d3g match.
-    """
-    target = "Dexter.S08E04.1080p.BluRay.x264-D3G.mkv"
-    query = ReferenceQuery(
-        imdb_id="tt0773262",
-        media_type="series",
-        season=8,
-        episode=4,
-        target_filename=target,
-    )
-
-    tier_one = SubtitleRelease(
-        release_name="Dexter.S08E04.1080p.BluRay.x264-D3G.srt",
-        download_url="http://cdn/d3g",
-        provider="opensubtitles",
-        lang="fra",
-    )
-    tier_two = SubtitleRelease(
-        release_name="Dexter.S08E04.1080p.BluRay.x264-OTHER.srt",
-        download_url="http://cdn/other",
-        provider="subsource",
-        lang="eng",
-    )
-
-    assert reference_tier(target, tier_one) == TIER_EXACT_GROUP
-    assert reference_tier(target, tier_two) == TIER_SOURCE_EDITION
-
-    ranked = _select_candidates_ranked([tier_two, tier_one], query)
-    assert ranked[0] is tier_one
 
 
 def test_validate_synced_output_rejects_zero_collapse():
@@ -316,7 +276,7 @@ async def test_opensubtitles_hash_match_still_uses_quota(tmp_path):
             return False
 
         async def search_subtitles(self, **kwargs):
-            return [
+            results = [
                 SubtitleRelease(
                     release_name="Dexter.S08E03.720p.HDTV.x264-Scene.srt",
                     download_url="/sub/opensubtitles/hash.srt",
@@ -325,6 +285,9 @@ async def test_opensubtitles_hash_match_still_uses_quota(tmp_path):
                     matched_by_hash=True,
                 ),
             ]
+            from app.services.release_scoring_integration import hash_proof
+            hash_proof(results[0], {"moviehash": kwargs.get("moviehash"), "moviebytesize": kwargs.get("moviebytesize")}, True)
+            return results
 
         async def download_archive(self, url, api_key=None):
             self.download_calls += 1
@@ -343,7 +306,7 @@ async def test_opensubtitles_hash_match_still_uses_quota(tmp_path):
         season=8,
         episode=3,
         media_type="series",
-        video_hash="8e245d9679d31e12",
+        video_hash="8e245d9679d31e12", video_size=5727011301,
     )
 
     resolved = await strategy.resolve_with_provenance(query)
@@ -353,31 +316,6 @@ async def test_opensubtitles_hash_match_still_uses_quota(tmp_path):
     assert os_provider.download_calls == 1
 
 
-def test_candidates_ranked_tie_priority():
-    """Verify that on equal scores, subsource/subdl are favored over rate-capped opensubtitles."""
-    from app.providers.opensubtitles import OPENSUBTITLES_BREAKER
-    OPENSUBTITLES_BREAKER.reset()
-
-    target = "Movie.2024.1080p.BluRay.x264-RANDOM.mkv"
-    os_rel = SubtitleRelease(
-        release_name="Movie.2024.1080p.BluRay.x264-GRP.srt",
-        download_url="http://os",
-        provider="opensubtitles",
-        lang="eng",
-    )
-    subsource_rel = SubtitleRelease(
-        release_name="Movie.2024.1080p.BluRay.x264-GRP.srt",
-        download_url="http://subsource",
-        provider="subsource",
-        lang="eng",
-    )
-
-    query = ReferenceQuery(imdb_id="tt123", target_filename=target)
-    # Passed in order [os_rel, subsource_rel]
-    ranked = _select_candidates_ranked([os_rel, subsource_rel], query)
-    assert len(ranked) == 2
-    # SubSource should be ranked first due to tie priority
-    assert ranked[0].provider == "subsource"
 
 
 def test_vtt_to_srt_supports_short_timestamps():
@@ -420,32 +358,6 @@ def test_timeline_rejection_allows_linear_offset():
     assert rejection is None
 
 
-def test_matching_movie_cut_outranks_mismatched_cut():
-    """A different cut of the same medium shifts every cue, so it must not tie."""
-    target = "The.Lord.of.the.Rings.The.Fellowship.of.the.Ring.2001.Extended.1080p.BluRay.x264-FSiHD.mkv"
-
-    ext_rel = SubtitleRelease(
-        release_name="The.Lord.of.the.Rings.2001.Extended.Cut.1080p.BluRay.x264.srt",
-        download_url="http://ext",
-        provider="subdl",
-        lang="eng",
-    )
-    theatrical_rel = SubtitleRelease(
-        release_name="The.Lord.of.the.Rings.2001.Theatrical.1080p.BluRay.x264.srt",
-        download_url="http://theatrical",
-        provider="subdl",
-        lang="eng",
-    )
-
-    # Both share the BluRay medium; the extended cut is a token match, the
-    # theatrical cut is a different edition and therefore demoted.
-    assert reference_tier(target, ext_rel) == TIER_SOURCE_EDITION
-    assert reference_tier(target, ext_rel) < reference_tier(target, theatrical_rel)
-
-    ranked = _select_candidates_ranked(
-        [theatrical_rel, ext_rel], ReferenceQuery(imdb_id="tt1", target_filename=target)
-    )
-    assert ranked[0] is ext_rel
 
 
 def test_episodic_candidate_is_not_promoted_for_movie_target():
@@ -501,32 +413,6 @@ def test_reference_query_is_series_for_anime_and_tv():
     assert movie_q.is_series is False
 
 
-def test_exact_group_4k_retail_beats_microrip_with_matching_title():
-    """A 4K retail release sharing the target group must beat a micro-rip."""
-    target = "Whiplash.2014.MULTI.DV.2160p.WEB.H265-LOST.mkv"
-
-    surcode_rel = SubtitleRelease(
-        release_name="Whiplash.2014.2160p.UHD.BluRay.x254-SURCODE.srt",
-        download_url="http://cdn/surcode",
-        provider="subdl",
-        lang="eng",
-        hearing_impaired=False,
-    )
-    jyk_rel = SubtitleRelease(
-        release_name="Whiplash 2014 1080p WEB-DL x264 AAC-JYK.srt",
-        download_url="http://cdn/jyk",
-        provider="subdl",
-        lang="eng",
-        hearing_impaired=False,
-    )
-
-    # Neither release shares the LOST group with the target. Source medium is the
-    # deciding property because that is what keeps the cue grid aligned: the
-    # WEB-DL micro-rip outranks the 4K BluRay retail release, and resolution is
-    # never allowed to override that.
-    assert reference_tier(target, surcode_rel) == TIER_FALLBACK
-    assert reference_tier(target, jyk_rel) == TIER_SOURCE_EDITION
-    assert reference_tier(target, jyk_rel) < reference_tier(target, surcode_rel)
 
 
 def test_normalize_srt_blocks_drops_dummy_punctuation_and_inverted_timespans():

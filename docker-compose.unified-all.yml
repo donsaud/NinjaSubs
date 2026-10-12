@@ -1,0 +1,27 @@
+# Explicit local Unified-primary activation for the LOCAL NinjaSubs instance.
+#
+# This file is NEVER read by plain `docker compose up` / `docker compose
+# build`: it takes effect only when passed explicitly with
+# `-f docker-compose.unified-all.yml`. Deleting or omitting it restores
+# default-off behavior with no code or Git changes. It must never be used
+# for any shared or remote deployment.
+#
+# Activation requires BOTH the enable flag AND the exact scope value below;
+# an enable flag alone, an empty scope, or any malformed scope fails closed.
+# Emergency OFF: set HYBRID_UNIFIED_DISABLED=1 (overrides everything) or
+# restart without this file.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.unified-all.yml up -d
+
+services:
+  ninjasubs:
+    environment:
+      # Explicit local opt-in to Unified as primary verification authority.
+      - HYBRID_TEST_ENABLED=1
+      # Exact value: Unified evaluates eligible, well-formed requests
+      # instance-wide. Binding, may_serve, and final HTTP integrity still
+      # authorize every individual delivery; nothing is globally forced.
+      - HYBRID_TEST_SCOPE=ALL
+      # Forced-artifact delivery experiment stays off.
+      - ENABLE_AUTOSYNC_TEST_OVERRIDE=false

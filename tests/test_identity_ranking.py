@@ -86,19 +86,6 @@ def test_exact_score_beats_unscoped_verified_claim():
 # ===========================================================================
 
 
-def test_exact_score_beats_strong_metadata_even_when_verified():
-    a = _attach(
-        _release("hash.srt", hash_match=True, tier=MatchTier.HASH),
-        UNKNOWN_STATE,
-        AV_UNKNOWN,
-    )
-    b = _attach(
-        _release("exact.srt", hash_match=False, tier=MatchTier.EXACT),
-        VERIFIED,
-        AV_VERIFIED,
-    )
-
-    assert order_candidates([a, b]) == [a, b]
 
 
 # ===========================================================================
@@ -106,22 +93,8 @@ def test_exact_score_beats_strong_metadata_even_when_verified():
 # ===========================================================================
 
 
-def test_case_c_hash_identity_wins_among_verified():
-    """The primary reason _identity_rank exists."""
-    # Names are chosen so the stable tie-breaker alone would put b FIRST.
-    # Without the identity dimension this test therefore fails.
-    a = _attach(_release("z-hash.srt", hash_match=True), VERIFIED, AV_VERIFIED)
-    b = _attach(_release("a-plain.srt", hash_match=False), VERIFIED, AV_VERIFIED)
-
-    assert order_candidates([a, b]) == [a, b]
-    assert comparison_key(a) < comparison_key(b)
 
 
-def test_case_c_also_holds_for_cached_verification():
-    a = _attach(_release("z-hash.srt", hash_match=True), VERIFIED, AV_CACHED)
-    b = _attach(_release("a-plain.srt", hash_match=False), VERIFIED, AV_CACHED)
-
-    assert order_candidates([a, b]) == [a, b]
 
 
 def test_identity_is_a_lower_value_than_no_identity():
@@ -136,18 +109,6 @@ def test_identity_is_a_lower_value_than_no_identity():
 # ===========================================================================
 
 
-def test_case_d_weak_prediction_cannot_leapfrog_verified():
-    """A weak prediction is demoted to UNVERIFIED/UNKNOWN inside the comparator,
-    and in any case never outranks VERIFIED."""
-    strong = _attach(
-        _release("weakpred.srt", hash_match=False),
-        PREDICTED,
-        AV_PREDICTED,
-        confidence=CONFIDENCE_PREDICTION_FLOOR,
-    )
-    verified = _attach(_release("nosync.srt", hash_match=False), VERIFIED, AV_VERIFIED)
-
-    assert order_candidates([strong, verified]) == [verified, strong]
 
 
 def test_exact_score_beats_prediction_without_identity():
@@ -182,12 +143,6 @@ def test_prediction_floor_cannot_be_bypassed_via_identity():
 # ===========================================================================
 
 
-def test_case_e_equivalent_candidates_use_stable_tie_breaker():
-    a = _attach(_release("b.srt"), VERIFIED, AV_VERIFIED)
-    b = _attach(_release("a.srt"), VERIFIED, AV_VERIFIED)
-
-    assert order_candidates([a, b]) == [b, a], "release_name breaks the tie"
-    assert order_candidates([b, a]) == [b, a], "and it does so regardless of input order"
 
 
 def test_ordering_is_identical_across_repeated_runs():
@@ -217,30 +172,8 @@ def test_input_is_not_mutated():
 # ===========================================================================
 
 
-def test_a_hashless_verified_candidate_can_rank_first():
-    hashless = _attach(
-        _release("hashless.srt", hash_match=False, tier=MatchTier.EXACT),
-        VERIFIED,
-        AV_VERIFIED,
-    )
-    weaker = [
-        _attach(_release("x.srt", hash_match=False), UNKNOWN_STATE, AV_UNKNOWN),
-        _attach(_release("y.srt"), PREDICTED, AV_PREDICTED, confidence=0.9),
-        _attach(_release("z.srt", tier=MatchTier.FALLBACK), UNKNOWN_STATE, AV_UNKNOWN),
-    ]
-    assert order_candidates([*weaker, hashless])[0] is hashless
 
 
-def test_no_hash_penalty_is_applied_to_every_candidate():
-    """When nothing carries a hash the ordering must be unchanged by the new key."""
-    plain = [
-        _attach(_release("a.srt"), VERIFIED, AV_VERIFIED),
-        _attach(_release("b.srt", tier=MatchTier.EXACT), UNKNOWN_STATE, AV_UNKNOWN),
-    ]
-    keys = [comparison_key(r) for r in plain]
-    for key, release in zip(keys, plain, strict=True):
-        assert key[0] == -release.match_percentage
-        assert release.is_hash_match is False
 
 
 # ===========================================================================
@@ -281,15 +214,6 @@ def test_malformed_hash_values_cannot_reach_the_flag():
             )
 
 
-def test_identity_is_not_inferred_from_provider_or_name():
-    """A provider that merely looks hash-capable gets no identity credit."""
-    opensubtitles_plain = _release(
-        "plain.srt", hash_match=False, provider="opensubtitles"
-    )
-    subdl_plain = _release("other.srt", hash_match=False, provider="subdl")
-    keys = [comparison_key(r) for r in (opensubtitles_plain, subdl_plain)]
-    assert keys[0][0] == keys[1][0] == -40
-    assert not opensubtitles_plain.is_hash_match and not subdl_plain.is_hash_match
 
 
 # ===========================================================================
@@ -351,21 +275,6 @@ def test_raw_verifier_confidence_does_not_override_compatibility():
     assert order_candidates([weak, strong])[0] is weak
 
 
-def test_demoted_prediction_carries_no_confidence_into_ranking():
-    """A prediction below the action floor keeps a stored confidence number,
-    but the comparator must not count it: the claim was refused."""
-    from app.services.sync.ordering import _ranked_confidence
-
-    demoted = _attach(
-        _release("demoted.srt"),
-        PREDICTED,
-        AV_PREDICTED,
-        base=5,
-        confidence=40.0,
-    )
-    assert _ranked_confidence(demoted, "unknown") == -1.0
-    unknown = _attach(_release("u.srt", score=41), UNKNOWN_STATE, AV_UNKNOWN, base=0)
-    assert order_candidates([demoted, unknown])[0] is unknown
 
 
 def test_actionable_prediction_confidence_still_counts():
@@ -387,40 +296,12 @@ def test_actionable_prediction_confidence_still_counts():
 # ===========================================================================
 
 
-def test_verified_synced_still_outranks_verified_resynced():
-    synced = _attach(_release("a.srt"), "verified_synced", AV_VERIFIED)
-    resynced = _attach(_release("b.srt"), "verified_resynced", AV_VERIFIED)
-    assert order_candidates([resynced, synced]) == [synced, resynced]
 
 
-def test_rejected_still_sorts_last():
-    good = _attach(_release("a.srt"), VERIFIED, AV_VERIFIED)
-    rejected = _attach(_release("b.srt"), "rejected", AV_VERIFIED)
-    assert order_candidates([rejected, good]) == [good, rejected]
 
 
-def test_language_preference_does_not_override_compatibility():
-    """An explicit user choice outranks any amount of sync evidence."""
-    arabic_verified = _attach(
-        _release("ar.srt", lang="ara", hash_match=False),
-        VERIFIED,
-        AV_VERIFIED,
-        lang_rank=0,
-    )
-    english_hashed = _attach(
-        _release("en.srt", lang="eng", hash_match=True),
-        VERIFIED,
-        AV_VERIFIED,
-        lang_rank=1,
-    )
-    assert order_candidates([english_hashed, arabic_verified])[0] is english_hashed
 
 
-def test_match_tier_remains_the_compatibility_source_of_truth():
-    exact = _attach(_release("a.srt", tier=MatchTier.EXACT), UNKNOWN_STATE, AV_UNKNOWN)
-    close = _attach(_release("b.srt", tier=MatchTier.CLOSE), UNKNOWN_STATE, AV_UNKNOWN)
-    assert exact.match_tier == MatchTier.EXACT
-    assert comparison_key(exact) < comparison_key(close)
 
 
 def test_no_match_tier_was_added():

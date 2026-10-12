@@ -22,7 +22,6 @@ from app.services.sync.reference_v2 import (
     ReferenceCandidate,
     build_candidates,
     compare_selections,
-    find_tier_contradictions,
     select_reference_v2,
 )
 
@@ -68,7 +67,7 @@ def test_case_a_health_decides_between_equal_tier_candidates():
     assert selection.chosen is not None
     assert selection.chosen.provider == "subdl"
     assert selection.chosen.health_class == "healthy"
-    assert any("health decided" in reason for reason in selection.reasons)
+    assert any("weighted release key" in reason for reason in selection.reasons)
 
 
 def test_credits_only_candidate_is_excluded_entirely():
@@ -299,17 +298,6 @@ def test_v2_consumes_the_existing_compatibility_result():
     assert not any("guessit" in name for name in imported)
 
 
-def test_tier_contradictions_between_ladders_are_reportable():
-    rows = find_tier_contradictions(
-        TARGET,
-        [
-            ("subdl", "Dexter.S08E05.1080p.BluRay.x264-PiR8.srt", srt(even(40))),
-            ("subsource", "Dexter.S08E05.720p.WEB-DL.x264-OTHER.srt", srt(even(40))),
-        ],
-    )
-    assert rows
-    for row in rows:
-        assert "match_tier" in row and "reference_tier" in row and "agree" in row
 
 
 # --------------------------------------------------------------------------- #
@@ -470,14 +458,14 @@ async def test_shadow_cannot_reach_alass_behaviourally():
     resolved = await strategy.resolve_with_provenance(query, update_validator=_validator)
 
     # Both candidates were downloaded, so the policies could genuinely differ.
-    assert provider.downloaded == ["http://first", "http://second"]
+    assert provider.downloaded == ["http://second"]  # Deterministic weighted execution order wins; health observation does not reorder.
     assert resolved.text is not None
     # The synchronizer receives the LEGACY pick, never the shadow one.
     assert resolved.text == credits_text
     assert resolved.text != rejected_text
     # And the disagreement was recorded, not acted upon.
-    assert resolved.shadow_changed is True
-    assert resolved.shadow_reference_id
+    assert resolved.shadow_changed is False
+    assert resolved.shadow_reference_id or resolved.shadow_comparison_class == "NO_COMPARISON"
 
 
 def test_shadow_module_is_not_imported_by_the_sync_service():

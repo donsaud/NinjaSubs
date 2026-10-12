@@ -1,0 +1,52 @@
+{
+  "case_id": "source_unknown_is_discovery_only",
+  "target": {
+    "metadata": {
+      "media_type": "series",
+      "title": "Show",
+      "year": 2020,
+      "season": 1,
+      "episode": 1,
+      "source": "BluRay",
+      "release_group": "ALPHA",
+      "resolution": "1080p",
+      "video_codec": "H264",
+      "audio_codec": "AC3",
+      "service_disc_family": "BD"
+    }
+  },
+  "candidates": [
+    {
+      "id": "unknown",
+      "provider": "subdl",
+      "provider_id": "unknown",
+      "metadata": {
+        "media_type": "series",
+        "title": "Show",
+        "year": 2020,
+        "season": 1,
+        "episode": 1,
+        "source": null,
+        "release_group": "ALPHA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD"
+      },
+      "language": "ara"
+    }
+  ],
+  "expected": {
+    "discovery_order": [
+      "unknown"
+    ],
+    "reference_order": [],
+    "display_order": [
+      "unknown"
+    ],
+    "scores": {
+      "unknown": 314
+    }
+  },
+  "provenance": "SYNTHETIC_BEHAVIORAL_EXPECTATION"
+}

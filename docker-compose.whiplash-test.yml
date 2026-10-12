@@ -1,0 +1,25 @@
+# TEMPORARY local-test-only override for the controlled Whiplash Unified
+# live validation (Whiplash 2014, tt2582802, movie scope).
+#
+# This file is NEVER read by plain `docker compose up` / `docker compose
+# build`: it takes effect only when passed explicitly with
+# `-f docker-compose.whiplash-test.yml`. Deleting or omitting it restores
+# default-off production behavior with no code or Git changes. The Dexter
+# override (`docker-compose.hybrid-test.yml`) is preserved untouched for
+# rollback.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.whiplash-test.yml up -d
+# Rollback to the Dexter installation:
+#   docker compose -f docker-compose.yml -f docker-compose.hybrid-test.yml up -d
+
+services:
+  ninjasubs:
+    environment:
+      # Intentional local-test opt-in for Unified verification.
+      - HYBRID_TEST_ENABLED=1
+      # Movie-scope test identity (Whiplash 2014). Any other video falls
+      # through to the existing production path.
+      - HYBRID_TEST_SCOPE=tt2582802
+      # Forced-artifact delivery experiment must stay off for the controlled test.
+      - ENABLE_AUTOSYNC_TEST_OVERRIDE=false

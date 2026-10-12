@@ -1,0 +1,69 @@
+{
+  "case_id": "movie_remake_identity",
+  "target": {
+    "metadata": {
+      "media_type": "movie",
+      "title": "Movie",
+      "year": 2020,
+      "source": "BluRay",
+      "release_group": "ALPHA",
+      "resolution": "1080p",
+      "video_codec": "H264",
+      "audio_codec": "AC3",
+      "service_disc_family": "BD",
+      "cut": "theatrical"
+    }
+  },
+  "candidates": [
+    {
+      "id": "remake",
+      "provider": "subdl",
+      "provider_id": "remake",
+      "metadata": {
+        "media_type": "movie",
+        "title": "Movie",
+        "year": 1990,
+        "source": "BluRay",
+        "release_group": "ALPHA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD",
+        "cut": "theatrical"
+      },
+      "language": "ara"
+    },
+    {
+      "id": "correct",
+      "provider": "subdl",
+      "provider_id": "correct",
+      "metadata": {
+        "media_type": "movie",
+        "title": "Movie",
+        "year": 2020,
+        "source": "BluRay",
+        "release_group": "ALPHA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD",
+        "cut": "theatrical"
+      },
+      "language": "ara"
+    }
+  ],
+  "expected": {
+    "reference_order": [
+      "correct"
+    ],
+    "display_order": [
+      "correct"
+    ],
+    "rejections": {
+      "remake": [
+        "year_mismatch"
+      ]
+    }
+  },
+  "provenance": "SYNTHETIC_BEHAVIORAL_EXPECTATION"
+}

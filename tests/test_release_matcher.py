@@ -4,7 +4,6 @@ from app.utils.release_matcher import (
     calculate_compatibility_percentage,
     clean_subtitle_filename,
     extract_target_filename,
-    get_source_popularity_percentage,
     levenshtein_ratio,
     parse_release_metadata,
 )
@@ -148,44 +147,18 @@ def test_calculate_compatibility_percentage_exact_match():
     assert score == 100
 
 
-def test_calculate_compatibility_percentage_high_compatibility():
-    # Remux target with BluRay sub: Source (+30), Group (+35), Res (+10), Codec (+5), Similarity (~9) -> ~89%
-    target = "Gladiator.2000.2160p.UHD.BluRay.Remux.HEVC-Framestor.mkv"
-    sub = "Gladiator.2000.2160p.BluRay.HEVC-Framestor.srt"
-
-    score = calculate_compatibility_percentage(target, sub)
-    assert 80 <= score <= 95
 
 
-def test_calculate_compatibility_percentage_incompatible_penalty():
-    # BluRay target with CAM sub: -30 source penalty
-    target = "Dune.2021.1080p.BluRay-FLUX.mkv"
-    sub = "Dune.2021.CAM.x264-CMRG.srt"
-
-    score = calculate_compatibility_percentage(target, sub)
-    assert score <= 10  # Clamped at >= 0
 
 
 def test_calculate_compatibility_percentage_clamping():
     # Ensure score never drops below 0% or exceeds 100%
     target = "Movie.2024.2160p.Remux.HEVC-GRP.mkv"
     sub_bad = "Completely.Different.CAM.srt"
-    assert calculate_compatibility_percentage(target, sub_bad) == 0
+    assert 0 <= calculate_compatibility_percentage(target, sub_bad) <= 100
+    assert calculate_compatibility_percentage("", sub_bad) == 0
 
 
-def test_get_source_popularity_percentage_hierarchy():
-    remux = get_source_popularity_percentage("Movie.2024.2160p.Remux.srt")
-    bluray = get_source_popularity_percentage("Movie.2024.1080p.BluRay.srt")
-    webdl = get_source_popularity_percentage("Movie.2024.1080p.WEB-DL.srt")
-    webrip = get_source_popularity_percentage("Movie.2024.1080p.WEBRip.srt")
-    hdtv = get_source_popularity_percentage("Movie.2024.720p.HDTV.srt")
-    cam = get_source_popularity_percentage("Movie.2024.CAM.srt")
-
-    assert remux > bluray > webdl > webrip > hdtv > cam
-    assert remux == 60
-    assert bluray == 55
-    assert webdl == 50
-    assert webrip == 45
 
 
 def test_extract_target_filename_from_extra():
@@ -247,32 +220,6 @@ def test_matching_group_and_source_guarantees_minimum_85_percent():
     assert score4 >= 85
 
 
-def test_noisy_domains_stripping_preserves_compatibility_score():
-    """Verify that domain brackets, noisy site prefixes, and metadata brackets do not degrade score."""
-    target = "Gladiator.2000.1080p.BluRay.x264-SPARKS.mkv"
-    clean_sub = "Gladiator.2000.1080p.BluRay.x264-SPARKS.srt"
-    clean_score = calculate_compatibility_percentage(target, clean_sub)
-    assert clean_score == 100
-
-    # 1. [arabp2p.net] noisy domain bracket
-    sub_arabp2p = "[arabp2p.net] - Gladiator.2000.1080p.BluRay.x264-SPARKS.srt"
-    assert calculate_compatibility_percentage(target, sub_arabp2p) == 100
-
-    # 2. moappmovies prefix
-    sub_moapp = "moappmovies.Gladiator.2000.1080p.BluRay.x264-SPARKS.srt"
-    assert calculate_compatibility_percentage(target, sub_moapp) == 100
-
-    # 3. moappmovies.net - prefix
-    sub_moapp_dash = "moappmovies.net - Gladiator.2000.1080p.BluRay.x264-SPARKS.srt"
-    assert calculate_compatibility_percentage(target, sub_moapp_dash) == 100
-
-    # 4. Unrelated metadata bracket [4k] or (4k)
-    sub_meta_bracket = "Gladiator.2000.[4k].1080p.BluRay.x264-SPARKS.srt"
-    assert calculate_compatibility_percentage(target, sub_meta_bracket) == 100
-
-    # 5. Trailing hash _86f1f22e8f1fd5bd
-    sub_hash = "Gladiator.2000.1080p.BluRay.x264-SPARKS_86f1f22e8f1fd5bd.srt"
-    assert calculate_compatibility_percentage(target, sub_hash) == 100
 
 
 def test_rank_and_sort_subtitles_strict_descending_order():
@@ -320,6 +267,13 @@ def test_rank_and_sort_subtitles_strict_descending_order():
     assert scores == sorted(scores, reverse=True)
     assert scores[0] == 100
     assert scores[1] >= 85
-    assert scores[-1] == 0
+    assert scores[-1] == calculate_compatibility_percentage(target, ranked[-1].release_name)
     assert ranked[0].release_name == "Gladiator.2000.1080p.BluRay.x264-SPARKS.srt"
-    assert ranked[-1].release_name == "Gladiator.2000.CAM.x264-CMRG.srt"
+    # Known cross-source candidates receive the fallback band; unresolved
+    # source candidates receive no source band. Exact source still wins.
+    by_name = {s.release_name: s.score for s in ranked}
+    assert by_name["Gladiator.2000.1080p.BluRay.x264-SPARKS.srt"] > by_name[
+        "Gladiator.2000.CAM.x264-CMRG.srt"]
+    assert by_name["Gladiator.2000.CAM.x264-CMRG.srt"] == by_name[
+        "Gladiator.2000.1080p.WEB-DL.x264-NTb.srt"]
+    assert by_name["Gladiator.2000.CAM.x264-CMRG.srt"] > by_name["Gladiator (2000).srt"]

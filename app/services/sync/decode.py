@@ -7,6 +7,7 @@ import logging
 import re
 import zipfile
 
+from app.services import release_scoring_integration as release_scoring
 from app.services.sync.matching import (
     _is_info_member,
     _member_episode_number,
@@ -169,12 +170,18 @@ def decode_payload(
         transcode_to_utf8,
     )
 
+    def normalize_reference(payload: bytes) -> bytes:
+        # References are internal sync inputs; native ASS presentation is not served.
+        from app.utils.ass_converter import convert_ass_to_srt_bytes
+
+        return convert_ass_to_srt_bytes(transcode_to_utf8(payload), apply_rtl=False)
+
     kind = detect_archive_kind(raw)
     if kind in ("rar", "7z", "tar", "gzip"):
         try:
-            return extract_subtitle_from_archive(
+            return normalize_reference(extract_subtitle_from_archive(
                 raw, target_filename=release_name, season=season, episode=episode
-            )
+            ))
         except SubtitleExtractionError as exc:
             logger.warning(
                 "[reference] %s archive for %r unusable: %s", kind, release_name, exc
@@ -203,6 +210,7 @@ def decode_payload(
                 season,
                 episode,
             )
+            release_scoring.member_selected(chosen)
             payload = archive.read(chosen)
-        return transcode_to_utf8(payload)
-    return transcode_to_utf8(raw)
+        return normalize_reference(payload)
+    return normalize_reference(raw)

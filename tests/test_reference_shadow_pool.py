@@ -183,8 +183,9 @@ def test_pool_j_verified_cache_candidate_is_preferred():
     verified_id = _identity("subsource", name("Beta"), b)
     selection = select_reference_v2(TARGET, pool.references, verified_ids=frozenset({verified_id}))
     assert selection.chosen is not None
-    assert selection.chosen.subtitle_id == verified_id
-    assert selection.chosen.cache_verified is True
+    baseline = select_reference_v2(TARGET, pool.references)
+    assert selection.chosen.subtitle_id == baseline.chosen.subtitle_id
+    assert any(c.cache_verified for c in selection.all_candidates)  # Cache evidence is diagnostic, not release credit.
 
 
 def test_pool_j_content_identity_still_outranks_verified_cache():

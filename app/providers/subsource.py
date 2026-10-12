@@ -11,6 +11,7 @@ import httpx
 from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
+from app.services import release_scoring_integration as release_scoring
 from app.services.sync.matching import _season_number
 from app.utils.language import get_subsource_lang_name, normalize_to_iso639_2
 from app.utils.uploader import extract_uploader
@@ -774,6 +775,7 @@ class SubsourceProvider(BaseSubtitleProvider):
                         uploader=str(item.get("uploader") or "").strip(),
                     )
                 )
+                release_scoring.provider_evidence(results[-1], item)
             except Exception as map_err:
                 logger.error(
                     f"[SubSource Mapping Error] Error mapping item to SubtitleRelease: {map_err} | Item: {item}"

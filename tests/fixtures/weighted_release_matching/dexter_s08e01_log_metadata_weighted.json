@@ -1,0 +1,149 @@
+{
+  "case_id": "dexter_s08e01_log_metadata_weighted",
+  "provenance": "LOG_DERIVED_METADATA",
+  "provenance_details": {
+    "source_artifact": "the_great_beauty_docker.log",
+    "source_sha256": "adb8cab16c6821eea615f6b368ad0c47d01f7db231b22956f9e2fdd2b4a2a7a8",
+    "target_line": 156,
+    "observation_lines": [
+      235,
+      236,
+      237,
+      238,
+      239,
+      259,
+      261,
+      265,
+      267
+    ],
+    "timing_proof": false,
+    "provider_ids_observed": false,
+    "note": "Historical request/release metadata only. Local record IDs are source-line keys, not actual provider IDs. No subtitle bytes or REAL timing proof imported."
+  },
+  "target": {
+    "filename": "Dexter.s8e01.A.Beautiful.Day.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv",
+    "metadata": {
+      "imdb_id": "tt0773262",
+      "media_type": "series",
+      "season": 8,
+      "episode": 1,
+      "video_size": 5727011301
+    }
+  },
+  "candidates": [
+    {
+      "id": "os_nordic",
+      "provider": "opensubtitles",
+      "provider_id": "<missing-provider-id>",
+      "release_names": [
+        "Dexter.S08E01.720p.BluRay.x264-NORDiC"
+      ],
+      "log_lines": [
+        235
+      ],
+      "provider_id_kind": "local_log_record_id_not_provider_id",
+      "language": "unknown"
+    },
+    {
+      "id": "os_bdrip",
+      "provider": "opensubtitles",
+      "provider_id": "<missing-provider-id>",
+      "release_names": [
+        "Dexter.S08E01.BDRip.x264-DEMAND"
+      ],
+      "log_lines": [
+        236
+      ],
+      "provider_id_kind": "local_log_record_id_not_provider_id",
+      "language": "unknown"
+    },
+    {
+      "id": "os_demand",
+      "provider": "opensubtitles",
+      "provider_id": "<missing-provider-id>",
+      "release_names": [
+        "dexter.s08e01.720p.bluray.x264-demand"
+      ],
+      "log_lines": [
+        237
+      ],
+      "provider_id_kind": "local_log_record_id_not_provider_id",
+      "language": "unknown"
+    },
+    {
+      "id": "os_brrip_unknown",
+      "provider": "opensubtitles",
+      "provider_id": "<missing-provider-id>",
+      "release_names": [
+        "Dexter - 08x01 - A Beautiful Day 720p BrRip by maric62985"
+      ],
+      "log_lines": [
+        238
+      ],
+      "provider_id_kind": "local_log_record_id_not_provider_id",
+      "language": "unknown"
+    },
+    {
+      "id": "os_ime",
+      "provider": "opensubtitles",
+      "provider_id": "<missing-provider-id>",
+      "release_names": [
+        "Dexter (2006) - S08E01 - A Beautiful Day (1080p BluRay x265 ImE)"
+      ],
+      "log_lines": [
+        239
+      ],
+      "provider_id_kind": "local_log_record_id_not_provider_id",
+      "language": "unknown"
+    },
+    {
+      "id": "subdl_rovers_pack",
+      "provider": "subdl",
+      "provider_id": "<missing-provider-id>",
+      "release_names": [
+        "Dexter.S08.2013.Season.8.1080p.BluRay.x264-ROVERS.srt"
+      ],
+      "log_lines": [
+        259,
+        261
+      ],
+      "provider_id_kind": "local_log_record_id_not_provider_id",
+      "archive_member": "Episode 01 - A Beautiful Day.srt",
+      "archive_member_verified": true,
+      "archive_member_identity": {
+        "season": 8,
+        "episode": 1
+      },
+      "language": "unknown"
+    },
+    {
+      "id": "subdl_demand_pack",
+      "provider": "subdl",
+      "provider_id": "<missing-provider-id>",
+      "release_names": [
+        "Dexter.S08.720p.BluRay.x264-DEMAND.srt"
+      ],
+      "log_lines": [
+        265,
+        267
+      ],
+      "provider_id_kind": "local_log_record_id_not_provider_id",
+      "archive_member": "Dexter.S08E01.720p.BluRay.x264-DEMAND.srt",
+      "archive_member_verified": true,
+      "language": "unknown"
+    }
+  ],
+  "expected": {
+    "scores": {
+      "os_nordic": 246,
+      "os_bdrip": 246,
+      "os_demand": 246,
+      "os_brrip_unknown": 220,
+      "os_ime": 246,
+      "subdl_rovers_pack": 247,
+      "subdl_demand_pack": 246
+    },
+    "rejections": {}
+  },
+  "provenance_note": "Original historical metadata retained unchanged. Unknown candidate languages remain unknown; synthetic log-line IDs are not provider IDs. Assertions cover weighted facts, not serving or REAL timing."
+}

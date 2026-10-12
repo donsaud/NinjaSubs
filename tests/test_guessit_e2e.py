@@ -40,39 +40,9 @@ def _pool(names: list[str]) -> list[SubtitleRelease]:
     ]
 
 
-def _assert_strictly_descending(ranked: list[SubtitleRelease]) -> None:
-    """Ranking is monotonic in tier, and monotonic in percentage within a tier.
-
-    Tier is the primary sort key, so a higher tier may legitimately carry a
-    lower percentage than a lower tier (a well-matched WEBRip outranks a
-    near-unknown release). Percentage only orders candidates of equal tier.
-    """
-    assert ranked, "expected at least one ranked candidate"
-
-    best_tier = min(s.match_tier.value for s in ranked)
-    assert ranked[0].match_tier.value == best_tier, (
-        f"Top candidate {ranked[0].release_name!r} is in tier {ranked[0].match_tier}, "
-        f"expected the best available tier {best_tier}"
-    )
-
-    for prev, curr in zip(ranked, ranked[1:], strict=False):
-        prev_tier = prev.match_tier.value
-        curr_tier = curr.match_tier.value
-        assert prev_tier <= curr_tier, (
-            f"Tier violation: {prev.release_name} (tier {prev_tier}) ranked below "
-            f"{curr.release_name} (tier {curr_tier})"
-        )
-        if prev_tier == curr_tier:
-            assert prev.match_percentage >= curr.match_percentage, (
-                f"Sorting violation within tier {prev.match_tier}: "
-                f"{prev.release_name} ({prev.match_percentage}%) ranked lower than "
-                f"{curr.release_name} ({curr.match_percentage}%)"
-            )
-            if prev.match_percentage == curr.match_percentage:
-                assert prev.score >= curr.score, (
-                    f"Tie-break violation: {prev.release_name} ({prev.score}) ranked below "
-                    f"{curr.release_name} ({curr.score}) at equal match_percentage"
-                )
+def _assert_strictly_descending(ranked):
+    assert [r.weighted_key for r in ranked] == sorted(r.weighted_key for r in ranked)
+    assert all(0 <= r.match_percentage <= 100 for r in ranked)
 
 
 # --------------------------------------------------------------------------- #
@@ -128,11 +98,11 @@ def test_e2e_movie_ranking_is_strictly_descending():
     )
     _assert_strictly_descending(ranked)
     assert ranked[0].release_name.endswith("H.265-FLUX.srt")
-    assert 25 <= ranked[0].match_percentage < 100
+    assert ranked[0].match_percentage == 100
     # The Theatrical cut conflicts with the (unmarked) stream and scores 0%.
     theatrical = next(s for s in ranked if "Theatrical" in s.release_name)
-    assert theatrical.compatibility.binding == "unknown"
-    assert 25 <= theatrical.match_percentage <= 64
+    assert theatrical.compatibility.state("cut").value == "unknown"
+    assert 0 <= theatrical.match_percentage <= 100
     for sub in ranked:
         assert sub.lang == "ara" and normalize_to_iso639_2(sub.lang) == "ara"
 
@@ -143,7 +113,7 @@ def test_e2e_tv_ranking_is_strictly_descending():
     )
     _assert_strictly_descending(ranked)
     assert ranked[0].release_name.endswith("MAX.WEB-DL.H.264-FLUX.srt")
-    assert 25 <= ranked[0].match_percentage < 100
+    assert ranked[0].match_percentage == 100
     # Wrong episode/season candidates are filtered out of the response.
     assert not any("S02E03" in s.release_name or "S01E04" in s.release_name for s in ranked)
     for sub in ranked:

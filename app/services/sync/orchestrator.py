@@ -11,14 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
 import time
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from app.config import settings
 from app.logging_context import reset_request_id, set_request_id, stable_request_id
@@ -42,6 +44,9 @@ from app.services.sync.anchor_preshift import (
     preshift_text,
 )
 from app.services.sync.boundary_verifier import BoundaryShadow
+from app.services.sync.candidate_reconstruction import (
+    reconstruct_with_original_dialogue,
+)
 from app.services.sync.case_capture import (
     capture_affine,
     capture_output,
@@ -57,6 +62,8 @@ from app.services.sync.constant_shift_exemption import (
     decide_constant_shift_exemption,
     measure_median_abs_residual,
 )
+from app.services.sync.delivery import DeliveryAuthorization, DeliveryPayload
+from app.services.sync.hybrid_router import unified_authority_enabled, unified_review_async
 from app.services.sync.large_offset import (
     LARGE_OFFSET_MAX_MS,
     REASON_MAX_OFFSET_EXCEEDED,
@@ -74,6 +81,7 @@ from app.services.sync.large_offset_investigation import (
 from app.services.sync.matching import (
     is_bare_disc_track_name,
     is_informative_release_name,
+    parse_release_identity,
 )
 from app.services.sync.outcomes import (
     REJECTED,
@@ -83,7 +91,12 @@ from app.services.sync.outcomes import (
 )
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync.reference import is_dialogue_cue
-from app.services.sync.target_binding import BindingAssessment, classify_target_binding
+from app.services.sync.release_knowledge import compatible_source
+from app.services.sync.target_binding import (
+    BindingAssessment,
+    TargetBinding,
+    classify_target_binding,
+)
 from app.services.sync.telemetry import SyncTiming, current_sync_timing
 from app.services.sync_cache import SYNC_PAYLOAD_VERSION, SyncCache
 from app.utils.cleaners import strip_intro_credits
@@ -143,6 +156,7 @@ class _LazyCandidate:
         query: Any,
         shared: dict[str, Any],
         validate: Any | None,
+        plan_index: int | None = None,
     ) -> None:
         self._strategy = strategy
         self._release = release
@@ -150,20 +164,86 @@ class _LazyCandidate:
         self._query = query
         self._shared = shared
         self._validate = validate
+        self._plan_index = plan_index
 
     async def resolve_with_provenance(self, query: Any, **kwargs: Any) -> Any:
         validate = kwargs.get("update_validator", self._validate)
+        download = self._strategy.download_planned_candidate
         try:
-            return await self._strategy.download_planned_candidate(
+            parameters = inspect.signature(download).parameters.values()
+            accepts_plan_index = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                or parameter.name == "plan_index"
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):  # pragma: no cover - introspection is best effort
+            accepts_plan_index = True
+        extra = {"plan_index": self._plan_index} if accepts_plan_index else {}
+        try:
+            return await download(
                 self._release,
                 self._provider,
                 self._query,
                 validate,
                 self._shared,
+                **extra,
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("[sync] lazy candidate download failed: %s -> next", type(exc).__name__)
             return ResolvedReference(None)
+
+
+def _lookup_video_reference(strategy_obj: Any, query: Any, timing: Any) -> Any:
+    """Return a reusable video-scoped reference artifact, or ``None``.
+
+    Revalidation is deliberately limited to what makes an artifact usable
+    evidence AT ALL -- identity binding (already enforced by the cache key),
+    payload integrity (enforced by the cache), and independence from the target.
+    It is NOT a timing check. A REMUX reference is *expected* to disagree with
+    an HDTV subtitle; that disagreement is precisely what Auto-Sync exists to
+    correct, so requiring prior agreement here would reject exactly the
+    reference the user asked for. Synchronization quality remains the sole
+    authority of ALASS / affine / target binding / the final verifier.
+
+    A rejected artifact is skipped for this request only and is never deleted:
+    failing one subtitle says nothing about whether it is valid evidence for
+    another.
+    """
+    cache = getattr(strategy_obj, "cache", None)
+    getter = getattr(cache, "get_video_scoped", None)
+    if getter is None:
+        return None
+    try:
+        found = getter(query)
+    except Exception:  # pragma: no cover - a cache must never break sync
+        logger.debug("[sync] video-scoped lookup failed", exc_info=True)
+        return None
+    if not found:
+        timing.note_reference_failure("cache_miss_video_reference")
+        return None
+    resolved = found[0]
+    if not resolved.text:
+        timing.note_reference_failure("cached_reference_validation_failure")
+        return None
+    from app.services.sync.reference_content_identity import identical_content
+
+    reason = identical_content(getattr(query, "target_text", None), resolved.text)
+    if reason:
+        logger.warning(
+            "[sync] video-scoped artifact rejected: reason=%s "
+            "reason_code=reference_content_identical_to_target candidate=%s",
+            reason, resolved.candidate or "?",
+        )
+        timing.note_reference_failure("reference_content_identical_to_target")
+        return None
+    timing.note_reference_failure("cache_hit_video_reference")
+    logger.info(
+        "[sync] reusing video-scoped reference artifact: provider=%s candidate=%s "
+        "bytes=%d; provider discovery skipped for this video",
+        resolved.provider or "?", resolved.candidate or "?",
+        len(resolved.text.encode("utf-8")),
+    )
+    return resolved
 
 
 def decision_kind_is_name_based(kind: str | None) -> bool:
@@ -220,7 +300,8 @@ def build_synced_cache_key(
         fingerprint = _normalize_fingerprint(meta.get("target_filename")) or _normalize_fingerprint(
             target_id
         )
-    return SyncCache.build_key(imdb_id, season_ep, fingerprint, target_id, decision, content_hash)
+    key = SyncCache.build_key(imdb_id, season_ep, fingerprint, target_id, decision, content_hash)
+    return f"{key}:unified-v1" if unified_authority_enabled(meta) else key
 
 
 #: Identifies this OS process, for cache diagnostics only.
@@ -382,6 +463,7 @@ class SyncOrchestrator:
             target_sub_release_name=meta.get("release_name"),
             target_download_url=meta.get("download_url"),
             target_cue_digest=fingerprint_target_cues(target_text),
+            target_text=target_text,
             media_type=str(meta.get("media_type") or "movie"),
             title=meta.get("title"),
             year=_parse_year(meta.get("year")),
@@ -412,9 +494,19 @@ class SyncOrchestrator:
         # appeared to show contradictory diagnostics that were not.
         request_token = set_request_id(stable_request_id(meta, target_id, sub_bytes))
         try:
-            return await self._evaluate_and_sync(
+            result = await self._evaluate_and_sync(
                 sub_bytes, meta, target_id, auto_sync
             )
+            if unified_authority_enabled(meta) and auto_sync:
+                from dataclasses import replace
+
+                if isinstance(result, DeliveryPayload):
+                    return DeliveryPayload(result, replace(result.authorization, original=sub_bytes,
+                        request_id=stable_request_id(meta, target_id, sub_bytes)))
+                return DeliveryPayload(result, DeliveryAuthorization(
+                    stable_request_id(meta, target_id, sub_bytes), None, None,
+                    "unknown", "UNVERIFIED", False, sub_bytes))
+            return result
         finally:
             reset_request_id(request_token)
 
@@ -519,7 +611,8 @@ class SyncOrchestrator:
         if not fingerprint:
             return None
         return SyncCache.build_verdict_key(
-            fingerprint, subtitle_hash, str(meta.get("lang") or "und")
+            fingerprint, subtitle_hash, str(meta.get("lang") or "und"),
+            methodology="unified-v1" if unified_authority_enabled(meta) else None,
         )
 
     @staticmethod
@@ -544,6 +637,53 @@ class SyncOrchestrator:
             cut_verdict=verdict.get("cut_verdict"),
         )
         return evaluation
+
+    @staticmethod
+    def _delivery_payload(payload: bytes, original: bytes, evaluation: SubtitleEvaluation,
+                          meta: dict, target_id: str, reference_sha: str | None) -> bytes:
+        if not unified_authority_enabled(meta):
+            return payload
+        return DeliveryPayload(payload, DeliveryAuthorization(
+            stable_request_id(meta, target_id, original), hashlib.sha256(payload).hexdigest(),
+            reference_sha, str(evaluation.target_binding or "unknown"), "VERIFIED",
+            may_serve_synchronized(evaluation.sync_state, evaluation.verification), original))
+
+    @staticmethod
+    def _reusable_rejection(verdict: dict, *, historical: bool = False) -> bool:
+        if verdict.get("sync_state") == SyncState.UNVERIFIED.value:
+            return True  # Existing exact-request measured-negative behavior.
+        if verdict.get("sync_state") != SyncState.REJECTED.value:
+            return False
+        # An explicit identity/safety rejection applies to this content-bound
+        # request. Candidate output damage or timing-model refusal does not
+        # forbid a genuinely new independent candidate/methodology.
+        scope = verdict.get("rejection_scope")
+        if scope in {"identity", "safety", "request"}:
+            return True
+        if scope in {"candidate", "methodology"}:
+            return not historical and scope == "methodology"
+        return verdict.get("rejection_reason") not in {
+            "cue_loss", "implausible_offset", "low_confidence", "structure_mismatch",
+            "insufficient_evidence", "alass_failed",
+        }
+
+    @staticmethod
+    def _stale_unified_integrity(verdict: dict) -> bool:
+        """True for pre-reconstruction Unified dialogue-integrity negatives.
+
+        Those verdicts measured sanitized-based ALASS bytes against the raw
+        target, so reusing them would suppress the corrected (reconstructed)
+        artifact forever. Only unmarked verdicts are stale: the fixed pipeline
+        tags every Unified store with ``unified_pipeline: v2``, after which
+        normal negative reuse resumes (at most one extra evaluation per stale
+        entry, then the fresh verdict governs).
+        """
+        if verdict.get("verification_method") != "unified":
+            return False
+        if verdict.get("unified_pipeline") == "v2":
+            return False
+        reasons = verdict.get("reasons") or []
+        return any("dialogue_text_modified" in str(reason) for reason in reasons)
 
     def _audit_serve(
         self,
@@ -619,6 +759,8 @@ class SyncOrchestrator:
         meta: dict | None = None,
         target_id: str | None = None,
         artifact_key: str | None = None,
+        artifact_bytes: bytes | None = None,
+        reference_sha: str | None = None,
     ) -> None:
         """Persist a measured verdict for reuse, if it is safe to key.
 
@@ -641,13 +783,72 @@ class SyncOrchestrator:
 
             fingerprint = SyncCache.video_fingerprint_from_meta(meta)
             if fingerprint:
-                alias_key = SyncCache.build_verdict_alias_key(fingerprint, target_id)
+                alias_key = SyncCache.build_verdict_alias_key(
+                    fingerprint, target_id,
+                    methodology="unified-v1" if unified_authority_enabled(meta) else None,
+                )
         payload = evaluation.model_dump(mode="json")
+        if meta and unified_authority_enabled(meta):
+            payload.update(verification_method="unified", verification_version="unified-v1")
+            payload["reference_sha"] = reference_sha
+            # Candidate-provenance generation: v2 = timing-only reconstruction
+            # boundary (original dialogue + ALASS timings). Pre-v2 Unified
+            # negatives carrying dialogue-integrity reasons were measured on
+            # sanitized-based bytes and must not suppress the corrected
+            # artifact; the negative-reuse path treats unmarked integrity
+            # rejections as stale exactly once, then this marker re-enables
+            # normal reuse. Positives are unaffected (artifacts unchanged).
+            payload["unified_pipeline"] = "v2"
+            if artifact_bytes is not None:
+                payload["artifact_sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
         if artifact_key:
             payload["artifact_key"] = artifact_key
         await self._sync_cache.set_verdict(
             verdict_key, payload, alias_key=alias_key
         )
+
+    async def _select_evaluation(
+        self, legacy: SubtitleEvaluation, *, target_text: str, reference_text: str,
+        candidate_text: str, meta: dict, algorithm: str,
+        resolved: ResolvedReference | None = None,
+    ) -> SubtitleEvaluation:
+        """Select correctness before authorization or caching; never rewrite Legacy."""
+        if not unified_authority_enabled(meta):
+            return legacy
+        evaluation, telemetry = await unified_review_async(
+            target_text=target_text, reference_text=reference_text,
+            synced_text=candidate_text, candidate_algorithm=algorithm,
+        )
+        logger.info("[unified] algorithm=%s legacy=%s unified=%s disagreement=%s evidence=%s",
+                    algorithm, legacy.model_dump(mode="json"), evaluation.model_dump(mode="json"),
+                    legacy.sync_state != evaluation.sync_state, telemetry)
+        # Keep the existing withhold-only ReferencePolicy ceiling.
+        trust = resolved.reference_trust if resolved else legacy.reference_trust
+        evaluation.reference_trust = trust
+        reference_evidence = resolved or legacy
+        if resolved:
+            evaluation.reasons.extend(f"reference: {reason}" for reason in resolved.reference_reasons or [])
+        evaluation.reference_consensus = reference_evidence.reference_consensus
+        evaluation.reference_independent_sources = reference_evidence.reference_independent_sources
+        evaluation.reference_failure = reference_evidence.reference_failure
+        if (trust is not None and trust not in {"verified", "strong"}
+                and evaluation.sync_state in {SyncState.VERIFIED_SYNCED, SyncState.VERIFIED_RESYNCED}):
+            evaluation.set_verdict(SyncState.PROBABLE_SYNC, evaluation.verification)
+            evaluation.reasons.append(f"reference trust '{trust}' caps the verified claim")
+        self._last_evaluation = evaluation
+        return evaluation
+
+    def _legacy_diagnostic(self, meta: dict, *args: Any, **kwargs: Any) -> SubtitleEvaluation:
+        try:
+            evaluation = self._analyzer.analyze(*args, **kwargs)
+            if unified_authority_enabled(meta):
+                logger.info("[unified] legacy_measurement=%s", evaluation.model_dump(mode="json"))
+            return evaluation
+        except Exception as exc:
+            if not unified_authority_enabled(meta):
+                raise
+            logger.info("[unified] legacy_diagnostic_error=%s", type(exc).__name__)
+            return SubtitleEvaluation(reasons=[f"legacy_diagnostic_error:{type(exc).__name__}"])
 
     async def _reference_attempts(
         self, attempts: list[tuple[str, Any]], query: ReferenceQuery,
@@ -696,7 +897,9 @@ class SyncOrchestrator:
             # each downloaded only if the loop actually reaches it.
             _shared: dict[str, Any] = {"downloaded": 0, "seen": set()}
             _planned: list[tuple[Any, Any]] = []
-            if callable(_plan):
+            has_plan = callable(_plan)
+            cached_available = bool(_hit is not None and getattr(_hit, "text", None))
+            if has_plan and cached_available:
                 if _hit is not None and getattr(_hit, "text", None):
                     # Keep the cached reference first. Seed the shared digest set
                     # with its content so the planned releases cannot re-offer
@@ -708,11 +911,41 @@ class SyncOrchestrator:
                     )
                     timing.cached_reference_attempted = True
                     yield f"{_name}#cache", _PreResolvedReference(_hit)
-            if callable(_plan):
+            _video_hit = None
+            if has_plan and not cached_available:
+                # Video-scoped artifact tier. The subtitle-scoped miss above only
+                # says "no reference was proven for THIS subtitle"; it does not
+                # say the reference was never downloaded. Which file to use is a
+                # property of the video, so consult that tier before paying for
+                # provider discovery and another copy of the same archive.
+                _video_hit = _lookup_video_reference(_obj, query, timing)
+            cached_available = cached_available or bool(
+                _video_hit is not None and getattr(_video_hit, "text", None)
+            )
+            if has_plan and _video_hit is not None:
+                # Reuse the artifact, but do not make it a dead end. Provider
+                # discovery is deferred until the consumer asks for a second
+                # candidate, meaning a successful artifact pays no discovery or
+                # download cost, while a failed one still permits fresh planning.
+                # It is not an acceptance: the loop below still runs
+                # ALASS/affine/binding and the final verifier on it exactly as
+                # for a fresh download.
+                _shared["seen"].add(
+                    hashlib.sha256(str(_video_hit.text).encode("utf-8", "replace")).hexdigest()
+                )
+                timing.cached_reference_attempted = True
+                yield f"{_name}#video_cache", _PreResolvedReference(_video_hit)
+                source_digest = getattr(_video_hit, "source_download_digest", None)
+                if source_digest:
+                    # Do not spend a bounded plan slot fetching the same archive
+                    # again if this artifact cannot serve the request. The raw
+                    # address is never stored or logged; only its digest is used.
+                    query.known_source_digests = (source_digest,)
+            if has_plan:
                 timing.external_plan_started = True
                 started = time.monotonic()
                 try:
-                    _planned = await _plan(query)
+                    _planned = await cast(Any, _plan)(query)
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.warning(
                         "[sync] %s candidate planning failed: %s -> single reference",
@@ -722,7 +955,7 @@ class SyncOrchestrator:
                 finally:
                     timing.external_plan_ms = (time.monotonic() - started) * 1000
                 timing.candidate_count_planned += len(_planned)
-            elif callable(_multi):
+            if callable(_multi) and not has_plan:
                 try:
                     _cands = await _multi(query, update_validator=_passes_cue_sanity)
                 except Exception as exc:  # pragma: no cover - defensive
@@ -748,9 +981,7 @@ class SyncOrchestrator:
                         _name,
                     )
                 continue
-            if not _planned and not (
-                _hit is not None and getattr(_hit, "text", None)
-            ):
+            if not _planned and not cached_available:
                 # No plan and no cache hit: nothing to try for this strategy.
                 # (When a plan exists, emptiness after download failures is
                 # discovered per candidate by the loop itself, each skip
@@ -768,7 +999,7 @@ class SyncOrchestrator:
             for _i, (_rel, _prov) in enumerate(_planned):
                 yield (
                     f"{_name}#candidate{_i + 1}",
-                    _LazyCandidate(_obj, _rel, _prov, query, _shared, _passes_cue_sanity),
+                    _LazyCandidate(_obj, _rel, _prov, query, _shared, _passes_cue_sanity, plan_index=_i + 1),
                 )
 
     async def _execute_job(
@@ -847,7 +1078,12 @@ class SyncOrchestrator:
                 stored_state = (meta_record or {}).get("sync_state")
                 stored_verification = (meta_record or {}).get("verification")
                 if (is_reusable_verified(stored_state, stored_verification)
-                        and (meta_record or {}).get("target_binding") in {"exact", "strong"}):
+                        and (meta_record or {}).get("target_binding") in {"exact", "strong"}
+                        and (not unified_authority_enabled(meta) or (
+                            (meta_record or {}).get("verification_method") == "unified"
+                            and (meta_record or {}).get("verification_version") == "unified-v1"
+                            and re.fullmatch(r"[a-f0-9]{64}", str((meta_record or {}).get("reference_sha") or ""))
+                            and (meta_record or {}).get("artifact_sha256") == hashlib.sha256(cached).hexdigest()))):
                     logger.info(
                         "[sync-cache] layer=payload result=hit sub_id=%s process=%s "
                         "fingerprint_source=%s credential_source=%s content_hash=%s "
@@ -867,7 +1103,9 @@ class SyncOrchestrator:
                     )
                     self._metrics["verification_cache_hits"] += 1
                     timing.cache_hit = True
-                    return cached
+                    return self._delivery_payload(cached, sub_bytes,
+                        self._evaluation_from_verdict(meta_record or {}), meta, target_id,
+                        (meta_record or {}).get("reference_sha"))
                 logger.info(
                     "[sync-cache] layer=payload result=miss sub_id=%s process=%s "
                     "fingerprint_source=%s credential_source=%s content_hash=%s "
@@ -922,6 +1160,12 @@ class SyncOrchestrator:
         verdict_key = self._verdict_key(meta, content_hash)
         if verdict_key:
             remembered = await self._sync_cache.get_verdict(verdict_key) if self._sync_cache else None
+            if remembered is None and self._sync_cache and unified_authority_enabled(meta):
+                # Preserve old measured rejection blocking, never old acceptance.
+                old_key = verdict_key.replace("verdict:8:unified-v1:", "verdict:7:", 1)
+                old = await self._sync_cache.get_verdict(old_key)
+                if old and self._reusable_rejection(old, historical=True):
+                    remembered = old
             remembered_state = str((remembered or {}).get("sync_state") or "")
             # VERIFIED_RESYNCED means alass DID re-time this subtitle, so the
             # correct bytes are the transformed artifact, not the original. This
@@ -934,6 +1178,12 @@ class SyncOrchestrator:
                 if isinstance(artifact_key, str) and artifact_key:
                     resync_artifact = await self._sync_cache.get(artifact_key)
             resync_artifact_available = resync_artifact is not None
+            if (remembered and unified_authority_enabled(meta)
+                    and remembered_state in {"verified_synced", "verified_resynced"}):
+                artifact = resync_artifact if resync_artifact is not None else sub_bytes
+                if (remembered.get("artifact_sha256") != hashlib.sha256(artifact).hexdigest()
+                        or not re.fullmatch(r"[a-f0-9]{64}", str(remembered.get("reference_sha") or ""))):
+                    remembered = None
             if (
                 remembered
                 and remembered_state in (
@@ -970,11 +1220,15 @@ class SyncOrchestrator:
                             "sync_confidence": remembered.get("sync_confidence"),
                             "target_binding": remembered.get("target_binding"),
                             "target_binding_reasons": remembered.get("target_binding_reasons", []),
+                            **self._methodology_metadata(meta),
+                            "artifact_sha256": hashlib.sha256(reused_bytes).hexdigest(),
+                            "reference_sha": remembered.get("reference_sha"),
                         },
                     )
                 self._record_outcome(meta, VERIFIED)
                 timing.cache_hit = True
-                return reused_bytes
+                return self._delivery_payload(reused_bytes, sub_bytes, self._last_evaluation,
+                    meta, target_id, remembered.get("reference_sha"))
 
             # Negative cache for a MEASURED rejection. The verified fast path
             # above only short-circuits successes, so a stored UNVERIFIED
@@ -993,7 +1247,22 @@ class SyncOrchestrator:
             # rejection has no trustworthy transformed artifact. It never
             # upgrades a rejection into a verified claim -- `_evaluation_from_verdict`
             # reports it as `cached`, and `sync_state` stays UNVERIFIED.
-            if remembered and remembered_state == SyncState.UNVERIFIED.value:
+            if (
+                remembered
+                and unified_authority_enabled(meta)
+                and self._stale_unified_integrity(remembered)
+            ):
+                # Pre-reconstruction integrity negative: re-evaluate once under
+                # the corrected boundary instead of suppressing it. The fresh
+                # verdict carries the pipeline marker, so this costs at most
+                # one extra evaluation per stale entry.
+                logger.info(
+                    "[sync] cached Unified integrity rejection predates the "
+                    "reconstruction boundary for sub=%s -> re-evaluating",
+                    target_id,
+                )
+                remembered = None
+            if remembered and self._reusable_rejection(remembered):
                 self._metrics["verification_cache_hits"] += 1
                 self._last_evaluation = self._evaluation_from_verdict(remembered)
                 self._audit_serve(
@@ -1172,6 +1441,26 @@ class SyncOrchestrator:
                 resolved = ResolvedReference(None)
 
             if not resolved.text:
+                if resolved.reference_failure:
+                    timing.note_reference_failure(resolved.reference_failure)
+                continue
+            # Independent evidence only. A reference that is the target subtitle
+            # -- byte for byte, or the same dialogue under a different cue grid,
+            # e.g. the same member re-extracted from the same season-pack archive
+            # -- aligns trivially and would otherwise be reported as a verified
+            # synchronization. Skip it and let the loop try the next candidate;
+            # the original subtitle is still served if none survives.
+            from app.services.sync.reference_content_identity import identical_content
+
+            _self_reference_reason = identical_content(target_text, resolved.text)
+            if _self_reference_reason:
+                logger.warning(
+                    "[sync] reference rejected: reason=%s reason_code="
+                    "reference_content_identical_to_target strategy=%s candidate=%s; "
+                    "a reference identical to the target is not independent evidence",
+                    _self_reference_reason, strategy_name, resolved.candidate or "?",
+                )
+                timing.note_reference_failure("reference_content_identical_to_target")
                 continue
 
             # Futile-alignment skip for a bare disc track with no identity
@@ -1226,11 +1515,25 @@ class SyncOrchestrator:
                 pal_target_snapshot, resolved, meta, target_id, content_hash,
                 resolution_key, verdict_key,
             )
+            affine_reference_corroborated = False
             if isinstance(affine_served, BindingAssessment):
+                # This return type means affine independently accepted, but
+                # metadata alone could not authorize serving its artifact.
+                affine_reference_corroborated = self._affine_corroborates_weak_binding(affine_served)
+                if not affine_reference_corroborated:
+                    rejected_candidates_seen = True
+                    continue
+                logger.info("[sync] affine corroborated same-episode source-family reference; "
+                            "binding remains weak; continuing to alass verification")
+            elif affine_served is not None:
+                return affine_served
+            source_family_reference_eligible = self._affine_corroborates_weak_binding(binding)
+            if binding.state is TargetBinding.WEAK and not source_family_reference_eligible:
                 rejected_candidates_seen = True
                 continue
-            if affine_served is not None:
-                return affine_served
+            if source_family_reference_eligible and not affine_reference_corroborated:
+                logger.info("[sync] same-episode source-family reference admitted to alass; "
+                            "affine did not solve timing; final verification required")
             # This only means a reference is now IN HAND. Alass may still not
             # run: the already-aligned shortcut below returns the original
             # subtitle before any subprocess is spawned. Claiming "invoking
@@ -1377,7 +1680,8 @@ class SyncOrchestrator:
             # displacement the shortcut is simply unavailable.
             if large_offset is not None and large_offset.accepted:
                 consistency = None
-            if consistency is not None and consistency.aligned:
+            if (consistency is not None and consistency.aligned
+                    and not affine_reference_corroborated and not source_family_reference_eligible):
                 # No re-timing needed. Classify explicitly so "already aligned"
                 # is a measured claim, not an assumption.
                 # Same handoff as the post-alass path: parse the text alass
@@ -1390,7 +1694,7 @@ class SyncOrchestrator:
                     len(target_cues),
                     len(target_cues),
                 )
-                evaluation = self._analyzer.analyze(
+                evaluation = self._legacy_diagnostic(meta,
                     target_cues,
                     None,
                     reference,
@@ -1404,13 +1708,22 @@ class SyncOrchestrator:
                     reference_failure=getattr(resolved, "reference_failure", None),
                     max_plausible_offset_ms=offset_ceiling_ms,
                 )
+                evaluation = await self._select_evaluation(
+                    evaluation, target_text=pristine_shadow_target, reference_text=reference,
+                    candidate_text=pristine_shadow_target, meta=meta, algorithm="already_aligned", resolved=resolved,
+                )
+                if (unified_authority_enabled(meta) and not may_serve_synchronized(
+                        evaluation.sync_state, evaluation.verification)):
+                    rejected_candidates_seen = True
+                    continue
                 if not self._gate_target_binding(evaluation, binding):
                     rejected_candidates_seen = True
                     continue
                 self._last_evaluation = evaluation
                 self._metrics["candidates_verified"] += 1
                 await self._store_verdict(
-                    verdict_key, evaluation, content_hash, meta, target_id
+                    verdict_key, evaluation, content_hash, meta, target_id, artifact_bytes=sub_bytes,
+                    reference_sha=hashlib.sha256(reference.encode("utf-8")).hexdigest(),
                 )
                 self._audit_serve(
                     evaluation, meta, target_id, from_cache=False, resolved=resolved
@@ -1436,6 +1749,9 @@ class SyncOrchestrator:
                             "verification": evaluation.verification.value,
                             "sync_confidence": evaluation.sync_confidence,
                             **self._binding_metadata(binding),
+                            "artifact_sha256": hashlib.sha256(sub_bytes).hexdigest(),
+                            "reference_sha": hashlib.sha256(reference.encode("utf-8")).hexdigest(),
+                            **self._methodology_metadata(meta),
                         },
                     )
                 self._record_outcome(
@@ -1446,7 +1762,8 @@ class SyncOrchestrator:
                 )
                 timing.winning_sync_strategy = "already_aligned"
                 timing.winning_candidate_index = timing.candidates_considered
-                return sub_bytes
+                return self._delivery_payload(sub_bytes, sub_bytes, evaluation, meta, target_id,
+                    hashlib.sha256(reference.encode("utf-8")).hexdigest())
 
             # "Relaxed" means the target name carries no edition signal, so the
             # timeline gate must be tighter. An absent target_filename is the
@@ -1576,6 +1893,26 @@ class SyncOrchestrator:
             )
             if synced:
                 alass_completed += 1
+            if synced and unified_authority_enabled(meta):
+                # Timing-only reconstruction across the sanitization boundary:
+                # ALASS aligns a sanitized working copy (ads removed), while
+                # Unified judges against the pristine original. Transplant the
+                # verified ALASS timings onto the original dialogue when the
+                # 1:1 mapping is unambiguous; otherwise keep fail-closed
+                # behavior (verify the raw bytes, which then reject as before).
+                # Legacy path untouched: no reconstruction when gate is off.
+                reconstructed = reconstruct_with_original_dialogue(
+                    pristine_shadow_target, synced
+                )
+                if reconstructed is not None:
+                    if reconstructed != synced:
+                        logger.info(
+                            "[sync] reconstructed candidate with original dialogue "
+                            "for sub=%s (alass timings preserved, %d chars)",
+                            target_id,
+                            len(reconstructed),
+                        )
+                    synced = reconstructed
 
             if synced:
                 capture_transformed(reference, synced, "alass", alignment_input=target_text)
@@ -1606,7 +1943,7 @@ class SyncOrchestrator:
                     len(target_cues),
                     len(target_cues),
                 )
-                evaluation = self._analyzer.analyze(
+                evaluation = self._legacy_diagnostic(meta,
                     target_cues,
                     synced,
                     reference,
@@ -1677,7 +2014,14 @@ class SyncOrchestrator:
                         apply_exemption_to_evaluation(evaluation)
                         self._last_evaluation = evaluation
 
-                binding_allowed = self._gate_target_binding(evaluation, binding)
+                evaluation = await self._select_evaluation(
+                    evaluation, target_text=pristine_shadow_target, reference_text=reference,
+                    candidate_text=synced, meta=meta, algorithm="alass", resolved=resolved,
+                )
+                binding_allowed = self._gate_target_binding(
+                    evaluation, binding, affine_reference_corroborated=affine_reference_corroborated,
+                    source_family_reference_verified=source_family_reference_eligible,
+                )
                 if not binding_allowed:
                     constant_shift_state = ConstantShiftExemptionState.ORIGINAL
                 capture_verifier(reference, synced, evaluation)
@@ -1689,7 +2033,9 @@ class SyncOrchestrator:
                     meta, target_id, content_hash=content_hash, decision=decision_kind
                 )
                 await self._store_verdict(
-                    verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key
+                    verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key,
+                    artifact_bytes=synced.encode("utf-8"),
+                    reference_sha=hashlib.sha256(reference.encode("utf-8")).hexdigest(),
                 )
                 self._audit_serve(
                     evaluation, meta, target_id, from_cache=False, resolved=resolved
@@ -1706,6 +2052,8 @@ class SyncOrchestrator:
                     # is not verified-and-measured, so the artifact may exist
                     # without ever being reusable as a verified result.
                     outcome_meta = {
+                        "reference_sha": hashlib.sha256(reference.encode("utf-8")).hexdigest(),
+                        "artifact_sha256": hashlib.sha256(synced.encode("utf-8")).hexdigest(),
                         "sync_state": evaluation.sync_state.value,
                         "verification": evaluation.verification.value,
                         "sync_confidence": evaluation.sync_confidence,
@@ -1714,11 +2062,16 @@ class SyncOrchestrator:
                         # never asserts a verification the analyzer refused.
                         "serving_state": serving_state.value,
                         **self._binding_metadata(binding),
+                        **self._methodology_metadata(meta),
                     }
                     await self._sync_cache.set_meta(key, {**outcome_meta, **{
                         "status": "synced",
                         "applied_shift": self._applied_shifts(target_text, synced),
-                        "reference_sha": hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16],
+                        "reference_sha": (
+                            hashlib.sha256(reference.encode("utf-8")).hexdigest()
+                            if unified_authority_enabled(meta)
+                            else hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16]
+                        ),
                         "decision": decision_kind,
                         "timestamp": datetime.now(UTC).isoformat(),
                     }})
@@ -1754,6 +2107,7 @@ class SyncOrchestrator:
                 if (
                     serving_state
                     is LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET
+                    and not unified_authority_enabled(meta)
                 ):
                     if not serve_synchronized:
                         logger.info(
@@ -1774,6 +2128,7 @@ class SyncOrchestrator:
                 if (
                     constant_shift_state
                     is ConstantShiftExemptionState.EXEMPT_CONSTANT_SHIFT
+                    and not unified_authority_enabled(meta)
                 ):
                     if not serve_synchronized:
                         logger.info(
@@ -1785,6 +2140,36 @@ class SyncOrchestrator:
                             evaluation.verification.value,
                         )
                     serve_synchronized = True
+                if serve_synchronized and not unified_authority_enabled(meta) and (
+                    serving_state
+                    is LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET
+                    or constant_shift_state
+                    is ConstantShiftExemptionState.EXEMPT_CONSTANT_SHIFT
+                ):
+                    # Hybrid correspondence verification before delivery.
+                    # Gate off / out of scope: no-op, legacy behavior
+                    # byte-identical. When enabled and in scope, an
+                    # exemption-driven serve additionally requires V2
+                    # concurrence; a V2 rejection downgrades THIS candidate
+                    # to fallback and the loop continues below.
+                    exemption_label = (
+                        "large_offset"
+                        if serving_state
+                        is LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET
+                        else "constant_shift"
+                    )
+                    if not await self._hybrid_predelivery_gate(
+                        target_id=target_id,
+                        target_text=target_text,
+                        reference_text=reference,
+                        synced_text=synced,
+                        meta=meta,
+                        exemption=exemption_label,
+                        legacy_unverified=not may_serve_synchronized(
+                            evaluation.sync_state, evaluation.verification
+                        ),
+                    ):
+                        serve_synchronized = False
                 if serve_synchronized:
                     served = synced.encode("utf-8")
                 else:
@@ -1867,7 +2252,8 @@ class SyncOrchestrator:
                         meta,
                         classify_outcome(True, serving_state.value, False),
                     )
-                    return served
+                    return self._delivery_payload(served, sub_bytes, evaluation, meta, target_id,
+                        hashlib.sha256(reference.encode("utf-8")).hexdigest())
                 # A REJECTED candidate must NOT end the request.
                 #
                 # This used to return unconditionally, which made the
@@ -1899,9 +2285,27 @@ class SyncOrchestrator:
             )
 
         if not last_resolved.text:
+            timing.note_reference_failure("no_independent_reference_available")
             logger.info("[sync] no deterministic reference available -> aborting sync")
         else:
             logger.warning("[sync] all sync strategies failed -> serving original subtitle")
+            # Hybrid Two-Point + ALASS routing. Default-off test gate: when
+            # disabled this is a no-op and the PAL fallback below runs exactly
+            # as before. Uses pristine snapshots and the highest-priority
+            # resolved reference; never re-runs provider discovery.
+            hybrid_served = await self._try_hybrid_sync(
+                pal_target_snapshot,
+                pal_first_reference,
+                meta,
+                target_id,
+                sub_bytes,
+                content_hash,
+                resolution_key,
+                verdict_key,
+                resolved=pal_resolved,
+            )
+            if hybrid_served is not None:
+                return hybrid_served
             # Two-point PAL-speedup fallback. Runs only here -- after Alass
             # and every verified path failed -- using the pristine request
             # texts and the highest-priority resolved reference. A single
@@ -1953,10 +2357,20 @@ class SyncOrchestrator:
             return None
         capture_affine(resolved.text, result)
         evaluation = result.evaluation
-        if (not result.accepted or not result.transformed_text or evaluation is None
+        if not result.transformed_text or evaluation is None:
+            return None
+        evaluation = await self._select_evaluation(
+            evaluation, target_text=target_text, reference_text=resolved.text,
+            candidate_text=result.transformed_text, meta=meta, algorithm=STRATEGY_ID, resolved=resolved,
+        )
+        if ((not result.accepted and not unified_authority_enabled(meta))
                 or not may_serve_synchronized(evaluation.sync_state, evaluation.verification)):
             return None
         binding = self._target_binding(resolved, meta)
+        if self._affine_corroborates_weak_binding(binding):
+            # A handoff, not authority to serve the affine artifact. Preserve
+            # its measured verdict and require fresh evidence for this attempt.
+            return binding if evaluation.verification is VerificationAvailability.VERIFIED else None
         if not self._gate_target_binding(evaluation, binding):
             return binding
         evaluation.reference_trust = resolved.reference_trust
@@ -1967,13 +2381,16 @@ class SyncOrchestrator:
         )
         self._last_evaluation = evaluation
         await self._store_verdict(
-            verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key
+            verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key,
+            artifact_bytes=transformed,
+            reference_sha=hashlib.sha256(resolved.text.encode("utf-8")).hexdigest(),
         )
         self._audit_serve(evaluation, meta, target_id, from_cache=False, resolved=resolved)
         self._metrics["candidates_verified"] += 1
         if self._sync_cache is not None:
             await self._sync_cache.clear_failed(resolution_key)
             outcome_meta = {
+                "artifact_sha256": hashlib.sha256(transformed).hexdigest(),
                 "sync_state": evaluation.sync_state.value,
                 "verification": evaluation.verification.value,
                 "sync_confidence": evaluation.sync_confidence,
@@ -1984,6 +2401,7 @@ class SyncOrchestrator:
                 "slope": result.slope,
                 "intercept_ms": result.intercept_ms,
                 **self._binding_metadata(binding),
+                **self._methodology_metadata(meta),
             }
             await self._sync_cache.set(key, transformed)
             await self._sync_cache.set_meta(key, outcome_meta)
@@ -2001,7 +2419,8 @@ class SyncOrchestrator:
         if timing is not None:
             timing.winning_sync_strategy = STRATEGY_ID
         capture_selected(resolved.text, result.transformed_text, STRATEGY_ID)
-        return transformed
+        return self._delivery_payload(transformed, target_text.encode("utf-8"), evaluation,
+            meta, target_id, hashlib.sha256(resolved.text.encode("utf-8")).hexdigest())
 
     async def _try_pal_two_point_fallback(
         self,
@@ -2080,7 +2499,7 @@ class SyncOrchestrator:
             evaluation.coverage_score if evaluation is not None else "n/a",
             ",".join(result.reason_codes) or "none",
         )
-        if not result.accepted or not result.transformed_text:
+        if (not result.accepted and not unified_authority_enabled(meta)) or not result.transformed_text:
             return None
         evaluation = result.evaluation
         if evaluation is None:
@@ -2091,9 +2510,16 @@ class SyncOrchestrator:
         # measured metrics (p95, structure, coverage) stay exactly as measured;
         # only the serving claim changes, and only because the PAL slope match
         # independently corroborates the correction.
-        evaluation.set_verdict(
-            SyncState.VERIFIED_RESYNCED, VerificationAvailability.VERIFIED
+        if not unified_authority_enabled(meta):
+            evaluation.set_verdict(
+                SyncState.VERIFIED_RESYNCED, VerificationAvailability.VERIFIED
+            )
+        evaluation = await self._select_evaluation(
+            evaluation, target_text=target_text, reference_text=reference_text,
+            candidate_text=result.transformed_text, meta=meta, algorithm=PAL_STRATEGY_ID, resolved=resolved,
         )
+        if not may_serve_synchronized(evaluation.sync_state, evaluation.verification):
+            return None
         binding = self._target_binding(resolved or ResolvedReference(reference_text), meta)
         if not self._gate_target_binding(evaluation, binding):
             return None
@@ -2110,7 +2536,9 @@ class SyncOrchestrator:
             meta, target_id, content_hash=content_hash, decision=PAL_STRATEGY_ID
         )
         await self._store_verdict(
-            verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key
+            verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key,
+            artifact_bytes=transformed,
+            reference_sha=hashlib.sha256(reference_text.encode("utf-8")).hexdigest(),
         )
         self._audit_serve(
             evaluation, meta, target_id, from_cache=False, resolved=None
@@ -2123,19 +2551,28 @@ class SyncOrchestrator:
             await self._sync_cache.set_meta(key, {
                 "status": "synced",
                 "applied_shift": self._applied_shifts(target_text, result.transformed_text),
-                "reference_sha": hashlib.sha256(reference_text.encode("utf-8")).hexdigest()[:16],
+                "reference_sha": (
+                    hashlib.sha256(reference_text.encode("utf-8")).hexdigest()
+                    if unified_authority_enabled(meta)
+                    else hashlib.sha256(reference_text.encode("utf-8")).hexdigest()[:16]
+                ),
                 "decision": PAL_STRATEGY_ID,
                 "timestamp": datetime.now(UTC).isoformat(),
                 "sync_state": evaluation.sync_state.value,
                 "verification": evaluation.verification.value,
                 "sync_confidence": evaluation.sync_confidence,
                 **self._binding_metadata(binding),
+                **self._methodology_metadata(meta),
+                "artifact_sha256": hashlib.sha256(transformed).hexdigest(),
             })
             await self._sync_cache.set_meta(resolution_key, {
+                "reference_sha": hashlib.sha256(reference_text.encode("utf-8")).hexdigest(),
                 "sync_state": evaluation.sync_state.value,
                 "verification": evaluation.verification.value,
                 "sync_confidence": evaluation.sync_confidence,
                 **self._binding_metadata(binding),
+                **self._methodology_metadata(meta),
+                "artifact_sha256": hashlib.sha256(transformed).hexdigest(),
             })
         self._record_outcome(
             meta, classify_outcome(True, PAL_STRATEGY_ID, False)
@@ -2161,12 +2598,281 @@ class SyncOrchestrator:
             timing.reference_kind = timing.pal_reference_kind
             timing.winning_candidate_index = timing.pal_reference_index
         capture_selected(reference_text, result.transformed_text, PAL_STRATEGY_ID)
-        return transformed
+        return self._delivery_payload(transformed, sub_bytes, evaluation, meta, target_id,
+            hashlib.sha256(reference_text.encode("utf-8")).hexdigest())
+
+    async def _try_hybrid_sync(
+        self,
+        target_text: str | None,
+        reference_text: str | None,
+        meta: dict,
+        target_id: str,
+        sub_bytes: bytes,
+        content_hash: str,
+        resolution_key: str,
+        verdict_key: str | None,
+        resolved: ResolvedReference | None = None,
+    ) -> bytes | None:
+        """Hybrid Two-Point + ALASS routing. Returns served bytes or None.
+
+        Default-off test gate (``HYBRID_TWO_POINT_ALASS_ENABLED``): when
+        disabled this returns None immediately and the caller falls through
+        to the existing PAL fallback unchanged. When enabled, the isolated
+        nucleus classifies the pair (LINEAR / NONLINEAR / INSUFFICIENT);
+        LINEAR transforms via Two-Point and NONLINEAR attempts ALASS on the
+        unchanged original target, each subject to the existing production
+        analyzer, Target Binding, and serve gates with no verdict rewritten.
+        Any failure at any stage returns None (serve the original).
+        """
+        from app.services.sync.hybrid_router import (
+            GATE_SETTING as HYBRID_GATE_LABEL,
+        )
+        from app.services.sync.hybrid_router import (
+            MODEL_VERSION as HYBRID_MODEL_VERSION,
+        )
+        from app.services.sync.hybrid_router import (
+            STRATEGY_ID_LINEAR as HYBRID_LINEAR,
+        )
+        from app.services.sync.hybrid_router import (
+            STRATEGY_ID_NONLINEAR as HYBRID_NONLINEAR,
+        )
+        from app.services.sync.hybrid_router import (
+            attempt_hybrid,
+        )
+        from app.services.sync.hybrid_router import (
+            is_enabled as hybrid_is_enabled,
+        )
+
+        if not hybrid_is_enabled():
+            logger.info(
+                "[hybrid] sub=%s evaluated=false reason=disabled gate=%s",
+                target_id, HYBRID_GATE_LABEL,
+            )
+            return None
+        from app.services.sync.hybrid_router import scope_allows as hybrid_scope_allows
+
+        if not hybrid_scope_allows(meta):
+            logger.info(
+                "[hybrid] sub=%s evaluated=false reason=scoped_out gate=%s",
+                target_id, HYBRID_GATE_LABEL,
+            )
+            return None
+        if not target_text or not reference_text:
+            logger.debug("[hybrid] sub=%s evaluated=false reason=missing_input", target_id)
+            return None
+
+        async def _runner(original_target: str, eligible_reference: str) -> str | None:
+            if self._sync_service is None:
+                return None
+            return await self._sync_service.sync_async(
+                original_target,
+                eligible_reference,
+                decision_kind=resolved.kind if resolved is not None else "edition",
+                is_series=bool(meta.get("season") or meta.get("episode")),
+                source_confirmed=False,
+                relaxed=False,
+                reference_partial=False,
+            )
+
+        try:
+            result = await attempt_hybrid(
+                target_text,
+                reference_text,
+                analyzer=self._analyzer,
+                alass_runner=_runner,
+                reference_partial=bool(resolved.partial) if resolved is not None else False,
+                unified_authority=True,
+            )
+        except Exception as exc:  # fail closed, always
+            logger.info("[hybrid] sub=%s evaluated=false error=%s", target_id, type(exc).__name__)
+            return None
+        strategy = HYBRID_LINEAR if result.route == "linear" else (
+            HYBRID_NONLINEAR if result.route == "nonlinear" else "hybrid_unrouted"
+        )
+        correspondence = result.correspondence or {}
+        logger.info("[unified] hybrid_diagnostics=%s", correspondence)
+        logger.info(
+            "[hybrid] sub=%s evaluated=true route=%s accepted=%s "
+            "scale=%s offset_ms=%s timings_ms=%s reasons=%s",
+            target_id,
+            result.route,
+            result.accepted,
+            f"{result.scale:.6f}" if result.scale is not None else "n/a",
+            f"{result.offset_ms:.0f}" if result.offset_ms is not None else "n/a",
+            ",".join(f"{key}={value:.0f}" for key, value in result.timings_ms.items()) or "n/a",
+            ",".join(result.reason_codes) or "none",
+        )
+        logger.info(
+            "[hybrid] sub=%s verification method=%s candidate=%s groups=%s/%s "
+            "coverage=%s median=%sms p90=%sms p95=%sms max=%sms movement=%sms "
+            "discontinuities=%s outliers=%s clamped=%s failure=%s",
+            target_id,
+            correspondence.get("verification_method", "n/a"),
+            correspondence.get("candidate_algorithm", "n/a"),
+            correspondence.get("independent_groups_used", "n/a"),
+            correspondence.get("correspondence_groups_found", "n/a"),
+            correspondence.get("regional_coverage", "n/a"),
+            correspondence.get("median_residual_ms", "n/a"),
+            correspondence.get("p90_residual_ms", "n/a"),
+            correspondence.get("p95_residual_ms", "n/a"),
+            correspondence.get("max_residual_ms", "n/a"),
+            correspondence.get("movement_magnitude_ms", "n/a"),
+            correspondence.get("regional_discontinuities", "n/a"),
+            correspondence.get("outlier_count", "n/a"),
+            correspondence.get("clamped", "n/a"),
+            correspondence.get("failure_reasons", "n/a"),
+        )
+        self._last_evaluation = result.evaluation
+        if not result.accepted or not result.transformed_text:
+            return None
+        evaluation = result.evaluation
+        if evaluation is None:
+            return None
+        trust = resolved.reference_trust if resolved else None
+        evaluation.reference_trust = trust
+        if trust is not None and trust not in {"verified", "strong"}:
+            evaluation.set_verdict(SyncState.PROBABLE_SYNC, evaluation.verification)
+            evaluation.reasons.append(f"reference trust '{trust}' caps the verified claim")
+        binding = self._target_binding(
+            resolved or ResolvedReference(reference_text), meta
+        )
+        if not self._gate_target_binding(evaluation, binding):
+            return None
+        if not may_serve_synchronized(evaluation.sync_state, evaluation.verification):
+            return None
+        transformed = result.transformed_text.encode("utf-8")
+        capture_transformed(reference_text, result.transformed_text, strategy, evaluation)
+        key = build_synced_cache_key(
+            meta, target_id, content_hash=content_hash,
+            decision=f"{strategy}-{HYBRID_MODEL_VERSION}",
+        )
+        self._last_evaluation = evaluation
+        await self._store_verdict(
+            verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key,
+            artifact_bytes=transformed,
+            reference_sha=hashlib.sha256(reference_text.encode("utf-8")).hexdigest(),
+        )
+        self._audit_serve(evaluation, meta, target_id, from_cache=False, resolved=resolved)
+        self._metrics["candidates_verified"] += 1
+        if self._sync_cache is not None:
+            await self._sync_cache.clear_failed(resolution_key)
+            await self._sync_cache.set(key, transformed)
+            await self._sync_cache.set(resolution_key, transformed)
+            await self._sync_cache.set_meta(key, {
+                "status": "synced",
+                "applied_shift": self._applied_shifts(target_text, result.transformed_text),
+                "reference_sha": hashlib.sha256(reference_text.encode("utf-8")).hexdigest(),
+                "decision": strategy,
+                "verification_method": (
+                    correspondence.get("verification_method", "unified")
+                ),
+                "timestamp": datetime.now(UTC).isoformat(),
+                "sync_state": evaluation.sync_state.value,
+                "verification": evaluation.verification.value,
+                "sync_confidence": evaluation.sync_confidence,
+                **self._binding_metadata(binding),
+                **self._methodology_metadata(meta),
+                "artifact_sha256": hashlib.sha256(transformed).hexdigest(),
+            })
+            await self._sync_cache.set_meta(resolution_key, {
+                "reference_sha": hashlib.sha256(reference_text.encode("utf-8")).hexdigest(),
+                "sync_state": evaluation.sync_state.value,
+                "verification": evaluation.verification.value,
+                "sync_confidence": evaluation.sync_confidence,
+                **self._binding_metadata(binding),
+                **self._methodology_metadata(meta),
+                "artifact_sha256": hashlib.sha256(transformed).hexdigest(),
+            })
+        self._record_outcome(
+            meta, classify_outcome(True, strategy, False)
+        )
+        logger.info(
+            "[sync] delivery sub=%s decision=TRANSFORMED state=%s verification=%s "
+            "strategy=%s verification_method=%s original_sha256=%s "
+            "served_sha256=%s served_is_transformed=True bytes=%d",
+            target_id,
+            evaluation.sync_state.value,
+            evaluation.verification.value,
+            strategy,
+            correspondence.get("verification_method", "unified"),
+            _content_digest(sub_bytes),
+            _content_digest(transformed),
+            len(transformed),
+        )
+        timing = current_sync_timing.get()
+        if timing is not None:
+            timing.winning_sync_strategy = strategy
+        capture_selected(reference_text, result.transformed_text, strategy)
+        return self._delivery_payload(transformed, sub_bytes, evaluation, meta, target_id,
+            hashlib.sha256(reference_text.encode("utf-8")).hexdigest())
+
+    async def _hybrid_predelivery_gate(
+        self,
+        *,
+        target_id: str,
+        target_text: str,
+        reference_text: str,
+        synced_text: str,
+        meta: dict,
+        exemption: str,
+        legacy_unverified: bool = True,
+    ) -> bool:
+        """Correspondence V2 review before an exemption-driven delivery.
+
+        Returns True to proceed or False to downgrade this candidate to
+        fallback (loop continues; nothing is served or cached as verified).
+        Emits one request-correlated telemetry line; never logs subtitle
+        text. Verification runs bounded off-loop; a timeout fails closed
+        exactly like an internal error.
+        """
+        from app.services.sync.hybrid_router import pre_delivery_review_async
+
+        proceed, telemetry = await pre_delivery_review_async(
+            target_text=target_text,
+            reference_text=reference_text,
+            synced_text=synced_text,
+            meta=meta,
+            exemption=exemption,
+            legacy_unverified=legacy_unverified,
+        )
+        logger.info(
+            "[hybrid] pre_delivery sub=%s evaluated=%s method=%s "
+            "verdict=%s proceed=%s candidate_sha=%s served_sha=%s "
+            "reasons=%s",
+            target_id,
+            telemetry.get("evaluated", False),
+            telemetry.get("verification_method", "n/a"),
+            telemetry.get("verdict", "n/a"),
+            proceed,
+            telemetry.get("candidate_sha", "n/a"),
+            telemetry.get("served_sha", "n/a"),
+            ",".join(str(reason) for reason in telemetry.get("reasons", ())) or "none",
+        )
+        return proceed
 
     @staticmethod
     def _target_binding(resolved: ResolvedReference, meta: dict) -> BindingAssessment:
+        reference = parse_release_identity(resolved.candidate)
+        # Member identity is proven by existing extraction/re-scoring (or retained
+        # cache proof), never copied from the request. Season-pack names alone
+        # cannot provide an episode. Contradictory evidence remains ineligible.
+        for field, proven in (("season", resolved.member_season),
+                              ("episode", resolved.member_episode)):
+            if proven is None or not re.fullmatch(r"[0-9]+", str(proven)):
+                continue
+            number = int(proven)
+            if field == "episode" and number == 0:
+                continue
+            recorded = getattr(reference, field)
+            if recorded is None:
+                reference = (replace(reference, season=number) if field == "season"
+                             else replace(reference, episode=number))
+            elif recorded != number:
+                reference = replace(reference, ambiguous_fields=tuple(sorted(
+                    set(reference.ambiguous_fields) | {field})))
         binding = classify_target_binding(
             meta.get("target_filename"), resolved.candidate,
+            reference_metadata=reference,
             exact_moviehash=(resolved.kind == "hash" and bool(str(meta.get("video_hash") or "").strip())),
             embedded=resolved.kind == "embedded",
         )
@@ -2188,15 +2894,51 @@ class SyncOrchestrator:
         return binding
 
     @staticmethod
+    def _methodology_metadata(meta: dict) -> dict:
+        return ({"verification_method": "unified", "verification_version": "unified-v1"}
+                if unified_authority_enabled(meta) else {})
+
+    @staticmethod
     def _binding_metadata(binding: BindingAssessment) -> dict:
         return {"target_binding": binding.state.value,
                 "target_binding_reasons": list(binding.reasons)}
 
     @staticmethod
-    def _gate_target_binding(evaluation: SubtitleEvaluation, binding: BindingAssessment) -> bool:
+    def _affine_corroborates_weak_binding(binding: BindingAssessment) -> bool:
+        """Strict identity eligibility for request-local timing verification.
+
+        Shared by accepted-affine and ALASS handoffs. Never infer episode identity
+        for season-pack labels or movies, upgrade binding authority, or let timing
+        evidence override cut identity.
+        """
+        target, reference = binding.target, binding.reference
+        return (
+            binding.state is TargetBinding.WEAK
+            and binding.reasons == ("source_family_only",)
+            and not target.ambiguous_fields and not reference.ambiguous_fields
+            and target.season is not None and target.season == reference.season
+            and target.episode is not None and target.episode == reference.episode
+            and compatible_source(target.source_family, reference.source_family)
+            and target.cut_tags == reference.cut_tags
+            and target.edition_tags == reference.edition_tags
+        )
+
+    @staticmethod
+    def _gate_target_binding(
+        evaluation: SubtitleEvaluation, binding: BindingAssessment, *,
+        affine_reference_corroborated: bool = False,
+        source_family_reference_verified: bool = False,
+    ) -> bool:
         evaluation.target_binding = binding.state.value
         evaluation.target_binding_reasons = list(binding.reasons)
         if binding.supports_verified:
+            return True
+        if ((affine_reference_corroborated or source_family_reference_verified)
+                and SyncOrchestrator._affine_corroborates_weak_binding(binding)
+                and evaluation.verification is VerificationAvailability.VERIFIED
+                and may_serve_synchronized(evaluation.sync_state, evaluation.verification)):
+            evaluation.reasons.append("affine_reference_corroborated" if affine_reference_corroborated
+                                      else "source_family_reference_verified")
             return True
         if is_reusable_verified(evaluation.sync_state, evaluation.verification):
             logger.info("[sync] alignment accepted but target binding insufficient; "

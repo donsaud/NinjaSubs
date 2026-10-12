@@ -5,12 +5,11 @@ their candidates are pooled, then scored against the *video's* filename. The
 single best-scoring candidate is downloaded and used as the ``alass`` reference.
 
 ``alass`` only anchors speech-timing intervals, so any high-accuracy official
-track works â€” regardless of language (en/es/fr/de/it are searched). The score
+track works â€” English and Arabic are searched. The score
 favours a reference whose release quality matches the playing video (same source
 family, same streaming service family, same release group, resolution and
 codec), so a BluRay-quality Arabic subtitle played against a WEB-DL video is
-re-timed against a WEB-DL reference rather than a mismatched edition. When no
-candidate scores, the first season/episode match is used instead of aborting.
+re-timed against a WEB-DL reference rather than a mismatched edition. Unresolved references fail closed; synchronization still owns timing safety.
 """
 
 from __future__ import annotations
@@ -19,11 +18,13 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
+from app.services import release_scoring_integration as release_scoring
 from app.services.subtitle_matcher import extract_metadata
 from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.case_capture import capture_provider
@@ -33,18 +34,14 @@ from app.services.sync.decode import (
     select_zip_member,
 )
 from app.services.sync.matching import (
-    _release_group,
+    ReleaseMetadata,
     _source_kind,
-    candidate_episode_number,
-    guess_metadata,
     is_informative_release_name,
     is_retail_disc_source,
-    normalize_release_group,
     parse_release_identity,
 )
 from app.services.sync.query import ResolvedReference
 from app.services.sync.reference_v2 import release_family_key as _release_family_key
-from app.services.sync.release_ranking import semantic_rank
 from app.services.sync.telemetry import current_sync_timing
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -80,10 +77,7 @@ _MIN_REFERENCE_BYTES = 5120
 # often carry distributor intro offsets, dubbed audio pacing, or PAL 25fps shifts.
 _REFERENCE_LANGUAGES = ("en", "ar")
 
-# Deterministic reference tiers. Selection is a strict hierarchy: a candidate in a
-# better tier always beats every candidate in a worse tier, so no amount of
-# accumulated property points (resolution, codec, audio, platform) can promote a
-# generic release above an exact scene-group match.
+# Historical diagnostic labels only. ReferencePolicy owns all ordering.
 TIER_HASH = 0  # byte-exact OpenSubtitles MovieHash: undisputed ground truth
 TIER_EXACT_GROUP = 1  # exact release-group token match (PiR8, FLUX, CHD, NTb, FraMeSToR...)
 TIER_SOURCE_EDITION = 2  # same source medium and compatible cut (BluRay REMUX == BluRay REMUX)
@@ -96,134 +90,110 @@ _TIER_LABELS = {
     TIER_FALLBACK: "fallback",
 }
 
+# Planning reserves one download slot for a promising unresolved season pack
+# when the ordinary weighted budget is otherwise full. One slot is the minimum
+# that gives extraction a chance without adding network traffic: the final plan
+# still contains no more candidates than REFERENCE_POOL_LIMIT.
+_REFERENCE_EXPLORATION_SLOTS = 1
+
+# Planning diagnostics are bounded: explain the selected plan, a compact set of
+# nearby exclusions, and the most relevant policy-ineligible responses without
+# dumping or logging an entire provider pool.
+_REFERENCE_PLAN_REPORT_SELECTED_LIMIT = 12
+_REFERENCE_PLAN_REPORT_EXCLUDED_LIMIT = 6
+_REFERENCE_PLAN_REPORT_UNRANKED_LIMIT = 4
+
 
 def tier_label(tier: int) -> str:
     """Human-readable name for a reference tier (used in logs and cache keys)."""
     return _TIER_LABELS.get(tier, "fallback")
 
 
-_EDITION_PATTERNS = [
-    (
-        re.compile(
-            r"(?i)\b(director'?s?[-._ ]?cut|directors[-._ ]?cut|directors|dc[-._ ]?cut|dir[-._ ]?cut)\b"
-        ),
-        "DIRECTORS_CUT",
-    ),
-    (
-        re.compile(r"(?i)\b(extended[-._ ]?(?:cut|edition)?|ext[-._ ]?cut)\b"),
-        "EXTENDED",
-    ),
-    (
-        re.compile(r"(?i)\b(unrated[-._ ]?(?:cut|edition)?)\b"),
-        "UNRATED",
-    ),
-    (
-        re.compile(r"(?i)\b(theatrical[-._ ]?(?:cut|edition)?)\b"),
-        "THEATRICAL",
-    ),
-    (
-        re.compile(r"(?i)\b(imax[-._ ]?(?:enhanced|edition|cut)?)\b"),
-        "IMAX",
-    ),
-    (
-        re.compile(r"(?i)\b(special[-._ ]?edition|se[-._ ]?cut)\b"),
-        "SPECIAL_EDITION",
-    ),
-    (
-        re.compile(r"(?i)\b(remastered|remaster)\b"),
-        "REMASTERED",
-    ),
-]
-
-
-def _edition_kind(name: str | None) -> str | None:
-    """Recognize standard movie/series cut editions from release filename."""
-    if not name:
-        return None
-    meta = guess_metadata(name)
-    ed = meta.get("edition")
-    if ed:
-        ed_str = str(ed).lower()
-        if "director" in ed_str:
-            return "DIRECTORS_CUT"
-        if "extended" in ed_str:
-            return "EXTENDED"
-        if "unrated" in ed_str:
-            return "UNRATED"
-        if "theatrical" in ed_str:
-            return "THEATRICAL"
-        if "imax" in ed_str:
-            return "IMAX"
-        if "special" in ed_str:
-            return "SPECIAL_EDITION"
-        if "remaster" in ed_str:
-            return "REMASTERED"
-    for pattern, edition in _EDITION_PATTERNS:
-        if pattern.search(name):
-            return edition
-    return None
-
 def _release_name(release) -> str:
     return str(getattr(release, "release_name", "") or "")
 
 
-def _groups_match(target_name: str | None, cand_name: str) -> bool:
-    """True when candidate and target share the exact release group.
+def _plan_evidence_states(result) -> dict[str, dict[str, str]]:
+    """Return bounded source/group compatibility evidence for diagnostics."""
+    states = {item.field: item for item in result.evidence if item.field in {"source", "release_group"}}
+    return {
+        field: {
+            "state": states[field].state.value if field in states else "missing",
+            "relation": states[field].relationship if field in states else "missing",
+        }
+        for field in ("source", "release_group")
+    }
 
-    Compared as a case- and separator-insensitive token, so ``PiR8`` matches
-    ``pir8`` and ``Pi_R8``. No other property can substitute for this: an exact
-    group means the same mastering pass, so the cue grid lines up by
-    construction.
+
+def _candidate_source_matches(result) -> bool:
+    """Whether weighted evidence says this candidate shares the target medium.
+
+    This uses the authoritative matcher's source comparison directly, so it
+    works for BluRay, WEB-DL, HDTV, DVD and the other supported families
+    without adding a hardcoded release preference or a second scoring ladder.
     """
-    target_group = normalize_release_group(_release_group(target_name) or "")
-    if not target_group:
-        return False
-    cand_group = normalize_release_group(_release_group(cand_name) or "")
-    if not cand_group:
-        return False
-    if cand_group == target_group:
-        return True
-    # A candidate may carry the tag as a bracketed prefix rather than a suffix.
-    return target_group in re.sub(r"[^a-z0-9]", "", cand_name.lower())
+    return _plan_evidence_states(result)["source"]["state"] == "match"
 
 
-def _source_edition_match(target_name: str | None, cand_name: str) -> bool:
-    """True when both sides share a source medium and a compatible cut."""
-    target_source = _source_kind(target_name)
-    cand_source = _source_kind(cand_name)
-    if not target_source or not cand_source or target_source != cand_source:
-        return False
-    # Same medium but a different cut (Theatrical vs Extended) shifts every cue
-    # by the missing footage, so it is treated as a mismatch rather than a match.
-    target_ed = _edition_kind(target_name)
-    cand_ed = _edition_kind(cand_name)
-    if target_ed and cand_ed and target_ed != cand_ed:
-        return False
-    return True
+def _exploration_candidate(result) -> bool:
+    """Whether an unresolved pack is eligible for one bounded extraction chance.
+
+    Readiness is deliberately not invented here. The pack must already be
+    discovery-eligible and must not already be ready; its episode identity is
+    still established only by downloading it, extracting the requested member,
+    and re-scoring that member through the existing weighted engine.
+    """
+    season = next((item for item in result.evidence if item.field == "season"), None)
+    return (
+        result.discovery_eligible
+        and not result.ready_reference_eligible
+        and result.candidate.unresolved_pack
+        and season is not None
+        and season.state.value == "match"
+        and _candidate_source_matches(result)
+    )
+
+
+def download_source_digest(provider_label: str | None, download_url: str | None) -> str | None:
+    """Digest a download source without retaining its address.
+
+    Query strings, fragments, and embedded userinfo are discarded before
+    hashing, so signed URLs and credentials never reach the cache, logs, or
+    telemetry. The digest only identifies an exact source already in hand.
+    """
+    label = str(provider_label or "").casefold()
+    raw = str(download_url or "").strip()
+    if not label or not raw:
+        return None
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        canonical = f"{parts.scheme.casefold()}://{host.casefold()}{parts.path}" if parts.scheme or host else parts.path
+    except Exception:
+        canonical = raw
+    return hashlib.sha256(f"{label}|{canonical}".encode()).hexdigest()[:16]
+
+
+
+
+
+
 
 
 def reference_tier(target_name: str | None, release) -> int:
-    """Classify a reference candidate into the deterministic tier hierarchy.
-
-    This is a strict ordering, not a score. A generic release that happens to
-    match resolution, codec and audio can never outrank an exact release-group
-    match, because it is compared in a strictly worse tier.
-    """
-    if getattr(release, "is_hash_match", False) or getattr(release, "matched_by_hash", False):
+    """Diagnostic label/quota compatibility only; never candidate ordering."""
+    if getattr(release, "is_hash_match", None) is True or getattr(release, "matched_by_hash", None) is True:
         return TIER_HASH
-    cand_name = _release_name(release)
-    if not target_name or not cand_name:
-        return TIER_FALLBACK
-    if _groups_match(target_name, cand_name):
-        return TIER_EXACT_GROUP
-    if _source_edition_match(target_name, cand_name):
-        return TIER_SOURCE_EDITION
+    result = release_scoring.compare_metadata(target_name or "", _release_name(release))
+    states = {e.field: e.state.value for e in result.evidence}
+    if states.get("source") == "match":
+        return TIER_EXACT_GROUP if states.get("release_group") == "match" else TIER_SOURCE_EDITION
     return TIER_FALLBACK
 
 
-def _is_scene_named(cand_name: str) -> int:
-    clean = cand_name.rsplit("/", 1)[-1].strip()
-    return 1 if ("." in clean and " " not in clean) else 0
+
 
 
 def _is_rel_provider_broken(rel) -> bool:
@@ -241,99 +211,36 @@ def _is_rel_provider_broken(rel) -> bool:
     return False
 
 
-_PROVIDER_TIE_PRIORITY = {
-    "subsource": 2,
-    "subdl": 2,
-    "opensubtitles": 1,
-}
+def _planning_metadata(name: str | None) -> ReleaseMetadata:
+    """Enrich missing source hints with the existing general source extractor.
 
-
-def _is_exact_episode(release, query: ReferenceQuery) -> bool:
-    """True when the candidate names the queried episode rather than a whole season.
-
-    Season packs are still eligible references (they get unbundled at extraction
-    time), but an already-episode-specific track is preferred because it needs no
-    slicing and its own episode number is guaranteed correct.
+    Some supported legacy spellings (e.g. DVDRip) are absent from the semantic
+    vocabulary. Never override known or ambiguous evidence, and never pass this
+    planning-only enrichment to binding or verification.
     """
-    if query is None or query.episode is None:
-        return True
-    return candidate_episode_number(_release_name(release)) == query.episode
+    metadata = parse_release_identity(name)
+    if not metadata.source_family and "source_family" not in metadata.ambiguous_fields:
+        source = _source_kind(name)
+        if source:
+            metadata = replace(metadata, source_family=source)
+    return metadata
+
+
+def _ordered_discovery_pairs(releases, query: ReferenceQuery) -> list:
+    """Weighted ReferencePolicy discovery pairs; target VIDEO is authoritative."""
+    pool = [rel for rel in (releases or []) if not query.target_download_url
+            or getattr(rel, "download_url", None) != query.target_download_url]
+    ordered, _ = release_scoring.discovery_pairs(pool, query, log_phase="discovery")
+    return ordered
 
 
 def _select_candidates_ranked(releases, query: ReferenceQuery) -> list:
-    """Order the complete identity-eligible pool by semantic evidence.
-
-    Quota eligibility is checked before consuming bounded plan slots downstream.
-    Hash flags remain the strongest ranking hint, independently verified later.
-    """
-    pool = list(releases or [])
-    if not pool:
-        return []
-    if query and query.target_download_url:
-        pool = [rel for rel in pool if getattr(rel, "download_url", None) != query.target_download_url]
-    if query and query.target_sub_release_name:
-        tgt_group = normalize_release_group(parse_release_identity(query.target_sub_release_name).release_group)
-        stream_group = normalize_release_group(parse_release_identity(query.target_filename).release_group)
-        if not (tgt_group and stream_group and tgt_group == stream_group):
-            pool = [rel for rel in pool if _release_name(rel) != query.target_sub_release_name]
-    if not pool:
-        return []
-    if query.season is not None:
-        matched = [rel for rel in pool if parse_release_identity(_release_name(rel)).season == query.season]
-        if not matched:
-            return []
-        pool = matched
-    if query.episode is not None:
-        # A candidate tagged with a *different* episode can never be sliced down to
-        # the target, so it is dropped. Season packs stay eligible on purpose: they
-        # are unbundled per-episode at extraction time (see select_zip_member), so
-        # a high-tier retail pack is still the best available reference. They are
-        # only ranked below exact-episode candidates (see the sort key below).
-        pool = [
-            rel
-            for rel in pool
-            if parse_release_identity(_release_name(rel)).episode in (None, query.episode)
-        ]
-    if not pool:
-        return []
-
-    target = parse_release_identity(query.target_filename)
-    tiered = [(semantic_rank(
-        target, parse_release_identity(_release_name(rel)),
-        hash_match=bool(getattr(rel, "is_hash_match", False) or getattr(rel, "matched_by_hash", False)),
-    ), rel) for rel in pool]
-    # Semantic hierarchy first, then the existing operational tie-breakers.
-    target_langs = tuple(
-        str(lang).lower()
-        for lang in (query.languages if query and query.languages else ("ara", "ar"))
-    )
-    tiered.sort(
-        key=lambda item: (
-            item[0],
-            1 if _is_rel_provider_broken(item[1]) else 0,
-            0 if query.episode is None or parse_release_identity(_release_name(item[1])).episode == query.episode else 1,
-            0 if str(getattr(item[1], "lang", "")).lower().startswith("en") else 1,
-            0 if str(getattr(item[1], "lang", "")).lower() in target_langs else 1,
-            1 if getattr(item[1], "hearing_impaired", False) else 0,
-            0 if _is_scene_named(_release_name(item[1])) else 1,
-            -_PROVIDER_TIE_PRIORITY.get(
-                str(getattr(item[1], "provider", "") or "").lower(), 0
-            ),
-            _release_name(item[1]),
-        )
-    )
-    # Bounded semantic diagnostics, with no raw release strings or URLs.
-    for rank, rel in tiered[:5]:
-        metadata = parse_release_identity(_release_name(rel))
-        logger.info(
-            "[reference] candidate semantic_rank=%s source=%s labels=%s cuts=%s",
-            rank, metadata.source_family or "unknown", metadata.label_tags, metadata.cut_tags,
-        )
-    return [rel for _, rel in tiered]
+    """Weighted ReferencePolicy discovery order; target VIDEO is authoritative."""
+    return [release for release, _ in _ordered_discovery_pairs(releases, query)]
 
 
 def _select_reference(releases, query: ReferenceQuery):
-    """Pick the single best reference by deterministic tier then tie-breakers."""
+    """Pick the highest weighted discovery candidate."""
     ranked = _select_candidates_ranked(releases, query)
     return ranked[0] if ranked else None
 
@@ -503,8 +410,7 @@ class ExternalExactStrategy:
             # already proven the file byte-exact via MovieHash. Text and series
             # reference sourcing relies on the unlimited SubSource/SubDL tier.
             if (
-                cand_provider is self._opensubtitles
-                and reference_tier(query.target_filename, cand) != TIER_HASH
+                not self._download_allowed(cand, cand_provider, query)
             ):
                 logger.info(
                     "[reference] skipping non-hash OpenSubtitles candidate %r; "
@@ -630,6 +536,7 @@ class ExternalExactStrategy:
                                 f"{(c.provider or '').lower()}|{c.release_name.lower()}".encode()
                             ).hexdigest()[:16],
                             release_name=c.release_name,
+                            weighted_key=c.weighted_key,
                             provider=c.provider,
                             match_tier=c.match_tier,
                             hard_accepted=c.hard_accepted,
@@ -692,6 +599,7 @@ class ExternalExactStrategy:
                 candidate=result.candidate,
             )
             text = sanitized
+        self._remember_video_reference(query, result)
         logger.info("[reference] selected reference: %d bytes", len(text.encode("utf-8")))
 
         # Reference trust is measured here and attached to the result. It does
@@ -947,6 +855,12 @@ class ExternalExactStrategy:
             bluray_match=result.bluray_match,
             candidate=result.candidate,
             provider=result.provider,
+            member_season=result.member_season,
+            member_episode=result.member_episode,
+            weighted_score=result.weighted_score,
+            weighted_score_without_hash=result.weighted_score_without_hash,
+            source_download_digest=result.source_download_digest,
+            from_video_cache=result.from_video_cache,
             reference_trust=assessment.trust.value if assessment else None,
             reference_consensus=assessment.consensus_score if assessment else None,
             reference_independent_sources=assessment.independent_sources if assessment else 0,
@@ -1117,20 +1031,22 @@ class ExternalExactStrategy:
 
     async def _ranked_release_plan(
         self, query: ReferenceQuery
-    ) -> tuple[list[Any], dict[int, Any], int]:
+    ) -> tuple[list[tuple[Any, Any]], list[tuple[Any, Any]], list[dict[str, Any]], dict[int, Any], int]:
         """Gather and rank releases WITHOUT downloading anything.
 
-        Returns ``(ranked, provider_of, limit)``: the ranked release list, a
-        map from ``id(release)`` to its provider, and the pool limit. Search
-        and ranking are cheap metadata operations; every download happens
-        later, on demand, so a request that verifies on the first candidate
-        never pays for the rest of the pool.
+        Returns ``(ordered, ineligible, targeted_excluded, provider_of, limit)``:
+        ReferencePolicy-ordered release/result pairs, policy-ineligible pairs,
+        releases excluded because they are the target download, a map from
+        ``id(release)`` to its provider, and the pool limit. Search and ranking
+        are cheap metadata operations; every download happens later, on demand,
+        so a request that verifies on the first candidate never pays for the
+        rest of the pool.
         """
         providers = [
             p for p in (self._subdl, self._subsource, self._opensubtitles) if p is not None
         ]
         if not providers:
-            return [], {}, 0
+            return [], [], [], {}, 0
 
         candidates = await self._gather_candidates(providers, query)
         if not candidates:
@@ -1138,13 +1054,26 @@ class ExternalExactStrategy:
                 "[reference] no candidates from %s",
                 [self._provider_label(p) for p in providers],
             )
-            return [], {}, 0
+            return [], [], [], {}, 0
 
         provider_of = {id(rel): provider for rel, provider in candidates}
-        ranked = _select_candidates_ranked([rel for rel, _ in candidates], query)
-        if not ranked:
+        pool = [rel for rel, _ in candidates]
+        targeted_excluded = [
+            {
+                "provider": self._provider_label(provider),
+                "source": download_source_digest(
+                    self._provider_label(provider), getattr(rel, "download_url", None)
+                ),
+                "reason": "same_target_download",
+            }
+            for rel, provider in candidates
+            if query.target_download_url
+            and getattr(rel, "download_url", None) == query.target_download_url
+        ]
+        ordered_pairs, ineligible_pairs = release_scoring.discovery_pairs(pool, query, log_phase="discovery")
+        if not ordered_pairs:
             logger.warning("[reference] resolve_all: no season/episode-matched reference")
-            return [], {}, 0
+            return [], [], targeted_excluded, provider_of, 0
 
         try:
             from app.config import settings as _settings
@@ -1152,7 +1081,7 @@ class ExternalExactStrategy:
             limit = max(1, int(getattr(_settings, "REFERENCE_POOL_LIMIT", 6) or 6))
         except Exception:  # pragma: no cover
             limit = 6
-        return ranked, provider_of, limit
+        return ordered_pairs, ineligible_pairs, targeted_excluded, provider_of, limit
 
     def _pool_limit(self) -> int:
         try:
@@ -1169,9 +1098,262 @@ class ExternalExactStrategy:
         crowd out downloadable references. Rechecked at download time; neither
         ranking nor reference trust is changed.
         """
-        return provider is not self._opensubtitles or reference_tier(
-            query.target_filename, candidate
-        ) == TIER_HASH
+        return self._quota_block_reason(candidate, provider, query) is None
+
+    def _quota_block_reason(self, candidate: Any, provider: Any, query: ReferenceQuery) -> str | None:
+        """Default production reason why a candidate cannot occupy a slot."""
+        if not release_scoring.reference_resolvable(candidate, query):
+            return "reference_not_resolvable"
+        if provider is self._opensubtitles and not any(
+            result.verified_hash for result in release_scoring.matches([candidate], query)
+        ):
+            return "opensubtitles_non_hash_quota"
+        return None
+
+    def _download_block_reason(self, candidate: Any, provider: Any, query: ReferenceQuery) -> str | None:
+        """Distinguish why a candidate cannot occupy a bounded download slot."""
+        if self._download_allowed(candidate, provider, query):
+            return None
+        return self._quota_block_reason(candidate, provider, query) or "download_not_allowed"
+
+    @staticmethod
+    def _provider_breaker_open(provider: Any) -> bool:
+        """Snapshot a provider's operational restriction without network use."""
+        checker = getattr(provider, "is_breaker_open", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+
+    def _plan_row(
+        self,
+        *,
+        result,
+        provider: Any,
+        role: str,
+        status: str,
+        planned_position: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        provider_label = self._provider_label(provider)
+        return {
+            "safe_id": release_scoring.digest(result.candidate.identity)[:16],
+            "provider": provider_label,
+            "language": result.candidate.language,
+            "score": result.ranking_score,
+            "metadata_score": result.score,
+            "metadata_percentage": result.percentage,
+            "source_priority_points": result.source_priority_points,
+            "score_without_hash": result.score_without_hash,
+            "percentage": result.ranking_percentage,
+            "discovery_eligible": result.discovery_eligible,
+            "ready_reference_eligible": result.ready_reference_eligible,
+            "unresolved_pack": result.candidate.unresolved_pack,
+            "evidence": _plan_evidence_states(result),
+            "rejections": list(result.rejection_reasons),
+            "readiness": list(result.readiness_reasons),
+            "breaker_open": self._provider_breaker_open(provider),
+            "role": role,
+            "status": status,
+            "planned_position": planned_position,
+            "reason": reason,
+        }
+
+    def _select_planned_attempts(
+        self,
+        ordered_pairs: list[tuple[Any, Any]],
+        ineligible_pairs: list[tuple[Any, Any]],
+        targeted_excluded: list[dict[str, Any]],
+        provider_of: dict[int, Any],
+        limit: int,
+        query: ReferenceQuery,
+    ) -> tuple[list[tuple[Any, Any]], dict[str, Any]]:
+        """Fill at most ``limit`` actual download slots in weighted order.
+
+        The global ReferencePolicy order is never re-sorted. The only
+        intentional departure is a single reserved exploration opportunity: when
+        ordinary candidates would otherwise saturate the budget, the lowest
+        source-mismatching slot can be given to the highest-ranked unresolved
+        pack that already shares the target's release medium. Extraction and
+        readiness are still earned afterward; no points or rank are invented.
+        """
+        stem = query.cache_stem
+        known_sources = {digest for digest in getattr(query, "known_source_digests", ()) or () if digest}
+        ordinary: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        selected_ids: set[int] = set()
+        seen_sources: set[str] = set()
+
+        for candidate, result in ordered_pairs:
+            if len(ordinary) >= limit:
+                break
+            provider = provider_of.get(id(candidate))
+            if provider is None:
+                excluded.append(self._plan_row(
+                    result=result, provider=None, role="ordinary",
+                    status="excluded", reason="provider_missing",
+                ))
+                continue
+            if id(candidate) in selected_ids:
+                excluded.append(self._plan_row(
+                    result=result, provider=provider, role="ordinary",
+                    status="excluded", reason="duplicate_release",
+                ))
+                continue
+            if self._is_rejected(stem, candidate):
+                excluded.append(self._plan_row(
+                    result=result, provider=provider, role="ordinary",
+                    status="excluded", reason="already_rejected",
+                ))
+                continue
+            source = download_source_digest(self._provider_label(provider), getattr(candidate, "download_url", None))
+            if source is not None and source in known_sources:
+                excluded.append(self._plan_row(
+                    result=result, provider=provider, role="ordinary",
+                    status="excluded", reason="duplicate_known_source",
+                ))
+                continue
+            if source is not None and source in seen_sources:
+                excluded.append(self._plan_row(
+                    result=result, provider=provider, role="ordinary",
+                    status="excluded", reason="duplicate_download_source",
+                ))
+                continue
+            block = self._download_block_reason(candidate, provider, query)
+            if block is not None:
+                excluded.append(self._plan_row(
+                    result=result, provider=provider, role="ordinary",
+                    status="excluded", reason=block,
+                ))
+                continue
+            if source is not None:
+                seen_sources.add(source)
+            selected_ids.add(id(candidate))
+            ordinary.append({"candidate": candidate, "provider": provider, "result": result})
+
+        normal_capacity = max(0, limit - _REFERENCE_EXPLORATION_SLOTS)
+        base = ordinary[:normal_capacity]
+        plan_entries = list(base)
+        explorer: dict[str, Any] | None = None
+
+        if len(ordinary) >= limit and limit > 0:
+            qualifying_normal = any(_exploration_candidate(entry["result"]) for entry in ordinary)
+            if not qualifying_normal:
+                for candidate, result in ordered_pairs:
+                    if id(candidate) in selected_ids:
+                        continue
+                    if not _exploration_candidate(result):
+                        continue
+                    provider = provider_of.get(id(candidate))
+                    if provider is None or self._is_rejected(stem, candidate):
+                        continue
+                    source = download_source_digest(
+                        self._provider_label(provider), getattr(candidate, "download_url", None)
+                    )
+                    if source is not None and (source in known_sources or source in seen_sources):
+                        continue
+                    if self._download_block_reason(candidate, provider, query) is not None:
+                        continue
+                    explorer = {"candidate": candidate, "provider": provider, "result": result}
+                    break
+            bottom = base[-1] if base else None
+            if (
+                explorer is not None
+                and bottom is not None
+                and not _candidate_source_matches(bottom["result"])
+            ):
+                source = download_source_digest(
+                    self._provider_label(explorer["provider"]),
+                    getattr(explorer["candidate"], "download_url", None),
+                )
+                if source is not None:
+                    seen_sources.add(source)
+                selected_ids.add(id(explorer["candidate"]))
+                plan_entries.append({**explorer, "exploration": True})
+                excluded.append(self._plan_row(
+                    result=ordinary[-1]["result"],
+                    provider=ordinary[-1]["provider"],
+                    role="ordinary",
+                    status="excluded",
+                    reason="exploration_reserve",
+                ))
+            elif explorer is not None and bottom is None and not qualifying_normal:
+                plan_entries.append({**explorer, "exploration": True})
+        if explorer is None:
+            # No qualifying exploration candidate: retain the ordinary budget
+            # exactly as before. Reservation must not shrink a valid plan.
+            plan_entries = list(ordinary)
+
+        plan = [(entry["candidate"], entry["provider"]) for entry in plan_entries]
+        planned_ids = {id(candidate) for candidate, _ in plan}
+        rows: list[dict[str, Any]] = []
+        for position, entry in enumerate(plan_entries, start=1):
+            rows.append(self._plan_row(
+                result=entry["result"],
+                provider=entry["provider"],
+                role="exploration" if entry.get("exploration") else "ordinary",
+                status="planned",
+                planned_position=position,
+                reason="exploration_slot" if entry.get("exploration") else None,
+            ))
+
+        below_limit_rows = 0
+        for candidate, result in ordered_pairs:
+            if id(candidate) in planned_ids:
+                continue
+            if any(row["safe_id"] == release_scoring.digest(result.candidate.identity)[:16] for row in excluded):
+                continue
+            below_limit_rows += 1
+            if below_limit_rows <= _REFERENCE_PLAN_REPORT_EXCLUDED_LIMIT:
+                excluded.append(self._plan_row(
+                    result=result,
+                    provider=provider_of.get(id(candidate)),
+                    role="ordinary",
+                    status="excluded",
+                    reason="below_pool_limit",
+                ))
+
+        unranked_rows: list[dict[str, Any]] = []
+        seen_unranked: set[str] = set()
+        for candidate, result in ineligible_pairs:
+            safe_id = release_scoring.digest(result.candidate.identity)[:16]
+            if safe_id in seen_unranked:
+                continue
+            seen_unranked.add(safe_id)
+            if len(unranked_rows) >= _REFERENCE_PLAN_REPORT_UNRANKED_LIMIT:
+                break
+            unranked_rows.append(self._plan_row(
+                result=result,
+                provider=provider_of.get(id(candidate)),
+                role="unranked",
+                status="excluded",
+                reason="reference_policy_ineligible",
+            ))
+
+        excluded_total = len(excluded)
+        report = {
+            "budget_slots": limit,
+            "normal_slots": len(base),
+            "exploration_slots": 1 if any(entry.get("exploration") for entry in plan_entries) else 0,
+            "ranked_releases": len(ordered_pairs),
+            "unranked_releases": len(ineligible_pairs),
+            "target_download_excluded": len(targeted_excluded),
+            "planned_count": len(rows),
+            "excluded_count": excluded_total,
+            "planned": rows[:_REFERENCE_PLAN_REPORT_SELECTED_LIMIT],
+            "excluded": excluded[:_REFERENCE_PLAN_REPORT_SELECTED_LIMIT],
+            "unranked_ineligible": unranked_rows,
+        }
+        return plan, report
+
+    def _log_reference_plan(self, report: dict[str, Any]) -> None:
+        """Emit one compact, privacy-safe line describing the planned attempts."""
+        try:
+            logger.info("[reference-plan] %s", json.dumps(report, sort_keys=True))
+        except Exception:
+            pass  # Explainability cannot affect subtitle delivery.
 
     async def plan_candidates(
         self, query: ReferenceQuery
@@ -1186,25 +1368,16 @@ class ExternalExactStrategy:
         here since that check needs no network; breaker and quota state is
         re-checked at download time, when it is freshest.
         """
-        ranked, provider_of, limit = await self._ranked_release_plan(query)
-        stem = query.cache_stem
-        plan: list[tuple[Any, Any]] = []
-        for cand in ranked:
-            if len(plan) >= limit:
-                break
-            cand_provider = provider_of.get(id(cand))
-            if cand_provider is None:
-                continue
-            if self._is_rejected(stem, cand):
-                continue
-            if not self._download_allowed(cand, cand_provider, query):
-                logger.info(
-                    "[reference] planning skipped provider=%s tier=%d reason=non_hash_quota",
-                    self._provider_label(cand_provider),
-                    reference_tier(query.target_filename, cand),
-                )
-                continue
-            plan.append((cand, cand_provider))
+        ordered_pairs, ineligible_pairs, targeted_excluded, provider_of, limit = await self._ranked_release_plan(query)
+        plan, report = self._select_planned_attempts(
+            ordered_pairs,
+            ineligible_pairs,
+            targeted_excluded,
+            provider_of,
+            limit,
+            query,
+        )
+        self._log_reference_plan(report)
         return plan
 
     async def download_planned_candidate(
@@ -1214,6 +1387,7 @@ class ExternalExactStrategy:
         query: ReferenceQuery,
         validate: Callable[[str], bool] | None,
         shared: dict[str, Any],
+        plan_index: int | None = None,
     ) -> ResolvedReference:
         """Download ONE planned candidate, honouring pool-wide guards.
 
@@ -1224,18 +1398,29 @@ class ExternalExactStrategy:
         which case the caller simply advances to the next planned candidate.
         """
         logger.info(
-            "[reference] candidate reached provider=%s tier=%d",
+            "[reference] candidate reached provider=%s tier=%d plan_index=%s",
             self._provider_label(cand_provider),
             reference_tier(query.target_filename, cand),
+            plan_index if plan_index is not None else "unplanned",
         )
         if hasattr(cand_provider, "is_breaker_open") and cand_provider.is_breaker_open():
-            return ResolvedReference(None)
+            logger.warning(
+                "[reference] candidate skipped: provider=%s reason=provider_circuit_breaker_open",
+                self._provider_label(cand_provider),
+            )
+            return ResolvedReference(None, reference_failure="provider_circuit_breaker_open")
         # Preserve the existing quota rule exactly: a non-hash OpenSubtitles
         # download consumes provider quota, so it stays
         # reserved for MovieHash-exact references.
-        if not self._download_allowed(cand, cand_provider, query):
-            logger.info("[reference] download skipped reason=non_hash_quota")
-            return ResolvedReference(None)
+        block = self._download_block_reason(cand, cand_provider, query)
+        if block is not None:
+            logger.info("[reference] download skipped reason=%s", block)
+            return ResolvedReference(None, reference_failure=(
+                "candidate_rejected" if block == "reference_not_resolvable" else "download_failure"
+            ))
+
+        # Safe, bounded correlation of actual execution with weighted planning.
+        release_scoring.log_attempt(cand, query)
 
         # Pace consecutive downloads so one request cannot burst a provider
         # into a 429 / circuit break. Skipped for the first download so the
@@ -1247,10 +1432,12 @@ class ExternalExactStrategy:
         result = await self._download_candidate(cand, cand_provider, query)
         text = result.text
         if not text:
-            return ResolvedReference(None)
+            return result
         timing = current_sync_timing.get()
         if timing is not None:
             timing.references_downloaded += 1
+            if result.reference_failure:
+                timing.note_reference_failure(result.reference_failure)
         if validate is not None and not validate(text):
             # The validator only returns a bool, so re-measure here purely
             # to attribute the verdict to a NAMED candidate. Without this
@@ -1264,7 +1451,9 @@ class ExternalExactStrategy:
                 getattr(cand, "lang", "?"),
                 text.count(" --> "),
             )
-            return ResolvedReference(None)
+            if timing is not None:
+                timing.note_reference_failure("candidate_rejected")
+            return ResolvedReference(None, reference_failure="candidate_rejected")
 
         seen: set[str] = shared.setdefault("seen", set())
         digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
@@ -1278,7 +1467,52 @@ class ExternalExactStrategy:
             )
             return ResolvedReference(None)
         seen.add(digest)
+        self._remember_video_reference(query, result)
         return result
+
+    def _remember_video_reference(self, query: ReferenceQuery, result: ResolvedReference) -> None:
+        """Persist a request-validated reference artifact against the target VIDEO.
+
+        Callers invoke this only after the candidate has passed both weighted
+        extraction/readiness and request-specific cue validation, so a wrong-cut
+        download is not promoted merely because it decoded successfully.
+
+        Which file was downloaded is a property of the video, not of the
+        subtitle the user picked. Storing it here is what lets the next
+        subtitle for the same episode reuse the artifact instead of
+        re-downloading the same archive from a rate-limited provider.
+
+        The cache refuses the write unless a specific episode member was proven
+        (see ``set_video_scoped``), so an unresolved season pack is never
+        promoted to a validated episode reference. An artifact that is identical
+        to the current target is still retained: identity makes it unusable for
+        this request, but it may be legitimate independent evidence for a
+        different subtitle. Every later use still applies the independent-content
+        check before verification.
+        """
+        if not result.text or query is None:
+            return
+        try:
+            from app.services.sync_service import sanitize_subtitle
+
+            sanitized = sanitize_subtitle(result.text)
+            if not sanitized:
+                return
+            self.cache.set_video_scoped(
+                query,
+                result.provider,
+                sanitized,
+                kind=result.kind,
+                bluray_match=result.bluray_match,
+                candidate=result.candidate,
+                member_season=result.member_season,
+                member_episode=result.member_episode,
+                score=result.weighted_score,
+                score_without_hash=result.weighted_score_without_hash,
+                source_download_digest=result.source_download_digest,
+            )
+        except Exception as exc:  # pragma: no cover - caching must never break sync
+            logger.debug("[reference] video-scoped cache write skipped: %s", type(exc).__name__)
 
     async def resolve_candidates_lazy(
         self,
@@ -1293,11 +1527,11 @@ class ExternalExactStrategy:
         the rest of the pool. All guards from eager resolution apply unchanged
         per candidate: breaker, quota, pacing, validation, content-dedup.
         """
-        ranked, provider_of, limit = await self._ranked_release_plan(query)
+        ordered_pairs, _, _, provider_of, limit = await self._ranked_release_plan(query)
         stem = query.cache_stem
         shared: dict[str, Any] = {"downloaded": 0, "seen": set()}
         yielded = 0
-        for cand in ranked:
+        for cand, _ in ordered_pairs:
             if yielded >= limit:
                 break
             cand_provider = provider_of.get(id(cand))
@@ -1330,7 +1564,7 @@ class ExternalExactStrategy:
         api_key = self._provider_api_key(provider, query)
         decision_kind = (
             "hash"
-            if (getattr(best, "is_hash_match", False) or getattr(best, "matched_by_hash", False))
+            if any(r.verified_hash for r in release_scoring.matches([best], query))
             else "edition"
         )
         tier = reference_tier(query.target_filename, best)
@@ -1345,19 +1579,38 @@ class ExternalExactStrategy:
         )
         try:
             raw = await provider.download_archive(best.download_url, api_key=api_key)
+        except TimeoutError:
+            logger.warning("[reference] download timed out: candidate=%r provider=%s",
+                           best_name, self._provider_label(provider))
+            return ResolvedReference(None, reference_failure="provider_timeout")
         except Exception as exc:
-            logger.warning("[reference] download failed: %s", type(exc).__name__)
-            return ResolvedReference(None)
+            logger.warning("[reference] download failed: candidate=%r provider=%s error=%s",
+                           best_name, self._provider_label(provider), type(exc).__name__)
+            return ResolvedReference(None, reference_failure="download_failure")
         if not raw:
-            logger.warning("[reference] empty download payload for %r", best_name)
-            return ResolvedReference(None)
+            # A rate-limited provider returns no payload rather than raising, so
+            # the breaker state is what distinguishes "refused" from "empty".
+            rate_limited = (
+                hasattr(provider, "is_breaker_open") and provider.is_breaker_open()
+            )
+            logger.warning(
+                "[reference] empty download payload: candidate=%r provider=%s rate_limited=%s",
+                best_name, self._provider_label(provider), rate_limited,
+            )
+            return ResolvedReference(
+                None, reference_failure="provider_rate_limited" if rate_limited else "download_failure"
+            )
 
-        decoded = self._decode_payload(
-            raw,
-            best_name,
-            season=query.season if query else None,
-            episode=query.episode if query else None,
-        )
+        with release_scoring.extracting_member() as selected_members:
+            decoded = self._decode_payload(
+                raw, best_name, season=query.season if query else None,
+                episode=query.episode if query else None,
+            )
+        selected_member = selected_members[-1] if selected_members else None
+        # An unresolved pack cannot authorize a synchronization reference.
+        proof = release_scoring.reference_proof(best, query, selected_member)
+        if proof is None:
+            return ResolvedReference(None, reference_failure="candidate_rejected")
         if not decoded or len(decoded) <= self.min_bytes:
             logger.warning(
                 "[reference] decoded content too small/empty for %r (%d bytes)",
@@ -1393,6 +1646,13 @@ class ExternalExactStrategy:
             bluray_match=bluray_match,
             candidate=best_name,
             provider=self._provider_label(provider),
+            member_season=proof["season"],
+            member_episode=proof["episode"],
+            weighted_score=float(proof["score"]),
+            weighted_score_without_hash=float(proof["score_without_hash"]),
+            source_download_digest=download_source_digest(
+                self._provider_label(provider), getattr(best, "download_url", None)
+            ),
         )
 
     async def _download_reference(
@@ -1438,22 +1698,34 @@ class ExternalExactStrategy:
 
     @staticmethod
     def _needs_season_enrichment(releases, query: ReferenceQuery, strict: bool = True) -> bool:
-        """True when a season-wide Tier 2 query is warranted.
-
-        Only when the episode query returned nothing for a series: a season pack
-        is the last remaining way to resolve a reference. If Tier 1 already
-        produced any candidate, it is used as-is.
-        """
-        return query.season is not None and not releases
+        """Discover packs unless a ready source-compatible episode already exists."""
+        if query.season is None:
+            return False
+        if not releases:
+            return True
+        from app.services.release_scoring.model import MatchState
+        results = release_scoring.matches(list(releases), query)
+        if not any(e.target.value for result in results for e in result.evidence if e.field == "source"):
+            return False
+        for candidate in releases:
+            if _is_rel_provider_broken(candidate):
+                continue
+            if getattr(candidate, "provider", "").lower() == "opensubtitles" and not any(
+                    result.verified_hash for result in release_scoring.matches([candidate], query)):
+                continue
+            if any(result.ready_reference_eligible and (result.verified_hash or result.state("source") is MatchState.MATCH)
+                   for result in release_scoring.matches([candidate], query)):
+                return False
+        return True
 
     async def _search_tiers(self, search, query: ReferenceQuery, provider_name: str) -> list:
         """Tier 1 episode query, enriched by a Tier 2 season query when needed.
 
         Tier 2 results are appended after Tier 1 (deduplicated by download URL)
-        so per-episode files keep priority.
+        before the combined pool is ranked against the target video.
         """
         tier1 = await search(episode=query.episode)
-        if not self._needs_season_enrichment(tier1, query):
+        if query.episode is None or not self._needs_season_enrichment(tier1, query):
             return list(tier1)
         logger.info(
             "[reference] %s Tier 1 lacks %s-family candidates; querying season %s catalog",

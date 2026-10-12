@@ -355,7 +355,7 @@ def test_orchestrator_override_requires_the_full_decision(caplog, monkeypatch):
         async def resolve_with_provenance(self, query, *args, **kwargs):  # noqa: ANN001
             self.calls += 1
             return ResolvedReference(
-                reference_text,
+                "\n".join(line if not line or line.isdigit() or "-->" in line else "Independent " + line for line in reference_text.splitlines()),
                 kind="hash",
                 bluray_match=True,
                 candidate="x.srt",

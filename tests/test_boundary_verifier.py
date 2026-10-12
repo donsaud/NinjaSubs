@@ -202,8 +202,8 @@ def test_budget_and_input_limits_fail_closed(monkeypatch):
 
 def test_whiplash_no_unnecessary_escalation():
     folder = Path(__file__).parent / "fixtures" / "whiplash"
-    target, reference = [(folder / name).read_text(encoding="utf-8-sig")
-                         for name in ("target.srt", "reference.srt")]
+    target, reference = ((folder / name).read_text(encoding="utf-8-sig")
+                         for name in ("target.srt", "reference.srt"))
     affine = attempt_timeline_affine(target, reference)
     assert affine.accepted
     assert affine.diagnostics.classification == "PAL_LIKE_AFFINE"
@@ -417,7 +417,7 @@ async def test_orchestrator_shadow_does_not_change_fallback_cache_or_verdict(mon
     target, reference, output = case()
     output = [(s+(5000 if i<60 else 12000), e+(5000 if i<60 else 12000), text)
               for i, (s, e, text) in enumerate(target)]
-    reference = output.copy()
+    reference = [(s, e, "Independent reference " + text) for s, e, text in output]
     original, transformed = render_srt(target).encode(), render_srt(output)
     async def resolve(query, **kwargs):
         return ResolvedReference(render_srt(reference), kind="hash", reference_trust="high")

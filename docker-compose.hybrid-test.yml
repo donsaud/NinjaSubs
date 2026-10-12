@@ -1,0 +1,26 @@
+# TEMPORARY local-test-only override for the controlled Hybrid Auto-Sync
+# Stremio playback test (Dexter S08E01 PiR8).
+#
+# This file is NEVER read by plain `docker compose up` / `docker compose
+# build`: it takes effect only when passed explicitly with
+# `-f docker-compose.hybrid-test.yml`. Deleting or omitting it restores
+# default-off production behavior with no code or Git changes.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.hybrid-test.yml up -d
+# Rollback (also restores the pre-test image tagged before the rebuild):
+#   docker compose up -d
+#   (then, if the image itself must be restored:)
+#   docker tag ninjasubs-ninjasubs:pre-hybrid-test ninjasubs-ninjasubs:latest
+#   docker compose up -d
+
+services:
+  ninjasubs:
+    environment:
+      # Intentional local-test opt-in for Hybrid Auto-Sync routing.
+      - HYBRID_TEST_ENABLED=1
+      # Scope the test path to the intended video identity (Dexter S08E01).
+      # Any other video falls through to the existing production path.
+      - HYBRID_TEST_SCOPE=tt0773262:8:1
+      # Forced-artifact delivery experiment must stay off for the controlled test.
+      - ENABLE_AUTOSYNC_TEST_OVERRIDE=false

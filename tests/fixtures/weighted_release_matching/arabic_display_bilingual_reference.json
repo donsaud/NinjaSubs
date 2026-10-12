@@ -1,0 +1,72 @@
+{
+  "case_id": "arabic_display_bilingual_reference",
+  "target": {
+    "metadata": {
+      "media_type": "series",
+      "title": "Show",
+      "year": 2020,
+      "season": 1,
+      "episode": 1,
+      "source": "BluRay",
+      "release_group": "ALPHA",
+      "resolution": "1080p",
+      "video_codec": "H264",
+      "audio_codec": "AC3",
+      "service_disc_family": "BD"
+    }
+  },
+  "candidates": [
+    {
+      "id": "arabic_web",
+      "provider": "subdl",
+      "provider_id": "arabic_web",
+      "metadata": {
+        "media_type": "series",
+        "title": "Show",
+        "year": 2020,
+        "season": 1,
+        "episode": 1,
+        "source": "WEB-DL",
+        "release_group": "ALPHA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD"
+      },
+      "language": "ara"
+    },
+    {
+      "id": "english_disc",
+      "provider": "subdl",
+      "provider_id": "english_disc",
+      "metadata": {
+        "media_type": "series",
+        "title": "Show",
+        "year": 2020,
+        "season": 1,
+        "episode": 1,
+        "source": "BluRay",
+        "release_group": "BETA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD"
+      },
+      "language": "eng"
+    }
+  ],
+  "expected": {
+    "discovery_order": [
+      "english_disc",
+      "arabic_web"
+    ],
+    "reference_order": [
+      "english_disc",
+      "arabic_web"
+    ],
+    "display_order": [
+      "arabic_web"
+    ]
+  },
+  "provenance": "SYNTHETIC_BEHAVIORAL_EXPECTATION"
+}

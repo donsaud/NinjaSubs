@@ -18,10 +18,61 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TTL_SECONDS = 2592000.0  # 30 days
 # Version 6 rejects references already sanitized by the pre-safety ASS converter.
+# Version 7 marks the video-scoped artifact tier written alongside it.
+ENGINE_VERSION = 7
+
+# Video-scoped artifacts are bounded so a long-lived cache directory cannot grow
+# without limit. Pruning is oldest-first across the video-scoped namespace only.
+MAX_VIDEO_SCOPED_ENTRIES = 512
 
 # Decision kinds that prove the exact edition (vs. best-effort edition timing).
 EXACT_KINDS = frozenset({"team", "hash", "embedded"})
 _KNOWN_KINDS = ("team", "edition", "hash", "embedded")
+
+#: Filename marker for the video-scoped tier. Distinct from the subtitle-scoped
+#: stem so the two namespaces can never collide on disk.
+_VIDEO_SCOPE_MARKER = "video"
+
+
+def _safe_score(value: object) -> float:
+    """Return a numeric artifact score without letting malformed metadata win."""
+    try:
+        score = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return score if score == score and abs(score) != float("inf") else 0.0
+
+
+def _cache_member_number(value: object) -> int | str | None:
+    """Normalize a stored/requested season/episode value for strict comparison.
+
+    Canonical parser values are strings, while request metadata commonly uses
+    integers. Normalizing only decimal representations preserves episode
+    binding and lets those two layers agree; anything else compares exactly.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return value if isinstance(value, str | int) or value is None else str(value)
+
+
+def _video_artifact_sort_key(meta: dict, path_name: str) -> tuple[int, float, float, str]:
+    """Order retained artifacts by established verdict strength, then score.
+
+    Exact decision kinds outrank best-effort edition timing. Within the same
+    kind, a larger weighted proof score wins. The filename only breaks ties
+    deterministically; it never invents a quality claim.
+    """
+    kind_rank = 0 if meta.get("kind") in EXACT_KINDS else 1
+    return (
+        kind_rank,
+        -_safe_score(meta.get("score")),
+        -_safe_score(meta.get("score_without_hash")),
+        path_name,
+    )
 
 
 class ReferenceDiskCache:
@@ -238,7 +289,7 @@ class ReferenceDiskCache:
                 "partial": bool(partial),
                 "strict": bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True)),
                 "content_sha": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "engine_version": 6,
+                "engine_version": ENGINE_VERSION,
             }
             self._atomic_write(self._sidecar_path(path), json.dumps(meta))
             logger.info(
@@ -263,3 +314,244 @@ class ReferenceDiskCache:
             if tmp is not None:
                 with contextlib.suppress(OSError):
                     tmp.unlink()
+
+    # ------------------------------------------------------------------ #
+    # Video-scoped artifact tier
+    #
+    # Which reference FILE was downloaded is a property of the target video.
+    # Whether it synchronizes well is a property of the chosen subtitle. The
+    # subtitle-scoped tier above answers the second question; this one answers
+    # the first, so switching subtitles reuses the artifact instead of
+    # re-downloading the same archive from a rate-limited provider.
+    #
+    # Nothing here relaxes verification. A reused artifact is still handed to
+    # the normal ALASS / affine / target-binding / verifier path, and it is
+    # still rejected outright when it cannot serve as independent evidence.
+    # ------------------------------------------------------------------ #
+
+    def _video_scope_path(
+        self,
+        query: ReferenceQuery,
+        source: str,
+        kind: str,
+        artifact_id: str,
+    ) -> Path:
+        stem = query.video_scope_stem
+        safe_artifact = re.sub(r"[^A-Za-z0-9]+", "", artifact_id or "")[:16] or "artifact"
+        return self.root / (
+            f"{stem}.{_VIDEO_SCOPE_MARKER}.{self._safe_source(source)}.{kind}.{safe_artifact}.srt"
+        )
+
+    def _video_scope_paths(self, query: ReferenceQuery) -> list[Path]:
+        if not self.root.is_dir():
+            return []
+        return sorted(self.root.glob(f"{query.video_scope_stem}.{_VIDEO_SCOPE_MARKER}.*.srt"))
+
+    def _prune_video_scoped(self) -> None:
+        """Keep the video-scoped namespace bounded, oldest evicted first.
+
+        The globally strongest retained artifact is exempt from pruning: capacity
+        control must not discard the best available evidence merely because a
+        weaker artifact arrived later.
+        """
+        try:
+            entries = [p for p in self.root.glob(f"*.{_VIDEO_SCOPE_MARKER}.*.srt") if p.is_file()]
+        except OSError:
+            return
+        if len(entries) <= MAX_VIDEO_SCOPED_ENTRIES:
+            return
+        ranked: list[tuple[tuple[int, float, float, str], Path]] = []
+        for path in entries:
+            try:
+                meta = json.loads(self._sidecar_path(path).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            ranked.append((_video_artifact_sort_key(meta, path.name), path))
+        ranked.sort(key=lambda item: item[0])
+        # Preserve the single strongest entry; evict the oldest of the rest.
+        candidates = [path for _, path in ranked[1:]]
+        candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0)
+        for stale in candidates[: len(entries) - MAX_VIDEO_SCOPED_ENTRIES]:
+            self._remove(stale)
+
+    def get_video_scoped(
+        self, query: ReferenceQuery
+    ) -> tuple[ResolvedReference, dict] | None:
+        """Return a reusable reference artifact for this target VIDEO, or ``None``.
+
+        Validation boundaries, all of which fail closed to ``None``:
+
+        * the entry must live under this video's stem, so a different imdb id,
+          season, episode, release group, target filename, video hash/size or
+          language set can never share it;
+        * the payload digest must match the recorded provenance, and the
+          payload must still be a usable subtitle;
+        * ``member_season`` / ``member_episode`` must equal the requested
+          episode, so an unresolved season pack can never pose as a validated
+          episode reference;
+        * the engine version and strict-match configuration must still match.
+
+        Note what is deliberately NOT checked here: whether the artifact's
+        timing already agrees with the target subtitle. A REMUX reference
+        legitimately disagrees with an HDTV subtitle -- that disagreement is
+        precisely what Auto-Sync exists to correct. Synchronization quality is
+        decided downstream by the real verifier, never by this cache.
+        """
+        best: tuple[tuple[int, float, float, str], str, ResolvedReference, dict] | None = None
+        for path in self._video_scope_paths(query):
+            try:
+                age = time.time() - path.stat().st_mtime
+            except OSError:
+                continue
+            if age > self.ttl:
+                if self._remove(path):
+                    logger.info("[reference] expired video-scoped entry removed: %s", path.name)
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            if not (text and len(text.encode("utf-8")) > self.min_bytes and "-->" in text):
+                continue
+            meta_path = self._sidecar_path(path)
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            kind = self._safe_kind(meta.get("kind"))
+            if (
+                meta.get("scope") != _VIDEO_SCOPE_MARKER
+                or meta.get("stem") != query.video_scope_stem
+                or meta.get("kind") != kind
+                or int(meta.get("engine_version", 0)) < ENGINE_VERSION
+                or meta.get("content_sha") != hashlib.sha256(text.encode("utf-8")).hexdigest()
+                or (getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True) and meta.get("strict") is not True)
+            ):
+                continue
+            # An artifact is only reusable when the member it actually proves is
+            # the member that was requested. Never promote an unresolved pack.
+            if (
+                _cache_member_number(meta.get("member_season")) != _cache_member_number(query.season)
+                or _cache_member_number(meta.get("member_episode")) != _cache_member_number(query.episode)
+            ):
+                continue
+            resolved = ResolvedReference(
+                text=text,
+                kind=kind,
+                bluray_match=meta.get("bluray_match") is True and kind != "abort",
+                candidate=str(meta.get("candidate", "")),
+                provider=str(meta.get("provider", "")) or None,
+                member_season=meta.get("member_season"),
+                member_episode=meta.get("member_episode"),
+                weighted_score=_safe_score(meta.get("score")),
+                weighted_score_without_hash=_safe_score(meta.get("score_without_hash")),
+                source_download_digest=str(meta.get("source_download_digest") or "") or None,
+                from_video_cache=True,
+                partial=meta.get("partial") is True,
+            )
+            key = _video_artifact_sort_key({**meta, "kind": kind}, path.name)
+            if best is None or key < best[0]:
+                best = (key, path.name, resolved, meta)
+        if best is None:
+            return None
+        _, name, resolved, meta = best
+        logger.info(
+            "[reference] video-scoped cache hit: file=%s provider=%s candidate=%s "
+            "season=%s episode=%s bytes=%d",
+            name,
+            meta.get("provider", "?"),
+            meta.get("candidate", "?"),
+            meta.get("member_season", "?"),
+            meta.get("member_episode", "?"),
+            len(resolved.text.encode("utf-8")) if resolved.text else 0,
+        )
+        return resolved, meta
+
+    def set_video_scoped(
+        self,
+        query: ReferenceQuery,
+        source: str | None,
+        text: str,
+        kind: str = "edition",
+        *,
+        bluray_match: bool = False,
+        candidate: str = "",
+        partial: bool = False,
+        member_season: int | str | None = None,
+        member_episode: int | str | None = None,
+        score: float = 0.0,
+        score_without_hash: float = 0.0,
+        source_download_digest: str | None = None,
+    ) -> bool:
+        """Persist a validated reference artifact against the target VIDEO.
+
+        The write is refused unless ``member_season`` and ``member_episode``
+        are both present and equal the requested episode. That is what keeps an
+        unresolved season pack -- one whose correct member has not been
+        extracted and re-scored -- from being stored as though it were an
+        already validated episode reference.
+        """
+        if not text:
+            return False
+        member_season = _cache_member_number(member_season)
+        member_episode = _cache_member_number(member_episode)
+        if query.season is not None and member_season != _cache_member_number(query.season):
+            return False
+        if query.episode is not None and member_episode != _cache_member_number(query.episode):
+            return False
+        if query.episode is not None and member_episode is None:
+            return False
+        kind = self._safe_kind(kind)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            content_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            # Distinct provider/kind entries are already separated by filename.
+            # Distinct candidates and payloads receive distinct artifact files as
+            # well, so storing a weaker reference can never silently replace a
+            # stronger validated reference that happens to share its source.
+            artifact_id = hashlib.sha256(
+                json.dumps([
+                    self._safe_source(source),
+                    candidate,
+                    content_sha,
+                ]).encode("utf-8")
+            ).hexdigest()[:16]
+            path = self._video_scope_path(query, source or "ref", kind, artifact_id)
+            self._atomic_write(path, text)
+            meta = {
+                "scope": _VIDEO_SCOPE_MARKER,
+                "stem": query.video_scope_stem,
+                "kind": kind,
+                "provider": self._safe_source(source),
+                "candidate": candidate,
+                "partial": bool(partial),
+                "bluray_match": bool(bluray_match),
+                "member_season": member_season,
+                "member_episode": member_episode,
+                "score": _safe_score(score),
+                "score_without_hash": _safe_score(score_without_hash),
+                "source_download_digest": source_download_digest,
+                "languages": list(query.languages),
+                "strict": bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True)),
+                "content_sha": content_sha,
+                "engine_version": ENGINE_VERSION,
+            }
+            self._atomic_write(self._sidecar_path(path), json.dumps(meta, sort_keys=True))
+            self._prune_video_scoped()
+            logger.info(
+                "[reference] cached video-scoped reference: provider=%s candidate=%s "
+                "season=%s episode=%s bytes=%d",
+                meta["provider"],
+                candidate or "?",
+                member_season,
+                member_episode,
+                len(text.encode("utf-8")),
+            )
+            return True
+        except OSError as exc:
+            logger.warning("[reference] failed to write video-scoped reference cache: %s", exc)
+            return False

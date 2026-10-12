@@ -1,0 +1,52 @@
+{
+  "case_id": "the_100_metadata_log_regression",
+  "provenance": "SYNTHETIC_EPISODE_IDENTITY_REGRESSION",
+  "provenance_note": "User supplied identity/release example with synthetic comparison candidates; no source-log or REAL timing proof claimed.",
+  "target": {
+    "filename": "The.100.S01E01.Pilot.1080p.BluRay.Dts-HDMa5.1.H264-PiR8.mkv",
+    "metadata": {
+      "media_type": "series",
+      "season": 1,
+      "episode": 1,
+      "imdb_id": "tt2661044"
+    }
+  },
+  "candidates": [
+    {
+      "id": "disc",
+      "provider": "opensubtitles",
+      "provider_id": "101",
+      "release_names": [
+        "The.100.S01E01.1080p.BluRay.H264-ROVERS"
+      ],
+      "metadata": {
+        "season": 1,
+        "episode": 1
+      },
+      "language": "ara"
+    },
+    {
+      "id": "web",
+      "provider": "subdl",
+      "provider_id": "102",
+      "release_names": [
+        "The.100.S01E01.1080p.WEB-DL.H264-NTb"
+      ],
+      "language": "ara"
+    }
+  ],
+  "expected": {
+    "discovery_order": [
+      "disc",
+      "web"
+    ],
+    "reference_order": [
+      "disc",
+      "web"
+    ],
+    "display_order": [
+      "disc",
+      "web"
+    ]
+  }
+}

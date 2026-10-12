@@ -82,6 +82,13 @@ class ReferenceQuery:
     target_sub_id: str | None = None
     target_sub_release_name: str | None = None
     target_cue_digest: str | None = None
+    #: The selected subtitle's text. Held only so a reference can be proven
+    #: independent of it; never part of any cache key, never logged.
+    target_text: str | None = None
+    #: Digests of provider download sources already in hand for this request.
+    #: Used only to avoid fetching the same archive again while looking for an
+    #: alternative; never part of any cache key, never logged.
+    known_source_digests: tuple[str, ...] = ()
 
     @property
     def is_series(self) -> bool:
@@ -143,6 +150,38 @@ class ReferenceQuery:
         scope = self._target_scope(self.target_cue_digest, self.target_sub_id)
         return f"{stem}_{scope}" if scope else stem
 
+    @property
+    def video_scope_stem(self) -> str:
+        """Identity of the TARGET VIDEO alone, independent of the chosen subtitle.
+
+        ``cache_stem`` appends a scope derived from the selected subtitle's cue
+        timings, which is correct for the *validation verdict* but wrong for the
+        *reference artifact*: which file was downloaded depends on the video,
+        not on which of its subtitles the user happens to have picked. Switching
+        subtitles therefore produced a different stem, made a perfectly good
+        cached reference unreachable, and forced a redundant re-download of the
+        same archive -- which is what tripped the provider's rate limiter.
+
+        This stem keeps every element that identifies the video: imdb id, media
+        type, season, episode, release group, target filename, video hash/size
+        and requested languages. It deliberately drops only the subtitle scope.
+        """
+        imdb = re.sub(r"[^A-Za-z0-9]+", "", self.imdb_id or "unknown") or "unknown"
+        season = str(self.season) if self.season is not None else "movie"
+        episode = str(self.episode) if self.episode is not None else "x"
+        # NB: stream_url is deliberately excluded -- debrid/AIOStreams hand out a
+        # freshly-signed token per request, which would otherwise change the
+        # stem every time and defeat the reference cache.
+        identity = json.dumps([
+            self.media_type.lower(),
+            re.sub(r"\s+", " ", (self.target_filename or "").strip().lower()),
+            (self.video_hash or "").strip().lower(),
+            str(self.video_size or ""),
+            list(self.languages),
+        ], ensure_ascii=False)
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return f"{imdb}_{season}_{episode}_{self.effective_group}_v2_{digest}"
+
 
 @dataclass(frozen=True)
 class ResolvedReference:
@@ -160,6 +199,23 @@ class ResolvedReference:
     kind: str = "abort"
     bluray_match: bool = False
     candidate: str = ""
+    #: Season/episode the reference actually proves. Populated only after the
+    #: extracted member has been independently resolved and re-scored, so a
+    #: season pack without a validated member never carries them.
+    member_season: int | str | None = None
+    member_episode: int | str | None = None
+    #: Weighted proof retained with a cached artifact. It compares retained
+    #: artifacts deterministically; it never bypasses extraction, readiness, or
+    #: verification for a new request.
+    weighted_score: float = 0.0
+    weighted_score_without_hash: float = 0.0
+    #: Digest of the normalized provider download source, never the raw URL.
+    #: It lets planning skip an exact source already in hand without logging or
+    #: persisting a signed address.
+    source_download_digest: str | None = None
+    #: True when this reference was replayed from the video-scoped artifact
+    #: tier rather than downloaded during this request.
+    from_video_cache: bool = False
     # A sampled/partial reference (e.g. only the first 15 min extracted from a
     # remote stream). Its end runtime is deliberately shorter than the target,
     # so duration-mismatch gates must not reject it.

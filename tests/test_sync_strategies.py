@@ -432,7 +432,8 @@ async def test_orchestrator_forwards_recap_context(monkeypatch):
     )
     meta = {
         "imdb_id": "tt0773262", "media_type": "series", "season": 8, "episode": 1,
-        "lang": "ara", "target_filename": "Dexter.S08E01.1080p.BluRay.x264.mkv",
+        # Explicit same-group identity keeps this fixture eligible for ALASS.
+        "lang": "ara", "target_filename": "Dexter.S08E01.1080p.BluRay.x264-TESTGROUP.mkv",
     }
     await orch.evaluate_and_sync(_arabic_bytes(), meta, "t", True)
     assert orch._sync_service.kinds == ["edition"]
@@ -629,6 +630,7 @@ async def test_request_budget_returns_original_and_warms_cache(monkeypatch):
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
     monkeypatch.setattr(app_settings, "SYNC_TOTAL_REQUEST_BUDGET", 0.05)
+    monkeypatch.setattr(app_settings, "SYNC_COMPLETION_REQUEST_BUDGET", 0.05)
     monkeypatch.setattr(main, "_http_client", object())
     cache = SyncCache()
     monkeypatch.setattr(main, "_sync_cache", cache)
@@ -844,6 +846,8 @@ async def test_external_reference_remux_target_is_retail_pair():
             return buffer.getvalue()
 
     class _Release:
+        lang = "eng"
+        provider = "subdl"
         release_name = "Show.S01E01.2160p.BluRay.REMUX-GRP.srt"
         download_url = "https://example/fake.zip"
 
@@ -951,6 +955,10 @@ async def test_reference_selection_prefers_hash_matched_english(tmp_path):
     query = ReferenceQuery(
         imdb_id="tt0804503", media_type="series", season=1, episode=2, target_filename=target
     )
+    from app.services.release_scoring_integration import hash_proof
+    query.video_hash = "1ec51ed4797c63ff"
+    query.video_size = 5727011301
+    hash_proof(hashed, {"moviehash": query.video_hash, "moviebytesize": query.video_size}, True)
     resolved = await strategy.resolve_with_provenance(query)
     assert resolved.text is not None
     assert resolved.kind == "hash"

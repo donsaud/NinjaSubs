@@ -214,7 +214,7 @@ class SyncCache:
         prefix = f"final_sub:{SYNC_PAYLOAD_VERSION}:{imdb}:"
         needle = f":{sid}:"
         for key in list(self._local.keys()):
-            if key.startswith(prefix) and needle in key:
+            if key.startswith(prefix) and needle in key and "unified-v1" not in key.split(":"):
                 value = self._local.get(key)
                 if value:
                     return value
@@ -225,7 +225,7 @@ class SyncCache:
                     cursor, keys = await self._redis.scan(cursor, match=f"{prefix}*", count=200)
                     for key in keys:
                         text = key.decode() if isinstance(key, bytes) else str(key)
-                        if needle in text:
+                        if needle in text and "unified-v1" not in text.split(":"):
                             value = await self._redis.get(text)
                             if value:
                                 return value if isinstance(value, bytes) else str(value).encode()
@@ -265,7 +265,7 @@ class SyncCache:
         prefix = f"final_sub:{SYNC_PAYLOAD_VERSION}:{imdb}:{season_ep}:{fp}:{sid}"
         head = f"{prefix}:"
         for key in list(self._local.keys()):
-            if key == prefix or key.startswith(head):
+            if (key == prefix or key.startswith(head)) and "unified-v1" not in key.split(":"):
                 value = self._local.get(key)
                 if value:
                     return value
@@ -277,6 +277,8 @@ class SyncCache:
                     for key in keys:
                         text = key.decode() if isinstance(key, bytes) else str(key)
                         if text != prefix and not text.startswith(head):
+                            continue
+                        if "unified-v1" in text.split(":"):
                             continue
                         value = await self._redis.get(text)
                         if value:
@@ -297,6 +299,7 @@ class SyncCache:
         subtitle_hash: str,
         language: str,
         engine_version: int = SYNC_VERDICT_ENGINE_VERSION,
+        methodology: str | None = None,
     ) -> str:
         """Key a measured sync verdict: ``verdict:{engine}:{video}:{sub}:{lang}``.
 
@@ -305,6 +308,8 @@ class SyncCache:
         happens to carry the same subtitle, which is precisely the false-positive
         class this cache must not create.
         """
+        if methodology:
+            return f"verdict:8:{methodology}:{video_fingerprint}:{subtitle_hash}:{(language or 'und').lower()}"
         return (
             f"verdict:{engine_version}:{video_fingerprint}:{subtitle_hash}:"
             f"{(language or 'und').lower()}"
@@ -362,7 +367,12 @@ class SyncCache:
             return None
         if not isinstance(data, dict):
             return None
-        if int(data.get("engine_version") or 0) != SYNC_VERDICT_ENGINE_VERSION:
+        unified = key.startswith(("verdict:8:unified-v1:", "verdict-alias:8:unified-v1:"))
+        expected_engine = 8 if unified else SYNC_VERDICT_ENGINE_VERSION
+        if int(data.get("engine_version") or 0) != expected_engine:
+            return None
+        if unified and (data.get("verification_method") != "unified"
+                        or data.get("verification_version") != "unified-v1"):
             return None
         if (str(data.get("sync_state", "")).startswith("verified")
                 and data.get("target_binding") not in {"exact", "strong"}):
@@ -375,6 +385,7 @@ class SyncCache:
         video_fingerprint: str,
         subtitle_ref: str,
         engine_version: int = SYNC_VERDICT_ENGINE_VERSION,
+        methodology: str | None = None,
     ) -> str:
         """Secondary index: look a verdict up by a stable candidate id.
 
@@ -384,13 +395,15 @@ class SyncCache:
         while still binding it to the video fingerprint, so a verdict is never
         surfaced for a different video.
         """
+        if methodology:
+            return f"verdict-alias:8:{methodology}:{video_fingerprint}:{subtitle_ref}"
         return f"verdict-alias:{engine_version}:{video_fingerprint}:{subtitle_ref}"
 
     async def get_verdict_by_ref(
-        self, video_fingerprint: str, subtitle_ref: str
+        self, video_fingerprint: str, subtitle_ref: str, *, methodology: str | None = None,
     ) -> dict[str, Any] | None:
         """Search-time lookup by (video fingerprint, candidate id)."""
-        key = self.build_verdict_alias_key(video_fingerprint, subtitle_ref)
+        key = self.build_verdict_alias_key(video_fingerprint, subtitle_ref, methodology=methodology)
         return await self.get_verdict(key)
 
     async def set_verdict(
@@ -423,7 +436,7 @@ class SyncCache:
                 return
         try:
             payload = dict(verdict)
-            payload["engine_version"] = SYNC_VERDICT_ENGINE_VERSION
+            payload["engine_version"] = 8 if key.startswith("verdict:8:unified-v1:") else SYNC_VERDICT_ENGINE_VERSION
             raw = json.dumps(payload)
         except (TypeError, ValueError) as exc:
             logger.debug("[sync-cache] verdict not serializable, skipping: %s", exc)

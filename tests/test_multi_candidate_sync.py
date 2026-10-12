@@ -24,6 +24,7 @@ import hashlib
 import pytest
 
 from app.models import SubtitleRelease
+from app.services.release_scoring_integration import record
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.orchestrator import (
     SyncOrchestrator,
@@ -39,7 +40,14 @@ from app.services.sync.orchestrator import (
 def _rel(name: str, **kw):
     base = {"release_name": name, "download_url": f"/sub/x/{name}", "provider": "subdl"}
     base.update(kw)
-    return SubtitleRelease(**base)
+    result = SubtitleRelease(**base)
+    evidence = record(result)
+    # Synthetic fixture aliases are independently declared to be this movie.
+    # Acquisition is mocked; this is never captured or classified as REAL.
+    evidence["metadata"].update(imdb_id="tt2582802", imdb_verified=True)
+    evidence["metadata"].setdefault("source", "bluray")
+    result.release_evidence = [evidence]
+    return result
 
 
 def _srt(cue_count: int, first_start_ms: int = 1000, step_ms: int = 3000, tag: str = "") -> str:

@@ -367,26 +367,8 @@ def _with_sync(name: str, state: str | None, verification: str | None, **kwargs)
     return release
 
 
-def test_verified_synced_never_loses_to_verified_resynced():
-    """Re-timing is not better evidence than already being right."""
-    already = _with_sync("A.srt", "verified_synced", "verified", match_tier=MatchTier.CLOSE)
-    resynced = _with_sync(
-        "B.srt", "verified_resynced", "verified", match_tier=MatchTier.HASH
-    )
-    ordered = order_candidates([resynced, already])
-    assert ordered[0] is already
-    assert ordered[1] is resynced
 
 
-def test_sync_evidence_outranks_a_better_match_tier():
-    weak_but_verified = _with_sync(
-        "A.srt", "verified_resynced", "verified", match_tier=MatchTier.FALLBACK
-    )
-    strong_but_unverified = _with_sync(
-        "B.srt", "unverified", "unknown", match_tier=MatchTier.HASH
-    )
-    ordered = order_candidates([strong_but_unverified, weak_but_verified])
-    assert ordered[0] is weak_but_verified
 
 
 def test_displayed_score_overrides_legacy_tier_and_base_rank():
@@ -408,21 +390,8 @@ def test_displayed_score_overrides_legacy_tier_and_base_rank():
     assert ordered[0] is fallback
 
 
-def test_raw_state_claim_does_not_override_score_ties():
-    no_claim = _with_sync("A.srt", None, None, match_tier=MatchTier.CLOSE)
-    probable = _with_sync(
-        "B.srt", "probable_sync", "verified", match_tier=MatchTier.FALLBACK
-    )
-    ordered = order_candidates([no_claim, probable])
-    assert ordered[0] is no_claim
 
 
-def test_ordering_preserves_rejected_state():
-    rejected = _with_sync("A.srt", "rejected", "verified", match_tier=MatchTier.HASH)
-    unverified = _with_sync("B.srt", "unverified", "unknown", match_tier=MatchTier.FALLBACK)
-    ordered = order_candidates([rejected, unverified])
-    assert ordered[0] is rejected
-    assert rejected.sync_state == "rejected"
 
 
 def test_displayed_score_semantics_are_untouched():

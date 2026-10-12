@@ -53,6 +53,15 @@ from app.services.sync.case_capture import (
     capture_response_input,
     close_captures,
 )
+from app.services.sync.delivery import (
+    DeliveryAuthorization,
+    DeliveryPayload,
+    RenderPreferences,
+    final_body_preserves_authorization,
+    log_final_delivery,
+    original_response_body,
+    sha256,
+)
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.hash_reference import OpenSubtitlesHashReferenceStrategy
 from app.services.sync.matching import (
@@ -576,6 +585,7 @@ async def _lookup_search_verdict(
     verdict_fingerprint: str | None,
     rel_sub_id: str,
     rel: Any,
+    methodology: str | None = None,
 ) -> dict[str, Any] | None:
     """Find a measured verdict for one listing candidate, if one exists.
 
@@ -590,7 +600,9 @@ async def _lookup_search_verdict(
     if not verdict_fingerprint:
         return None
     try:
-        verdict = await sync_cache.get_verdict_by_ref(verdict_fingerprint, rel_sub_id)
+        verdict = await sync_cache.get_verdict_by_ref(
+            verdict_fingerprint, rel_sub_id, **({"methodology": methodology} if methodology else {})
+        )
     except Exception:
         verdict = None
     if verdict is None:
@@ -598,7 +610,7 @@ async def _lookup_search_verdict(
         if file_id:
             try:
                 verdict = await sync_cache.get_verdict_by_ref(
-                    verdict_fingerprint, file_id
+                    verdict_fingerprint, file_id, **({"methodology": methodology} if methodology else {})
                 )
             except Exception:
                 verdict = None
@@ -805,6 +817,9 @@ async def _fetch_subtitles_handler(
         "stream_url": stream_url,
     }
     predictor = SyncPredictor()
+    from app.services.sync.hybrid_router import unified_authority_enabled
+
+    unified_listing = unified_authority_enabled(predictor_target_meta)
 
     for position, rel in enumerate(ranked_releases):
         # Capture the matcher's ordering before any sync-evidence re-sort, so
@@ -824,10 +839,11 @@ async def _fetch_subtitles_handler(
             rel_key += f":e{episode}"
         rel_sub_id = hashlib.sha256(rel_key.encode("utf-8")).hexdigest()[:16]
         try:
-            synced_blob = await _sync_cache.find_synced_for(parsed.imdb_id, rel_sub_id)
+            synced_blob = (None if unified_listing else
+                           await _sync_cache.find_synced_for(parsed.imdb_id, rel_sub_id))
         except Exception:
             synced_blob = None
-        if synced_blob is None:
+        if synced_blob is None and not unified_listing:
             # Same key mismatch as the verdict lookup below: synced artifacts
             # for proxy-served entries are stored under the provider file_id,
             # so the rel_sub_id scan above can never find them. Without this
@@ -846,7 +862,8 @@ async def _fetch_subtitles_handler(
         # Reuse a previously MEASURED verdict for this exact video + candidate.
         # Cache dominates prediction: real evidence beats a metadata guess.
         verdict = await _lookup_search_verdict(
-            _sync_cache, verdict_fingerprint, rel_sub_id, rel
+            _sync_cache, verdict_fingerprint, rel_sub_id, rel,
+            methodology="unified-v1" if unified_listing else None,
         )
         if verdict:
             rel.sync_evidence_trusted = verdict.get("target_binding") in {"exact", "strong"}
@@ -907,8 +924,9 @@ async def _fetch_subtitles_handler(
     from app.services.subtitle_matcher import refresh_visible_compatibility
 
     ranked_releases = refresh_visible_compatibility(ranked_releases, target_filename,
-        preferred_languages=prefs.languages, season=season, episode=episode,
-        hi_preference=getattr(prefs, "hi_preference", "neutral"))
+        preferred_languages=prefs.languages, season=season, episode=episode, title=title, year=year,
+        hi_preference=getattr(prefs, "hi_preference", "neutral"), imdb_id=parsed.imdb_id,
+        media_type=media_type, video_hash=stream_params.get("video_hash"), video_size=stream_params.get("video_size"))
     sync_aware_order = [rel.release_name for rel in ranked_releases]
     # Record only whether the visible order moved, and why - never re-rank from it.
     if original_order != sync_aware_order:
@@ -1464,8 +1482,13 @@ async def _reusable_verified_fallback_sync(
     ref = _fallback_candidate_ref(
         release, str(getattr(release, "provider", "") or "subsource"), season, episode
     )
+    from app.services.sync.hybrid_router import unified_authority_enabled
+
+    unified = unified_authority_enabled(fingerprint_meta)
     try:
-        verdict = await _sync_cache.get_verdict_by_ref(fingerprint, ref)
+        verdict = await _sync_cache.get_verdict_by_ref(
+            fingerprint, ref, **({"methodology": "unified-v1"} if unified else {})
+        )
     except Exception as exc:  # pragma: no cover - cache must not break the request
         logger.debug("[fallback-cache] verdict lookup failed: %s", exc)
         return None
@@ -1499,9 +1522,20 @@ async def _reusable_verified_fallback_sync(
 
     season_ep = f"s{season}e{episode}" if season is not None and episode is not None else "movie"
     try:
-        payload = await _sync_cache.find_synced_for_target(
-            imdb_id, season_ep, fingerprint, ref
-        )
+        if unified:
+            # No broad payload search may select an artifact from Legacy.
+            if not re.fullmatch(r"[a-f0-9]{64}", str(verdict.get("reference_sha") or "")):
+                return None
+            artifact_key = verdict.get("artifact_key")
+            if not isinstance(artifact_key, str) or not artifact_key.endswith(":unified-v1"):
+                return None
+            payload = await _sync_cache.get(artifact_key)
+            if payload is not None and verdict.get("artifact_sha256") != hashlib.sha256(payload).hexdigest():
+                return None
+        else:
+            payload = await _sync_cache.find_synced_for_target(
+                imdb_id, season_ep, fingerprint, ref
+            )
     except Exception as exc:  # pragma: no cover
         logger.debug("[fallback-cache] payload lookup failed: %s", exc)
         return None
@@ -1523,6 +1557,14 @@ async def _reusable_verified_fallback_sync(
         ref,
         state,
     )
+    if unified:
+        from app.logging_context import stable_request_id
+        from app.services.sync.alignment import may_serve_synchronized
+
+        return DeliveryPayload(payload, DeliveryAuthorization(
+            stable_request_id(fingerprint_meta, ref, payload), sha256(payload),
+            verdict.get("reference_sha"), str(verdict.get("target_binding") or "unknown"),
+            "VERIFIED", may_serve_synchronized(state, verdict.get("verification")), None))
     return payload
 
 
@@ -2037,7 +2079,20 @@ async def _sync_subtitle_for_response(
             return payload  # Conversion failed safely; do not sync native ASS.
     sync_meta = _sync_meta_for_user(meta, context, prefs)
     begin_capture(payload, sync_meta, auto_sync)
+    if isinstance(payload, DeliveryPayload):
+        return payload  # Exact, digest-checked Unified fallback cache artifact.
     synced = await _maybe_sync_subtitle(payload, sync_meta, target_id, auto_sync)
+    from app.logging_context import stable_request_id
+    from app.services.sync.hybrid_router import unified_authority_enabled
+
+    if auto_sync and unified_authority_enabled(sync_meta):
+        # Authorization travels with bytes across shielded jobs/cache returns;
+        # never borrow the orchestrator's shared last-evaluation diagnostic.
+        if isinstance(synced, DeliveryPayload):
+            return synced
+        return DeliveryPayload(payload, DeliveryAuthorization(
+            stable_request_id(sync_meta, target_id, payload), None, None,
+            "unknown", "UNVERIFIED", False, payload))
     # ENABLE_AUTOSYNC_TEST_OVERRIDE -- development/test only, off by default.
     #
     # Substitutes an already-validated Alass artifact for an allowlisted subtitle
@@ -2115,10 +2170,11 @@ async def _maybe_sync_subtitle(
 
     Requires BOTH the server-level ``ENABLE_SUBTITLE_SYNC`` flag and the user's
     ``auto_sync`` preference. The inline wait is bounded by
-    ``SYNC_TOTAL_REQUEST_BUDGET`` seconds so a slow provider/alass run cannot
-    block forever: on expiry the original bytes are served immediately while the
-    detached task keeps running to populate the ``final_sub`` cache for
-    subsequent requests.
+    ``SYNC_TOTAL_REQUEST_BUDGET`` starts the initial wait. Explicit Auto-Sync
+    requests keep waiting up to ``SYNC_COMPLETION_REQUEST_BUDGET`` for the same
+    response: Stremio cannot replace an already-delivered original from a later
+    background result. Only hard expiry returns original bytes while warming
+    the cache for a subsequent request. Both waits remain bounded.
     """
     orchestrator = _get_sync_orchestrator()
     if orchestrator is None:
@@ -2126,17 +2182,31 @@ async def _maybe_sync_subtitle(
         return sub_bytes
 
     budget = float(getattr(settings, "SYNC_TOTAL_REQUEST_BUDGET", 15.0))
+    completion_budget = budget
+    if auto_sync:
+        completion_budget = max(budget, float(getattr(settings, "SYNC_COMPLETION_REQUEST_BUDGET", 60.0)))
+    started = time.monotonic()
     task = asyncio.ensure_future(
         orchestrator.evaluate_and_sync(sub_bytes, meta, target_id, auto_sync=auto_sync)
     )
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+        except TimeoutError:
+            if completion_budget <= budget:
+                raise
+            logger.info("[sync-latency] initial_budget_exceeded=true served=pending "
+                        "completion_budget_s=%.1f", completion_budget)
+            return await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=max(0.0, completion_budget - (time.monotonic() - started)),
+            )
     except TimeoutError:
         logger.info("[sync-latency] result=timeout served=original")
         logger.warning(
-            "[sync] request budget %.1fs exceeded -> serving original; "
+            "[sync] completion budget %.1fs exceeded -> serving original; "
             "sync continues in background to warm the cache",
-            budget,
+            completion_budget,
         )
         task.add_done_callback(_consume_background_sync)
         return sub_bytes
@@ -2183,6 +2253,40 @@ def _run_subtitle_optimization_pipeline(
     return sub_bytes
 
 
+def _finalize_authorized_response(
+    response: Response, source: bytes, response_format: str, prefs: RenderPreferences,
+) -> Response:
+    if not isinstance(source, DeliveryPayload):
+        capture_final(bytes(response.body), response_format)
+        return response
+    auth = source.authorization
+    body = bytes(response.body)
+    integrity = final_body_preserves_authorization(source, body, response_format, prefs)
+    authorized = (auth.may_serve and auth.authoritative_verdict == "VERIFIED"
+                  and auth.approved_sha256 == sha256(source)
+                  and bool(auth.reference_sha256 and re.fullmatch(r"[a-f0-9]{64}", auth.reference_sha256))
+                  and auth.binding != "unknown" and integrity)
+    if not authorized:
+        # Original fallback cannot go through a renderer just found unsafe.
+        try:
+            body = (original_response_body(auth.original, response_format, prefs)
+                    if auth.original is not None else b"")
+        except Exception:
+            body = auth.original or b""
+            response_format = "srt"
+            response.headers["content-type"] = "application/x-subrip; charset=utf-8"
+        response.body = body
+        response.headers["content-length"] = str(len(body))
+        decision = "ORIGINAL" if auth.original is not None else "WITHHELD"
+        if auth.original is None:
+            response.status_code = 503
+    else:
+        decision = "TRANSFORMED" if source != auth.original else "ORIGINAL_VERIFIED"
+    log_final_delivery(auth, body, response_format, authorized, integrity, decision)
+    capture_final(body, response_format)
+    return response
+
+
 def _build_subtitle_response(
     sub_bytes: bytes,
     release_name: Any,
@@ -2202,6 +2306,9 @@ def _build_subtitle_response(
     # 1. Ingestion/normalization: legacy encoding first, then convert ASS/SSA into a
     #    standard intermediate SRT so all later (SRT-only) optimizations apply.
     options = clean_options or CleanOptions()
+    authorized_source = sub_bytes
+    render_preferences = RenderPreferences(options, enable_rtl_fix, enable_ad_removal,
+        keep_translator_credits, strip_hi, eastern_arabic_numerals, strip_diacritics)
     # Auto-sync output is dynamic: never let a player/proxy reuse a stale
     # (pre-sync) buffer.
     cache_control = (
@@ -2241,8 +2348,7 @@ def _build_subtitle_response(
     # 3. Native ASS / SSA detection (raw passthrough only when conversion is off)
     if (not converted_from_ass) and (is_ass_subtitle(sub_bytes) or req_format in ("ass", "ssa")):
         ext = "ssa" if req_format == "ssa" else "ass"
-        capture_final(sub_bytes, ext)
-        return Response(
+        return _finalize_authorized_response(Response(
             content=sub_bytes,
             media_type="text/x-ssa; charset=utf-8",
             headers={
@@ -2251,12 +2357,11 @@ def _build_subtitle_response(
                 "Access-Control-Allow-Headers": "*",
                 "Content-Disposition": _format_content_disposition(release_name, ext),
             },
-        )
+        ), authorized_source, ext, render_preferences)
     # 2. Native WebVTT detection or requested VTT
     elif is_vtt_subtitle(sub_bytes) or req_format == "vtt":
         vtt_bytes = sub_bytes if is_vtt_subtitle(sub_bytes) else srt_to_vtt(sub_bytes)
-        capture_final(vtt_bytes, "vtt")
-        return Response(
+        return _finalize_authorized_response(Response(
             content=vtt_bytes,
             media_type="text/vtt; charset=utf-8",
             headers={
@@ -2265,11 +2370,10 @@ def _build_subtitle_response(
                 "Access-Control-Allow-Headers": "*",
                 "Content-Disposition": _format_content_disposition(release_name, "vtt"),
             },
-        )
+        ), authorized_source, "vtt", render_preferences)
     # 3. Native SubRip (SRT) default
     else:
-        capture_final(sub_bytes, "srt")
-        return Response(
+        return _finalize_authorized_response(Response(
             content=sub_bytes,
             media_type="application/x-subrip; charset=utf-8",
             headers={
@@ -2278,7 +2382,7 @@ def _build_subtitle_response(
                 "Access-Control-Allow-Headers": "*",
                 "Content-Disposition": _format_content_disposition(release_name, "srt"),
             },
-        )
+        ), authorized_source, "srt", render_preferences)
 
 
 async def _serve_subtitle_handler(
@@ -2644,7 +2748,7 @@ async def _serve_subtitle_handler(
         srt_bytes, meta, media_context, target_id, cfg_prefs,
         auto_sync_enabled, convert_ass_enabled,
     )
-    if synced_bytes and synced_bytes != srt_bytes:
+    if synced_bytes:
         # Served, but not persisted here: the cache must keep the provider
         # bytes so a later request re-verifies from the true source instead of
         # re-analyzing an already-synchronized artifact. See the cache-hit path
@@ -3028,50 +3132,21 @@ async def clear_cache_route():
 
 @app.get("/diagnostics/ranking")
 async def diagnostics_ranking():
-    """Safe microservice ranking diagnostics endpoint. Never exposes API keys or secrets."""
-    from app.services.subtitle_matcher import (
-        WEIGHT_EPISODE_MATCH_ANIME,
-        WEIGHT_EPISODE_MATCH_TV,
-        WEIGHT_EXACT_HASH,
-        WEIGHT_FPS_DRIFT,
-        WEIGHT_FPS_EXACT,
-        WEIGHT_FPS_NEAR,
-        WEIGHT_REPACK_MATCH,
-        WEIGHT_REPACK_MISMATCH,
-        WEIGHT_SEASON_MATCH,
-        WEIGHT_SERVICE_MATCH,
-        WEIGHT_SERVICE_MISMATCH,
-        WEIGHT_SOURCE_CROSS_PENALTY,
-        WEIGHT_SOURCE_FAMILY_MATCH,
-        WEIGHT_SOURCE_MATCH,
-        WEIGHT_TITLE_MAX,
-        WEIGHT_YEAR_MATCH,
-        WEIGHT_YEAR_MISMATCH,
-        is_debug_ranking_enabled,
+    """Safe diagnostics for the sole authoritative release contract."""
+    from app.services.release_scoring import CONTRACT_VERSION
+    from app.services.release_scoring.engine import (
+        EPISODE_WEIGHTS,
+        MOVIE_WEIGHTS,
+        REFERENCE_MINIMUM_PERCENT,
     )
+    from app.services.subtitle_matcher import is_debug_ranking_enabled
 
     return {
-        "status": "ok",
+        "status": "ok", "contract_version": CONTRACT_VERSION,
         "debug_ranking_enabled": is_debug_ranking_enabled(),
-        "weights": {
-            "WEIGHT_EXACT_HASH": WEIGHT_EXACT_HASH,
-            "WEIGHT_TITLE_MAX": WEIGHT_TITLE_MAX,
-            "WEIGHT_YEAR_MATCH": WEIGHT_YEAR_MATCH,
-            "WEIGHT_YEAR_MISMATCH": WEIGHT_YEAR_MISMATCH,
-            "WEIGHT_SEASON_MATCH": WEIGHT_SEASON_MATCH,
-            "WEIGHT_EPISODE_MATCH_TV": WEIGHT_EPISODE_MATCH_TV,
-            "WEIGHT_EPISODE_MATCH_ANIME": WEIGHT_EPISODE_MATCH_ANIME,
-            "WEIGHT_REPACK_MATCH": WEIGHT_REPACK_MATCH,
-            "WEIGHT_REPACK_MISMATCH": WEIGHT_REPACK_MISMATCH,
-            "WEIGHT_FPS_EXACT": WEIGHT_FPS_EXACT,
-            "WEIGHT_FPS_NEAR": WEIGHT_FPS_NEAR,
-            "WEIGHT_FPS_DRIFT": WEIGHT_FPS_DRIFT,
-            "WEIGHT_SOURCE_MATCH": WEIGHT_SOURCE_MATCH,
-            "WEIGHT_SOURCE_FAMILY_MATCH": WEIGHT_SOURCE_FAMILY_MATCH,
-            "WEIGHT_SOURCE_CROSS_PENALTY": WEIGHT_SOURCE_CROSS_PENALTY,
-            "WEIGHT_SERVICE_MATCH": WEIGHT_SERVICE_MATCH,
-            "WEIGHT_SERVICE_MISMATCH": WEIGHT_SERVICE_MISMATCH,
-        },
+        "weights": {"episodes": dict(EPISODE_WEIGHTS), "movies": dict(MOVIE_WEIGHTS),
+                    "episode_moviehash": 359, "movie_moviehash": 179},
+        "reference_minimum_percent": REFERENCE_MINIMUM_PERCENT,
         "providers_configured": {
             "subdl": bool(settings.SUBDL_API_KEY.strip()),
             "subsource": bool(settings.SUBSOURCE_API_KEY.strip()),

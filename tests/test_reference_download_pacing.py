@@ -22,15 +22,18 @@ import time
 import pytest
 
 from app.models import SubtitleRelease
+from app.services.release_scoring_integration import record
 from app.services.sync import external_strategy as es
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.query import ReferenceQuery
 
 
 def _rel(name: str):
-    return SubtitleRelease(
-        release_name=name, download_url=f"/sub/x/{name}", provider="subdl"
-    )
+    result = SubtitleRelease(release_name=name, download_url=f"/sub/x/{name}", provider="subdl")
+    evidence = record(result)
+    evidence["metadata"].update(imdb_id="tt2582802", imdb_verified=True, source="bluray")
+    result.release_evidence = [evidence]
+    return result
 
 
 def _srt(cues: int, tag: str) -> str:
@@ -88,7 +91,7 @@ class _Strategy(ExternalExactStrategy):
 
 
 def _strategy(n: int):
-    payloads = {f"Rel{i}.2014.2160p.mkv": _srt(500 + i, f"T{i}") for i in range(n)}
+    payloads = {f"Whiplash.2014.Release{i}.2160p.mkv": _srt(500 + i, f"T{i}") for i in range(n)}
     return _Strategy(payloads, cache=None, timeout=5.0)
 
 

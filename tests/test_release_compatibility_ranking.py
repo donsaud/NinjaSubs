@@ -34,30 +34,8 @@ def _pct(target: str, name: str) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def test_uhd_target_prefers_compatible_bluray_over_microrip():
-    """The reported case: a UHD BluRay target must not list a 1080p rip first.
-
-    Every micro-rip here scores *higher* on the generic percentage than the
-    compatible releases do, which is exactly the inversion being fixed.
-    """
-    order = _order(UHD_TARGET, [YIFY, YTS, RARBG, UHD_ALT_GROUP, BLURAY_1080])
-
-    assert order.index(UHD_ALT_GROUP) < order.index(YIFY)
-    assert order.index(BLURAY_1080) < order.index(YIFY)
-    assert order.index(BLURAY_1080) < order.index(RARBG)
-    # The displayed percentage must agree with this semantic direction.
-    assert _pct(UHD_TARGET, YIFY) <= _pct(UHD_TARGET, UHD_ALT_GROUP)
 
 
-def test_microrip_is_demoted_one_tier_not_rejected():
-    """A demotion, never a block: still accepted, still scored, just lower tier."""
-    good = calculate_compatibility(UHD_TARGET, UHD_ALT_GROUP)
-    rip = calculate_compatibility(UHD_TARGET, YIFY)
-
-    assert rip.accepted is True, "a micro-rip must stay a selectable candidate"
-    assert rip.match_tier in (MatchTier.CLOSE, MatchTier.FALLBACK)
-    assert good.match_tier in (MatchTier.EXACT, MatchTier.SOURCE_FAMILY)
-    assert int(good.match_tier.value) < int(rip.match_tier.value)
 
 
 # --------------------------------------------------------------------------- #

@@ -4,8 +4,6 @@ import re
 import urllib.parse
 from typing import Any
 
-from app.models import SubtitleRelease
-
 # Known technical/spec tokens that are NOT scene/p2p release groups
 _INVALID_GROUPS = {
     "1080p",
@@ -465,179 +463,24 @@ def levenshtein_ratio(s1: str, s2: str) -> float:
     return max(0.0, 1.0 - (distance / max_len))
 
 
-def is_group_match(g1: str | None, g2: str | None) -> bool:
-    """Check if two release groups match (case-insensitive and alias-aware)."""
-    if not g1 or not g2:
-        return False
-    norm1 = g1.strip().lower().replace(".", "")
-    norm2 = g2.strip().lower().replace(".", "")
-    if norm1 == norm2:
-        return True
-    if {norm1, norm2} <= {"yts", "ytsmx", "yify"}:
-        return True
-    return False
 
 
-def is_source_match(s1: str | None, s2: str | None) -> tuple[bool, bool, bool]:
-    """
-    Check source compatibility.
-    Returns: (exact_match, high_compat_match, is_incompatible_penalty)
-    """
-    if not s1 or not s2:
-        return False, False, False
-    s1_norm = s1.strip().lower()
-    s2_norm = s2.strip().lower()
-    if s1_norm == s2_norm:
-        return True, False, False
-    # High compatibility: Remux with BluRay/UHD, WEB-DL with WEBRip
-    if {s1_norm, s2_norm} <= {"remux", "bluray", "uhd"}:
-        return False, True, False
-    if {s1_norm, s2_norm} <= {"web-dl", "webrip"}:
-        return False, True, False
-    # Incompatible penalty: Disc/WEB target with CAM or HDTV
-    if (
-        s1_norm in ("remux", "bluray", "uhd", "web-dl", "webrip") and s2_norm in ("cam", "hdtv")
-    ) or (s2_norm == "cam" and s1_norm != "cam"):
-        return False, False, True
-    return False, False, False
 
 
-def is_codec_audio_match(
-    t_codec: str | None, s_codec: str | None, t_audio: str | None, s_audio: str | None
-) -> bool:
-    """Check if codec or audio attributes match."""
-    if t_codec and s_codec:
-        c1 = t_codec.strip().lower()
-        c2 = s_codec.strip().lower()
-        if c1 == c2:
-            return True
-        if {c1, c2} <= {"x265", "hevc"}:
-            return True
-        if {c1, c2} <= {"x264", "h264", "avc"}:
-            return True
-        if {c1, c2} <= {"dv", "dovi", "dolby vision"}:
-            return True
-    if t_audio and s_audio:
-        a1 = t_audio.strip().lower()
-        a2 = s_audio.strip().lower()
-        if a1 == a2:
-            return True
-        if {a1, a2} <= {"dts-hd", "dts"}:
-            return True
-        if {a1, a2} <= {"ddp5.1", "ddp", "dd5.1", "eac3"}:
-            return True
-        if {a1, a2} <= {"truehd", "atmos"}:
-            return True
-    return False
 
 
-def calculate_compatibility_percentage(
-    target_meta: dict[str, str | None] | str,
-    sub_meta: dict[str, str | None] | str,
-) -> int:
-    """
-    Attribute-Based Weighted Scoring calculation (0 - 100%):
-    - Group Match: +40% (single strongest sync indicator)
-    - Source Match: +25% (exact: +25%, high-compat: +20%, incompatible: -30%)
-    - Resolution Match: +15% (e.g., 2160p with 2160p)
-    - Codec / Audio Match: +10% (e.g., x265/HEVC, DTS-HD, DDP5.1)
-    - Clean Title Match: +10% (normalized title similarity ratio)
-
-    Edge-Case Rules:
-    - If both group and source match, minimum compatibility score guarantees 85%+.
-    - Retain fallback compatibility score for items with no identifiable attributes.
-    - Clamped strictly between 0% and 100%.
-    """
-    if isinstance(target_meta, str):
-        target_meta = parse_release_metadata(target_meta)
-    if isinstance(sub_meta, str):
-        sub_meta = parse_release_metadata(sub_meta)
-
-    score = 0
-
-    # 1. Group Match (+40%)
-    t_group = target_meta.get("group")
-    s_group = sub_meta.get("group")
-    group_match = is_group_match(t_group, s_group)
-    if group_match:
-        score += 40
-
-    # 2. Source Match (+25% / +20% / -30%)
-    t_source = target_meta.get("source")
-    s_source = sub_meta.get("source")
-    exact_src, high_compat_src, src_penalty = is_source_match(t_source, s_source)
-    if exact_src:
-        score += 25
-    elif high_compat_src:
-        score += 20
-    elif src_penalty:
-        score -= 30
-
-    # 3. Resolution Match (+15%)
-    t_res = (target_meta.get("resolution") or "").strip().lower()
-    s_res = (sub_meta.get("resolution") or "").strip().lower()
-    res_match = bool(t_res and s_res and t_res == s_res)
-    if res_match:
-        score += 15
-
-    # 4. Codec / Audio Match (+10%)
-    t_codec = target_meta.get("codec")
-    s_codec = sub_meta.get("codec")
-    t_audio = target_meta.get("audio")
-    s_audio = sub_meta.get("audio")
-    if is_codec_audio_match(t_codec, s_codec, t_audio, s_audio):
-        score += 10
-
-    # 5. Clean Title Match (+10%)
-    t_raw = target_meta.get("raw_filename") or ""
-    s_raw = sub_meta.get("raw_filename") or ""
-    sim_title = levenshtein_ratio(extract_clean_title(t_raw), extract_clean_title(s_raw))
-    sim_full = levenshtein_ratio(clean_subtitle_filename(t_raw), clean_subtitle_filename(s_raw))
-    sim = max(sim_title, sim_full)
-    score += int(round(sim * 10))
-
-    # Edge-case rule 1: If both group and source match, minimum compatibility score guarantees 85%+
-    if group_match and (exact_src or high_compat_src):
-        score = max(score, 85)
-
-    # Edge-case rule 2: Retain fallback compatibility score for items with no identifiable attributes
-    has_sub_attributes = bool(
-        sub_meta.get("group")
-        or sub_meta.get("source")
-        or sub_meta.get("resolution")
-        or sub_meta.get("codec")
-    )
-    if not has_sub_attributes and not src_penalty:
-        fallback = get_source_popularity_percentage(s_raw)
-        score = max(score, fallback)
-
-    return max(0, min(100, score))
+def calculate_compatibility_percentage(target_meta, sub_meta) -> int:
+    """Historical API alias for the sole weighted compatibility engine."""
+    from app.services.release_scoring_integration import compare_metadata
+    return round(compare_metadata(target_meta, sub_meta).ranking_percentage)
 
 
 calculate_match_score = calculate_compatibility_percentage
 
 
 def get_source_popularity_percentage(subtitle_name: str) -> int:
-    """
-    Fallback baseline score (centered around 50%) based on source tier
-    when no target stream filename is available.
-    """
-    meta = parse_release_metadata(subtitle_name)
-    src = (meta.get("source") or "").lower()
-
-    if src == "remux":
-        return 60
-    if src == "bluray":
-        return 55
-    if src == "web-dl":
-        return 50
-    if src == "webrip":
-        return 45
-    if src == "hdtv":
-        return 35
-    if src == "cam":
-        return 10
-    return 40
+    """No invented compatibility when target release evidence is unavailable."""
+    return calculate_compatibility_percentage("", subtitle_name)
 
 
 get_source_popularity_score = get_source_popularity_percentage
@@ -791,34 +634,7 @@ def extract_target_filename(
     return extract_stream_params(extra, query_params)["filename"]
 
 
-def rank_and_sort_subtitles(
-    subtitles: list[SubtitleRelease],
-    target_filename: str | None = None,
-    preferred_languages: list[str] | None = None,
-) -> list[SubtitleRelease]:
-    """
-    Score and strictly sort subtitle releases in descending order by compatibility score.
-    If multiple languages are requested, groups by language order while preserving
-    strict descending score order within each language group.
-    """
-    target_meta = parse_release_metadata(target_filename) if target_filename else None
-
-    for sub in subtitles:
-        if target_meta:
-            sub.score = calculate_compatibility_percentage(target_meta, sub.release_name)
-        else:
-            sub.score = get_source_popularity_percentage(sub.release_name)
-
-    pref_langs = [lang.lower() for lang in (preferred_languages or [])]
-    if len(pref_langs) > 1:
-        lang_order = {lang: i for i, lang in enumerate(pref_langs)}
-        return sorted(
-            subtitles,
-            key=lambda sub: (
-                lang_order.get((getattr(sub, "lang", "") or "").lower(), 999),
-                -sub.score,
-            ),
-        )
-
-    # Strictly descending by computed score
-    return sorted(subtitles, key=lambda sub: sub.score, reverse=True)
+def rank_and_sort_subtitles(subtitles, target_filename=None, preferred_languages=None):
+    """Historical API delegates to authoritative weighted DisplayPolicy."""
+    from app.services.release_scoring_integration import display_order
+    return display_order(target_filename, subtitles, preferred_languages=preferred_languages)

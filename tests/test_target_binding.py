@@ -251,3 +251,253 @@ def test_pal_promotion_and_large_offset_unverified_state():
                                 verification=VerificationAvailability.UNKNOWN, p95_offset_ms=2500)
     assert not SyncOrchestrator._gate_target_binding(legacy, binding)
     assert legacy.sync_state is SyncState.UNVERIFIED and legacy.p95_offset_ms == 2500
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["BluRay", "WEB-DL", "HDTV", "DVD"])
+@pytest.mark.parametrize("mode", ["accepted", "rejected", "conflict", "same_group"])
+@pytest.mark.parametrize("final_state", [SyncState.VERIFIED_RESYNCED, SyncState.PROBABLE_SYNC, SyncState.REJECTED, SyncState.UNVERIFIED])
+async def test_affine_corroborated_same_episode_different_group_alass_handoff(monkeypatch, source, mode, final_state):
+    from app.config import settings
+    from app.services.sync import orchestrator as module
+    from app.services.sync import timeline_affine
+
+    monkeypatch.setattr(settings, "ENABLE_SUBTITLE_SYNC", True)
+    target_name = f"Show.S01E02.1080p.{source}.x264-PiR8.mkv"
+    reference_name = f"Show.S01E02.720p.{source}.x264-ROVERS.srt"
+    if mode == "same_group":
+        reference_name = reference_name.replace("ROVERS", "PiR8")
+    if mode == "conflict":
+        target_name = target_name.replace("1080p", "Directors.Cut.1080p")
+        reference_name = reference_name.replace("720p", "Theatrical.Cut.720p")
+    binding = classify_target_binding(target_name, reference_name)
+    assert binding.state is (TargetBinding.STRONG if mode == "same_group" else
+                             TargetBinding.CONFLICT if mode == "conflict" else TargetBinding.WEAK)
+
+    class External:
+        cache = None
+
+        async def resolve_with_provenance(self, query, **kwargs):
+            return ResolvedReference(text("reference"), kind="edition", candidate=reference_name)
+
+    def affine(*args):
+        return AffineResult(accepted=mode != "rejected", transformed_text=text("affine"),
+                            evaluation=SubtitleEvaluation(sync_state=SyncState.VERIFIED_RESYNCED,
+                                verification=VerificationAvailability.VERIFIED))
+
+    monkeypatch.setattr(timeline_affine, "attempt_timeline_affine", affine)
+    monkeypatch.setattr(module, "measure_alignment_consistency", lambda *a, **kw: None)
+    alass_calls = []
+
+    async def alass(*args, **kwargs):
+        alass_calls.append(args)
+        return text("alass")
+
+    orch = SyncOrchestrator(external_strategy=External(), sync_cache=SyncCache(),
+                            sync_service=SimpleNamespace(sync_async=alass))
+    orch._analyzer = SimpleNamespace(analyze=lambda *a, **kw: SubtitleEvaluation(
+        sync_state=final_state, verification=(VerificationAvailability.VERIFIED
+            if final_state in {SyncState.VERIFIED_RESYNCED, SyncState.PROBABLE_SYNC} else VerificationAvailability.UNKNOWN)))
+    original = text("original").encode()
+    try:
+        result = await orch.evaluate_and_sync(original, {"imdb_id": "tt1234567", "lang": "ara",
+            "media_type": "series", "season": 1, "episode": 2,
+            "target_filename": target_name}, "target", auto_sync=True)
+        assert len(alass_calls) == (1 if mode in {"accepted", "rejected"} else 0)
+        if mode == "same_group":
+            assert result == text("affine").encode()
+            assert orch._last_evaluation.target_binding == "strong"
+        elif mode in {"accepted", "rejected"}:
+            assert result == (text("alass").encode() if final_state in {SyncState.VERIFIED_RESYNCED, SyncState.PROBABLE_SYNC} else original)
+            assert orch._last_evaluation.target_binding == "weak"
+            if final_state in {SyncState.VERIFIED_RESYNCED, SyncState.PROBABLE_SYNC}:
+                reason = "affine_reference_corroborated" if mode == "accepted" else "source_family_reference_verified"
+                assert reason in orch._last_evaluation.reasons
+        else:
+            assert result == original
+    finally:
+        await orch._boundary_shadow.close()
+
+
+@pytest.mark.parametrize("reference", [
+    "Show.S01.720p.BluRay.x264-ROVERS.srt",  # Episode not proven.
+    "Show.S01E03.720p.BluRay.x264-ROVERS.srt",
+    "Show.S02E02.720p.BluRay.x264-ROVERS.srt",
+    "Show.S01E02.720p.WEB-DL.x264-ROVERS.srt",
+    "Show.S01E02.Criterion.720p.BluRay.x264-ROVERS.srt",
+    "Other.S01E02.720p.BluRay.x264-ROVERS.srt",
+    "Show.S01E02.720p.BluRay.HDTV.x264-ROVERS.srt",
+])
+def test_affine_weak_handoff_cannot_guess_identity_or_edition(reference):
+    binding = classify_target_binding("Show.S01E02.1080p.BluRay.x264-PiR8.mkv", reference)
+    assert not SyncOrchestrator._affine_corroborates_weak_binding(binding)
+
+
+def test_affine_weak_handoff_never_promotes_without_verified_final_evidence():
+    binding = classify_target_binding("Show.S01E02.1080p.BluRay.x264-PiR8.mkv",
+                                     "Show.S01E02.720p.BluRay.x264-ROVERS.srt")
+    for state, availability in [(SyncState.VERIFIED_RESYNCED, VerificationAvailability.PREDICTED),
+                                 (SyncState.UNVERIFIED, VerificationAvailability.UNKNOWN),
+                                 (SyncState.VERIFIED_RESYNCED, VerificationAvailability.CACHED)]:
+        evaluation = SubtitleEvaluation(sync_state=state, verification=availability)
+        assert not SyncOrchestrator._gate_target_binding(evaluation, binding, affine_reference_corroborated=True)
+    evaluation = SubtitleEvaluation(sync_state=SyncState.VERIFIED_RESYNCED,
+                                   verification=VerificationAvailability.VERIFIED)
+    assert not SyncOrchestrator._gate_target_binding(evaluation, binding)
+    assert binding.state is TargetBinding.WEAK and not binding.supports_verified
+
+
+
+@pytest.mark.asyncio
+async def test_affine_corroboration_is_not_shared_between_reference_attempts(monkeypatch):
+    from app.config import settings
+    from app.services.sync import orchestrator as module
+    from app.services.sync import timeline_affine
+
+    monkeypatch.setattr(settings, "ENABLE_SUBTITLE_SYNC", True)
+    monkeypatch.setattr(module, "measure_alignment_consistency", lambda *a, **kw: None)
+    references = ["Show.S01E02.720p.BluRay.x264-ROVERS.srt",
+                  "Show.S01E02.720p.BluRay.x264-DEMAND.srt"]
+    affine_calls = []
+
+    def affine(*args):
+        affine_calls.append(args)
+        return AffineResult(accepted=len(affine_calls) == 1, transformed_text=text("affine"),
+                            evaluation=SubtitleEvaluation(sync_state=SyncState.VERIFIED_RESYNCED,
+                                verification=VerificationAvailability.VERIFIED))
+
+    monkeypatch.setattr(timeline_affine, "attempt_timeline_affine", affine)
+
+    class External:
+        cache = None
+
+        async def plan_candidates(self, q):
+            return [(r, self) for r in references]
+
+        async def download_planned_candidate(self, release, provider, query, validate, shared):
+            return ResolvedReference(text("reference"), kind="edition", candidate=release)
+
+    alass_calls = []
+
+    async def alass(*args, **kwargs):
+        alass_calls.append(args)
+        return text("alass")
+
+    orch = SyncOrchestrator(external_strategy=External(), sync_cache=SyncCache(),
+                            sync_service=SimpleNamespace(sync_async=alass))
+    orch._analyzer = SimpleNamespace(analyze=lambda *a, **kw: SubtitleEvaluation(
+        sync_state=SyncState.REJECTED, verification=VerificationAvailability.UNKNOWN))
+    original = text("original").encode()
+    try:
+        result = await orch.evaluate_and_sync(original, {"imdb_id": "tt1234567", "lang": "ara",
+            "media_type": "series", "season": 1, "episode": 2,
+            "target_filename": "Show.S01E02.1080p.BluRay.x264-PiR8.mkv"}, "target", auto_sync=True)
+        assert result == original
+        assert len(affine_calls) == 2 and len(alass_calls) == 2
+    finally:
+        await orch._boundary_shadow.close()
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("availability", [VerificationAvailability.VERIFIED, VerificationAvailability.CACHED])
+async def test_weak_affine_handoff_requires_fresh_verified_evidence(monkeypatch, availability):
+    from app.services.sync import timeline_affine
+    from app.services.sync.target_binding import BindingAssessment
+
+    evaluation = SubtitleEvaluation(sync_state=SyncState.VERIFIED_RESYNCED, verification=availability)
+    monkeypatch.setattr(timeline_affine, "attempt_timeline_affine", lambda *a: AffineResult(
+        accepted=True, transformed_text=text("affine"), evaluation=evaluation))
+    orch = SyncOrchestrator()
+    result = await orch._try_timeline_affine(text("original"), ResolvedReference(text("reference"),
+        kind="edition", candidate="Show.S01E02.720p.BluRay.x264-ROVERS.srt"),
+        {"target_filename": "Show.S01E02.1080p.BluRay.x264-PiR8.mkv"}, "target", "sha", "key", None)
+    if availability is VerificationAvailability.VERIFIED:
+        assert isinstance(result, BindingAssessment)
+        assert evaluation.verification is VerificationAvailability.VERIFIED
+    else:
+        assert result is None
+
+
+@pytest.mark.parametrize("reference", [
+    "Show.S01.720p.BluRay.x264-ROVERS.srt",
+    "Show.S01E03.720p.BluRay.x264-ROVERS.srt",
+    "Show.S02E02.720p.BluRay.x264-ROVERS.srt",
+    "Show.S01E02.720p.HDTV.x264-ROVERS.srt",
+    "Show.S01E02.Directors.Cut.720p.BluRay.x264-ROVERS.srt",
+    "Other.S01E02.720p.BluRay.x264-ROVERS.srt",
+])
+def test_alass_source_family_exception_cannot_override_identity(reference):
+    binding = classify_target_binding("Show.S01E02.1080p.BluRay.x264-PiR8.mkv", reference)
+    evaluation = SubtitleEvaluation(sync_state=SyncState.VERIFIED_RESYNCED,
+                                    verification=VerificationAvailability.VERIFIED)
+    assert not SyncOrchestrator._gate_target_binding(
+        evaluation, binding, source_family_reference_verified=True)
+
+
+@pytest.mark.parametrize("availability", [VerificationAvailability.UNKNOWN,
+                                          VerificationAvailability.CACHED])
+def test_alass_source_family_exception_requires_fresh_verified_verdict(availability):
+    binding = classify_target_binding("Show.S01E02.1080p.BluRay.x264-PiR8.mkv",
+                                     "Show.S01E02.720p.BluRay.x264-ROVERS.srt")
+    evaluation = SubtitleEvaluation(sync_state=SyncState.VERIFIED_RESYNCED,
+                                    verification=availability)
+    assert not SyncOrchestrator._gate_target_binding(
+        evaluation, binding, source_family_reference_verified=True)
+
+
+@pytest.mark.parametrize("season,episode,allowed", [(8, 1, True), (8, 2, False), (7, 1, False), (None, None, False), (8, None, False)])
+def test_season_pack_binding_uses_only_proven_member_identity(season, episode, allowed):
+    resolved = ResolvedReference(text("reference"), kind="edition",
+        candidate="Dexter.S08.1080p.BluRay.x264-ROVERS.srt",
+        member_season=season, member_episode=episode)
+    binding = SyncOrchestrator._target_binding(resolved, {
+        "target_filename": "Dexter.S08E01.1080p.BluRay.x264-PiR8.mkv"})
+    assert SyncOrchestrator._affine_corroborates_weak_binding(binding) is allowed
+    assert resolved.candidate == "Dexter.S08.1080p.BluRay.x264-ROVERS.srt"
+
+
+def test_member_identity_cannot_silently_override_explicit_filename():
+    resolved = ResolvedReference(text("reference"), kind="edition",
+        candidate="Dexter.S08E01.1080p.BluRay.x264-ROVERS.srt",
+        member_season=8, member_episode=2)
+    binding = SyncOrchestrator._target_binding(resolved, {
+        "target_filename": "Dexter.S08E01.1080p.BluRay.x264-PiR8.mkv"})
+    assert binding.state is TargetBinding.UNKNOWN
+    assert "episode" in binding.reference.ambiguous_fields
+    assert not SyncOrchestrator._affine_corroborates_weak_binding(binding)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_state", [SyncState.VERIFIED_RESYNCED, SyncState.REJECTED])
+async def test_extracted_season_pack_reaches_alass_after_affine_rejects(monkeypatch, final_state):
+    from app.config import settings
+    from app.services.sync import orchestrator as module
+    from app.services.sync import timeline_affine
+    monkeypatch.setattr(settings, "ENABLE_SUBTITLE_SYNC", True)
+    monkeypatch.setattr(timeline_affine, "attempt_timeline_affine", lambda *a: AffineResult())
+    monkeypatch.setattr(module, "measure_alignment_consistency", lambda *a, **kw: None)
+    class External:
+        cache = None
+        async def resolve_with_provenance(self, query, **kwargs):
+            return ResolvedReference(text("reference"), kind="edition",
+                candidate="Dexter.S08.1080p.BluRay.x264-ROVERS.srt", member_season=8, member_episode=1)
+    calls = []
+    async def alass(*args, **kwargs):
+        calls.append(args)
+        return text("alass")
+    orch = SyncOrchestrator(external_strategy=External(), sync_cache=SyncCache(),
+                            sync_service=SimpleNamespace(sync_async=alass))
+    orch._analyzer = SimpleNamespace(analyze=lambda *a, **kw: SubtitleEvaluation(
+        sync_state=final_state, verification=VerificationAvailability.VERIFIED
+            if final_state is SyncState.VERIFIED_RESYNCED else VerificationAvailability.UNKNOWN))
+    original = text("original").encode()
+    try:
+        result = await orch.evaluate_and_sync(original, {"imdb_id": "tt0773262", "media_type": "series",
+            "season": 8, "episode": 1, "lang": "ara",
+            "target_filename": "Dexter.S08E01.1080p.BluRay.x264-PiR8.mkv"}, "target", auto_sync=True)
+        assert len(calls) == 1
+        assert result == (text("alass").encode() if final_state is SyncState.VERIFIED_RESYNCED else original)
+    finally:
+        await orch.close()

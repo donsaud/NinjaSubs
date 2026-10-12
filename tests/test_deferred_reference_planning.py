@@ -48,6 +48,10 @@ class External(ExternalExactStrategy):
         finally:
             self.cleaned = True
 
+    def _download_allowed(self, candidate, provider, query):
+        # This scheduling double supplies opaque tokens, not provider metadata.
+        return True
+
     async def _download_candidate(self, candidate, provider, query):
         self.downloads.append(candidate)
         return ResolvedReference(subtitle(candidate), kind="edition", candidate=candidate)

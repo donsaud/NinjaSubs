@@ -1,31 +1,9 @@
-"""Reference Selection v2 - SHADOW ONLY. Not used for production references.
+"""Downloaded-reference health observations and target-binding safety.
 
-The current selector commits to the first candidate that passes cue sanity, in
-its own ``reference_tier`` ladder. That ladder is a *second* ranking system
-alongside ``MatchTier``, and the two can disagree. This module builds the
-alternative policy, runs it beside the existing one, and records where they
-diverge - without changing which reference the synchronizer actually uses.
-
-The objective is deliberately not "the subtitle the user should watch". It is
-"the subtitle that is safest to use as a timing anchor". A provider with
-excellent translation may be a poor reference; a mediocre user-facing subtitle
-may be an excellent reference.
-
-Design constraints honoured here:
-
-* **No new content matcher.** Content identity comes from the existing
-  ``hard_compatibility_filter`` and ``calculate_compatibility``, so v2 consumes
-  ``MatchTier`` rather than inventing a third ladder.
-* **Hard rejections are absolute.** A wrong episode cannot be rescued by health,
-  consensus, independence, or provider reputation.
-* **Lexicographic, not a mega-score.** Content identity dominates; health only
-  breaks ties between candidates that are already comparable on content.
-* **Reference-specific quality gates.** A subtitle acceptable to show a user may
-  still be unsafe as a timing anchor (credits-only, sparse dialogue).
-* **Duplicate timing grids are recorded, not rejected.** Three providers
-  serving one file is one timing model, but it is still a usable reference.
-* **Nothing here can create verification.** Reference trust is an input to
-  selection, never proof on its own.
+This historical module name predates Release Matching V2. Release order now
+comes exclusively from weighted ReferencePolicy. Dialogue health, structural
+measurements and the existing anti-circularity veto remain independent safety
+observations; none creates verification or a second release score.
 """
 
 from __future__ import annotations
@@ -93,6 +71,8 @@ class ReferenceCandidate(BaseModel):
     """One downloaded candidate, judged for use as a timing anchor."""
 
     subtitle_id: str
+    weighted_key: tuple[Any, ...] = Field(default_factory=tuple)
+    content_score: int = 0
     release_name: str
     provider: str | None = None
     is_hash_match: bool = False
@@ -114,17 +94,8 @@ class ReferenceCandidate(BaseModel):
         return self.hard_accepted and self.health_class != "unusable"
 
     def sort_key(self) -> tuple:
-        """Lexicographic ordering. Content identity dominates everything else."""
-        return (
-            0 if self.eligible else 1,
-            int(self.match_tier),
-            0 if self.cache_verified else 1,
-            _TRUST_ORDER.get(self.trust, 3),
-            _HEALTH_ORDER.get(self.health_class, 2),
-            -(self.health.dialogue_cues or 0),
-            str(self.provider or ""),
-            self.release_name,
-        )
+        """Weighted release order; health only controls existing anchor eligibility."""
+        return (0 if self.eligible else 1, self.weighted_key, str(self.provider or ""), self.release_name)
 
     def explain(self) -> str:
         return (
@@ -198,6 +169,11 @@ def build_candidates(
             release_name=name,
             provider=provider,
         )
+        from app.services.release_scoring.policies import ReferencePolicy
+        from app.services.release_scoring_integration import compare_metadata
+        weighted = compare_metadata(target_filename or "", name)
+        candidate.weighted_key = ReferencePolicy(discovery=True).key(weighted)
+        candidate.content_score = weighted.score
         candidate.structural_profile = StructuralProfile.from_subtitle(text)
         candidate.health = analyze_reference_health(text)
         candidate.health_class = _health_class(candidate.health)
@@ -273,16 +249,7 @@ def select_reference_v2(
     selection.chosen = ranked[0]
     selection.reasons.append(f"selected {ranked[0].explain()}")
     if len(ranked) > 1:
-        runner = ranked[1]
-        if runner.match_tier == ranked[0].match_tier:
-            selection.reasons.append(
-                f"same match tier as {runner.subtitle_id}; health decided"
-            )
-        else:
-            selection.reasons.append(
-                f"match tier {ranked[0].match_tier.name} outranks "
-                f"{runner.subtitle_id} on {runner.match_tier.name}"
-            )
+        selection.reasons.append("weighted release key determines ordering; health/trust remain diagnostic")
     return selection
 
 
@@ -511,47 +478,6 @@ def classify_shadow_switch(
     return labels
 
 
-def find_tier_contradictions(
-    target_filename: str | None,
-    references: Sequence[tuple[str, str | None, str | None]],
-) -> list[dict[str, Any]]:
-    """Where ``MatchTier`` and the legacy ``reference_tier`` disagree.
-
-    Reported, never acted on. Two ladders disagreeing is exactly the drift risk
-    that motivated consuming ``MatchTier`` here.
-    """
-    from app.services.sync.external_strategy import reference_tier
-
-    if not target_filename:
-        return []
-    target_meta = extract_metadata(target_filename)
-    rows: list[dict[str, Any]] = []
-    for provider, name, _text in references:
-        name = name or ""
-        compat = calculate_compatibility(target_meta, name)
-        legacy_tier = reference_tier(target_filename, _Legacy(name, provider))
-        rows.append(
-            {
-                "provider": provider,
-                "release_name": name,
-                "match_tier": compat.match_tier.name,
-                "reference_tier": int(legacy_tier),
-                "agree": _tiers_agree(compat.match_tier, legacy_tier),
-            }
-        )
-    return rows
-
-
-class _Legacy:
-    """Minimal shim so ``reference_tier`` can read a bare candidate."""
-
-    def __init__(self, release_name: str, provider: str | None) -> None:
-        self.release_name = release_name
-        self.provider = provider or ""
-        self.is_hash_match = False
-        self.matched_by_hash = False
-        self.hearing_impaired = False
-        self.lang = "eng"
 
 
 _TIER_BANDS: Mapping[MatchTier, int] = {
@@ -575,29 +501,13 @@ def tier_band(match_tier: MatchTier) -> int:
     return _TIER_BANDS.get(match_tier, 3)
 
 
-def _tiers_agree(match_tier: MatchTier, legacy_tier: int) -> bool:
-    """Map both ladders onto a coarse scale and compare.
-
-    MatchTier: 0 HASH, 1 EXACT, 2 SOURCE_FAMILY, 3 CLOSE, 4 FALLBACK.
-    reference_tier: 0 HASH, 1 EXACT_GROUP, 2 SOURCE_EDITION, 3 FALLBACK.
-    HASH and the strong-identity bands correspond; the tails are coarser in
-    reference_tier, so CLOSE and FALLBACK are treated as equivalent.
-    """
-    band = {
-        MatchTier.HASH: 0,
-        MatchTier.EXACT: 1,
-        MatchTier.SOURCE_FAMILY: 2,
-        MatchTier.CLOSE: 3,
-        MatchTier.FALLBACK: 3,
-    }[match_tier]
-    return band == min(legacy_tier, 3)
 
 # ---------------------------------------------------------------------------
 # TARGET-BOUND SELECTION (promoted policy)
 # ---------------------------------------------------------------------------
 #
 # The shadow selector above already makes a target-bound choice: its ordering
-# is content identity, health and trust, and it never sees a subtitle the user
+# uses the weighted release key, and it never sees a subtitle the user
 # asked for. What it lacked was a rule for what happens when a reference is
 # *rejected* against that candidate, and that rule is the whole production bug.
 #
@@ -635,6 +545,7 @@ class ReferenceAttempt(BaseModel):
     """One reference the resolver fetched, and what happened to it."""
 
     reference_id: str
+    weighted_key: tuple[Any, ...] = Field(default_factory=tuple)
     release_name: str
     provider: str | None = None
     match_tier: MatchTier = MatchTier.FALLBACK
@@ -738,9 +649,9 @@ def decide_target_bound_reference(
         selected = min(
             admissible,
             key=lambda a: (
-                int(a.match_tier),
-                0 if a.health_class != "unusable" else 1,
-                a.reference_id,
+                a.weighted_key,
+                str(a.provider or ""),
+                a.release_name,
             ),
         )
         decision.selected = selected

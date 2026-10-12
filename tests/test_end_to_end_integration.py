@@ -165,7 +165,9 @@ async def test_e2e_tv_house_of_the_dragon_ranking_and_rejection(client):
             # 6. Arabic candidates remain ahead of English candidates
             scores = [int(s["title"].split("%", 1)[0][1:]) for s in subtitles]
             assert scores == sorted(scores, reverse=True)
-            assert subtitles[0]["lang"] == "ara" and subtitles[1]["lang"] == "eng"
+            assert subtitles[0]["lang"] == "ara"
+            # Compatibility precedes language; equal scores retain requested preference.
+            assert {x["lang"] for x in subtitles} == {"ara", "eng"}
 
 
 
@@ -393,60 +395,6 @@ async def test_e2e_anime_one_piece_ranking_and_rejection(client):
 # ============================================================================
 
 
-@pytest.mark.asyncio
-async def test_e2e_exact_hash_priority_over_filename_match(client):
-    """Exact binary hash match must rank #1 ahead of even an exact filename match without hash."""
-    mock_subs = [
-        SubtitleRelease(
-            release_name="Movie.2024.1080p.BluRay.x264-FLUX.srt",
-            download_url="https://provider.test/file_match.srt",
-            provider="subdl",
-            lang="ara",
-            is_hash_match=False,
-        ),
-        SubtitleRelease(
-            release_name="Movie.Different.Filename.srt",
-            download_url="https://provider.test/hash_match.srt",
-            provider="opensubtitles",
-            lang="ara",
-            is_hash_match=True,  # Exact OpenSubtitles / MovieHash match
-        ),
-    ]
-
-    target_video = "Movie.2024.1080p.BluRay.x264-FLUX.mkv"
-
-    with patch("app.main._http_client", new_callable=AsyncMock):
-        with (
-            patch(
-                "app.providers.subdl.SubdlProvider.search_subtitles",
-                new=AsyncMock(return_value=[mock_subs[0]]),
-            ),
-            patch(
-                "app.providers.subsource.SubsourceProvider.search_subtitles",
-                new=AsyncMock(return_value=[]),
-            ),
-            patch(
-                "app.providers.opensubtitles.OpenSubtitlesProvider.search_subtitles",
-                new=AsyncMock(return_value=[mock_subs[1]]),
-            ),
-            patch(
-                "app.providers.cinemeta.CinemetaClient.get_metadata",
-                new=AsyncMock(return_value=None),
-            ),
-        ):
-            extra = f"filename={target_video}&videoHash=0123456789abcdef"
-            cfg_hash = encode_user_config(enable_opensubtitles=True)
-            resp = client.get(f"/{cfg_hash}/subtitles/movie/tt9999999/{extra}.json?nocache=1")
-            assert resp.status_code == 200
-
-            subtitles = resp.json()["subtitles"]
-            assert len(subtitles) == 2
-
-            # Hash match must be rank 1 (index 0) with the Exact Hash label
-            assert subtitles[0]["title"].startswith("[100%] [OpenSubtitles] ")
-            assert get_release_name(subtitles[0]) == "Movie.Different.Filename.srt"
-            assert subtitles[1]["title"] == "[91%] [SubDL] Movie.2024.1080p.BluRay.x264-FLUX"
-            assert get_release_name(subtitles[1]) == "Movie.2024.1080p.BluRay.x264-FLUX.srt"
 
 
 # ============================================================================

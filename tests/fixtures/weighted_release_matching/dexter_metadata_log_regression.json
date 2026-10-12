@@ -1,0 +1,55 @@
+{
+  "case_id": "dexter_metadata_log_regression",
+  "provenance": "USER_SUPPLIED_RELEASE_LABELS",
+  "provenance_note": "User supplied identity/release example with synthetic comparison candidates; no source-log or REAL timing proof claimed.",
+  "target": {
+    "filename": "Dexter.2006.S08E01.BluRay.1080p.TrueHD.5.1.AVC.REMUX-FraMeSToR-AsRequested.mkv",
+    "metadata": {
+      "media_type": "series",
+      "season": 8,
+      "episode": 1
+    }
+  },
+  "candidates": [
+    {
+      "id": "rovers",
+      "provider": "subdl",
+      "provider_id": "rovers",
+      "release_names": [
+        "Dexter.S08.1080p.BluRay.x264-ROVERS"
+      ],
+      "language": "ara"
+    },
+    {
+      "id": "demand",
+      "provider": "subdl",
+      "provider_id": "demand",
+      "release_names": [
+        "Dexter.S08.BDRip.x264-DEMAND"
+      ],
+      "language": "ara"
+    },
+    {
+      "id": "web",
+      "provider": "subdl",
+      "provider_id": "web",
+      "release_names": [
+        "Dexter.S08.1080p.WEB-DL.DD5.1.H.264-BS"
+      ],
+      "language": "ara"
+    }
+  ],
+  "expected": {
+    "discovery_order": [
+      "rovers",
+      "demand",
+      "web"
+    ],
+    "reference_order": [],
+    "display_order": [
+      "rovers",
+      "demand",
+      "web"
+    ]
+  }
+}

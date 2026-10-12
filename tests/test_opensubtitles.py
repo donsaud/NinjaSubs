@@ -215,7 +215,7 @@ async def test_hash_priority_requires_requested_hash_and_boolean_confirmation(
     from app.services.subtitle_matcher import rank_subtitles
 
     ranked = rank_subtitles("Show.S01E02.WEB-DL", results)
-    assert bool(ranked) is expected
+    assert ranked == []  # Even real hash evidence cannot override a wrong known episode.
 
 
 @pytest.mark.asyncio

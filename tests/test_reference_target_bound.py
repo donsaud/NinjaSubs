@@ -62,7 +62,11 @@ def attempt(
     hard_accepted: bool = True,
     provider: str | None = "p1",
 ) -> ReferenceAttempt:
+    from app.services.release_scoring.policies import ReferencePolicy
+    from app.services.release_scoring_integration import compare_metadata
+    weighted = ReferencePolicy(discovery=True).key(compare_metadata(TARGET, name))
     return ReferenceAttempt(
+        weighted_key=weighted,
         reference_id=name[:16],
         release_name=name,
         provider=provider,

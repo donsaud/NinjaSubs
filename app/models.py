@@ -95,6 +95,9 @@ class SubtitleRelease(BaseModel):
     lang: str = "ara"
     score: int = 0
     match_percentage: int = 0
+    # Independent provider evidence for the authoritative weighted matcher.
+    release_evidence: list[dict[str, Any]] = Field(default_factory=list, repr=False)
+    weighted_key: tuple[Any, ...] = Field(default_factory=tuple, repr=False, exclude=True)
     # MovieHash provenance flags.
     #
     # StrictBool, not bool: these two fields are the *sole* carrier of "this

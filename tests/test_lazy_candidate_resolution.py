@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.services.release_scoring_integration import record
 from app.services.sync import orchestrator as om
 from app.services.sync.external_strategy import ExternalExactStrategy
 from app.services.sync.orchestrator import SyncOrchestrator
@@ -45,7 +46,14 @@ def _rel(name: str, **kw):
 
     base = {"release_name": name, "download_url": f"/sub/x/{name}", "provider": "subdl"}
     base.update(kw)
-    return SubtitleRelease(**base)
+    result = SubtitleRelease(**base)
+    evidence = record(result)
+    # Synthetic fixture aliases are independently declared to be this movie.
+    # Acquisition is mocked; this is never captured or classified as REAL.
+    evidence["metadata"].update(imdb_id="tt2582802", imdb_verified=True)
+    evidence["metadata"].setdefault("source", "bluray")
+    result.release_evidence = [evidence]
+    return result
 
 
 class _FakeProvider:

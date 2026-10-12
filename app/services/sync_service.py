@@ -353,6 +353,23 @@ def sanitize_subtitle(text: str) -> str:
     return normalize_srt_blocks(text)
 
 
+def prepare_alass_target(target_srt: str) -> str:
+    """Return the exact working target ALASS aligns (sanitized + ad-cleaned).
+
+    Extracted verbatim from :meth:`SubtitleSyncService.sync` so the
+    verification boundary can re-derive the identical bytes without drift.
+    No behavior change: callers of ``sync`` observe the same input.
+    """
+    target_srt = sanitize_subtitle(target_srt)
+    # Pre-clean promotional URLs and ads from target so they don't skew speech alignment in alass
+    from app.utils.cleaners import strip_advertisements
+
+    cleaned_target = strip_advertisements(target_srt, keep_translator_credits=True)
+    if _valid_cue_count(cleaned_target) >= _MIN_VALID_CUES:
+        target_srt = cleaned_target
+    return target_srt
+
+
 def normalize_srt_blocks(text: str) -> str:
     """Strip inline tags, normalise timespans, drop empty cues, and re-index SRT blocks."""
     text = _INLINE_ASS_TAG_REGEX.sub("", text)
@@ -515,13 +532,9 @@ class SubtitleSyncService:
             )
             return None
 
-        target_srt = sanitize_subtitle(target_srt)
-        # Pre-clean promotional URLs and ads from target so they don't skew speech alignment in alass
-        from app.utils.cleaners import strip_advertisements
+        target_srt = prepare_alass_target(target_srt)
 
-        cleaned_target = strip_advertisements(target_srt, keep_translator_credits=True)
-        if _valid_cue_count(cleaned_target) >= _MIN_VALID_CUES:
-            target_srt = cleaned_target
+        from app.utils.cleaners import strip_advertisements
 
         cleaned_ref = strip_advertisements(strip_sdh(reference_srt), keep_translator_credits=False)
         reference = sanitize_subtitle(cleaned_ref)

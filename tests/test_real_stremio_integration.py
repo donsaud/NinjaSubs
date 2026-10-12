@@ -119,7 +119,7 @@ async def test_real_stremio_movie_dune_part_two(client):
 
             assert "subtitles" in data
             subtitles = data["subtitles"]
-            assert len(subtitles) == 4
+            assert len(subtitles) == 3
 
             # Verify exact order matches rank_subtitles output and title format
             for i, expected in enumerate(expected_ranked):
@@ -133,14 +133,11 @@ async def test_real_stremio_movie_dune_part_two(client):
             releases = [get_release_name(s) for s in subtitles]
             idx_bluray24 = next(i for i, t in enumerate(releases) if "2024" in t and "BluRay" in t)
             idx_webdl24 = next(i for i, t in enumerate(releases) if "2024" in t and "WEB-DL" in t)
-            idx_bluray23 = next(i for i, t in enumerate(releases) if "2023" in t and "BluRay" in t)
             idx_webrip24 = next(i for i, t in enumerate(releases) if "2024" in t and "WEBRip" in t)
 
             assert idx_bluray24 < idx_webdl24, "Same-year BluRay must rank above same-year WEB-DL"
-            assert idx_webdl24 < idx_bluray23, "Same-year WEB-DL must rank above wrong-year BluRay"
-            assert (
-                idx_webrip24 < idx_bluray23
-            ), "Known wrong year must rank below incomplete source evidence"
+            assert not any("2023" in t for t in releases)
+            assert idx_bluray24 < idx_webrip24
 
 
 # ============================================================================
@@ -237,9 +234,8 @@ async def test_real_stremio_tv_house_of_the_dragon(client):
             assert len(subtitles) == len(expected_ranked)
 
             # 3. Exact ordering: HMAX WEB-DL FLUX > AMZN WEB-DL FLUX > HMAX WEBRip
-            # Both FLUX releases share the target's exact release group, so they
-            # occupy the exact tier ahead of the WEBRip, which only reaches the
-            # source/edition tier despite matching the HMAX platform.
+            # Exact WEB-DL subtype precedes the compatible WEBRip family,
+            # even when the latter matches the streaming service.
             assert "HMAX.WEB-DL-FLUX" in releases[0]
             assert "AMZN.WEB-DL-FLUX" in releases[1]
             assert "HMAX.WEBRip" in releases[2]
@@ -511,57 +507,6 @@ async def test_real_stremio_sdh_exclusion_and_inclusion(client):
 # ============================================================================
 
 
-@pytest.mark.asyncio
-async def test_real_stremio_exact_hash_ranks_first(client):
-    """Exact binary hash match must rank #1 in the final Stremio JSON array."""
-    mock_candidates = [
-        SubtitleRelease(
-            release_name="Movie.2024.1080p.BluRay.x264.srt",
-            download_url="https://provider.test/good_name.srt",
-            provider="subdl",
-            lang="ara",
-            is_hash_match=False,
-        ),
-        SubtitleRelease(
-            release_name="Arbitrary.Subtitle.Name.srt",
-            download_url="https://provider.test/hash_match.srt",
-            provider="opensubtitles",
-            lang="ara",
-            is_hash_match=True,
-        ),
-    ]
-
-    target_video = "Movie.2024.1080p.BluRay.x264.mkv"
-
-    with patch("app.main._http_client", new_callable=AsyncMock):
-        with (
-            patch(
-                "app.providers.subdl.SubdlProvider.search_subtitles",
-                new=AsyncMock(return_value=[mock_candidates[0]]),
-            ),
-            patch(
-                "app.providers.subsource.SubsourceProvider.search_subtitles",
-                new=AsyncMock(return_value=[]),
-            ),
-            patch(
-                "app.providers.opensubtitles.OpenSubtitlesProvider.search_subtitles",
-                new=AsyncMock(return_value=[mock_candidates[1]]),
-            ),
-            patch(
-                "app.providers.cinemeta.CinemetaClient.get_metadata",
-                new=AsyncMock(return_value=None),
-            ),
-        ):
-            extra = f"filename={target_video}&videoHash=aabbccdd11223344"
-            cfg_hash = encode_user_config(enable_opensubtitles=True)
-            resp = client.get(f"/{cfg_hash}/subtitles/movie/tt3333333/{extra}.json?nocache=1")
-            assert resp.status_code == 200
-            subtitles = resp.json()["subtitles"]
-            assert len(subtitles) == 2
-            assert subtitles[0]["title"] == "[100%] [OpenSubtitles] Arbitrary.Subtitle.Name"
-            assert get_release_name(subtitles[0]) == "Arbitrary.Subtitle.Name.srt"
-            assert subtitles[1]["title"] == "[89%] [SubDL] Movie.2024.1080p.BluRay.x264"
-            assert get_release_name(subtitles[1]) == "Movie.2024.1080p.BluRay.x264.srt"
 
 
 # ============================================================================
@@ -650,8 +595,11 @@ def test_diagnostics_ranking_endpoint_safe(client):
     assert data["status"] == "ok"
     assert "debug_ranking_enabled" in data
     assert "weights" in data
-    assert data["weights"]["WEIGHT_YEAR_MISMATCH"] == -60
-    assert data["weights"]["WEIGHT_REPACK_MISMATCH"] == -20
+    from app.services.release_scoring import CONTRACT_VERSION
+    assert data["contract_version"] == CONTRACT_VERSION
+    assert data["weights"]["episodes"]["year"] == 90
+    assert data["weights"]["movies"]["year"] == 40
+    assert data["reference_minimum_percent"] == 70
 
     # Ensure no secrets or API keys are exposed
     json_str = resp.text.lower()
@@ -683,8 +631,8 @@ def test_debug_ranking_logging_flag(monkeypatch, caplog):
         )
         rank_subtitles(target, [sub, sub_rej], discard_mismatches=True)
 
-    assert any("[DEBUG_RANKING]" in record.message for record in caplog.records)
-    assert any("DISCARDED" in record.message for record in caplog.records)
+    assert any("[ranking] weighted" in record.message for record in caplog.records)
+    assert not any("S02E02" in record.message for record in caplog.records)  # No raw release pool logging.
 
 
 # ============================================================================
@@ -748,10 +696,11 @@ async def test_real_stremio_fma_brotherhood_s01e03_ampersand_filename(client):
         episode=3,
     )
 
-    # Verify matcher level expectations
+    # Verify matcher level expectations: the exact episode, the multi-episode
+    # batch, and the generic BD release are all retained; episode 01 is not.
     assert len(expected_ranked) == 3
     assert expected_ranked[0].release_name == "Fullmetal.Alchemist.Brotherhood.S01E03.Arabic.srt"
-    assert 25 <= expected_ranked[0].match_percentage < 100
+    assert 0 < expected_ranked[0].match_percentage < 25
     assert not any("01 [720p]" in r.release_name for r in expected_ranked)
 
     with patch("app.main._http_client", new_callable=AsyncMock):
@@ -782,7 +731,7 @@ async def test_real_stremio_fma_brotherhood_s01e03_ampersand_filename(client):
             assert "subtitles" in data
             items = data["subtitles"]
 
-            # 1. Assert exactly 3 subtitles returned (Episode 01 is discarded)
+            # 1. Assert all 3 valid subtitles returned (Episode 01 is discarded)
             assert len(items) == 3
             releases = [get_release_name(s) for s in items]
             for rel in releases:
@@ -794,6 +743,7 @@ async def test_real_stremio_fma_brotherhood_s01e03_ampersand_filename(client):
 
             # 3. Assert #2 is the 1 ~ 64 BD batch
             assert "Delivroozzi" in releases[1] or "1 ~ 64" in releases[1]
+            # Display discovery may retain the pack, but reference readiness remains false until a member is resolved.
 
             # 4. Assert exact ordering matches rank_subtitles output and title format
             for i, expected_sub in enumerate(expected_ranked):

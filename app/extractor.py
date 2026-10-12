@@ -11,6 +11,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from app.services import release_scoring_integration as release_scoring
+
 logger = logging.getLogger(__name__)
 
 # Archive format signatures. ``tar`` is detected by the POSIX ``ustar`` magic at
@@ -219,6 +221,7 @@ def extract_srt_from_zip(
 
     # If single entry, extract and transcode directly
     if len(valid_entries) == 1:
+        release_scoring.member_selected(valid_entries[0].filename)
         raw_sub = zf.read(valid_entries[0])
         return transcode_to_utf8(raw_sub, lang=lang)
 
@@ -229,6 +232,7 @@ def extract_srt_from_zip(
         season=season,
         episode=episode,
     )
+    release_scoring.member_selected(best_entry.filename)
     raw_sub = zf.read(best_entry)
     return transcode_to_utf8(raw_sub, lang=lang)
 
@@ -294,7 +298,8 @@ def extract_subtitle_from_archive(
             raise SubtitleExtractionError(
                 f"No valid subtitle files (.srt, .ass, .ssa, .vtt) found in the {kind} archive."
             )
-        _, payload = _select_nonzip_member(members, season, episode)
+        selected_name, payload = _select_nonzip_member(members, season, episode)
+        release_scoring.member_selected(selected_name)
         return transcode_to_utf8(payload, lang=lang)
     raise SubtitleExtractionError("Unrecognised archive format")
 

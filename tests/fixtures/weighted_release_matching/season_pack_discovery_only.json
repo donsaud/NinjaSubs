@@ -1,0 +1,53 @@
+{
+  "case_id": "season_pack_discovery_only",
+  "target": {
+    "metadata": {
+      "media_type": "series",
+      "title": "Show",
+      "year": 2020,
+      "season": 1,
+      "episode": 1,
+      "source": "BluRay",
+      "release_group": "ALPHA",
+      "resolution": "1080p",
+      "video_codec": "H264",
+      "audio_codec": "AC3",
+      "service_disc_family": "BD"
+    }
+  },
+  "candidates": [
+    {
+      "id": "pack",
+      "provider": "subdl",
+      "provider_id": "pack",
+      "metadata": {
+        "media_type": "series",
+        "title": "Show",
+        "year": 2020,
+        "season": 1,
+        "episode": null,
+        "source": "BluRay",
+        "release_group": "ALPHA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD",
+        "scope": "season_pack"
+      },
+      "language": "ara"
+    }
+  ],
+  "expected": {
+    "discovery_order": [
+      "pack"
+    ],
+    "reference_order": [],
+    "display_order": [
+      "pack"
+    ],
+    "scores": {
+      "pack": 329
+    }
+  },
+  "provenance": "SYNTHETIC_BEHAVIORAL_EXPECTATION"
+}

@@ -89,7 +89,7 @@ class _Strategy:
 
     def __init__(self, name: str, reference: str | None):
         self._name = name
-        self._reference = reference
+        self._reference = reference.replace("We should talk about the second issue", "Independent reference dialogue for this scene") if reference else None
         self.validates_target = False
         self.resolved = 0
 
@@ -197,15 +197,15 @@ def test_fixture_wrong_cut_is_rejected_before_alass():
     ``tests/test_large_offset_gate.py``); this test pins the case the gate can
     still refuse on its own, before any subprocess is spawned.
     """
+    from app.services.subtitle_matcher import (
+        FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
+        validate_cue_sanity,
+    )
     from app.services.sync.large_offset import (
         LARGE_OFFSET_MAX_MS,
         REASON_MAX_OFFSET_EXCEEDED,
         assess_large_offset,
         classify_large_offset_candidate,
-    )
-    from app.services.subtitle_matcher import (
-        FIRST_DIALOGUE_EXECUTION_THRESHOLD_MS,
-        validate_cue_sanity,
     )
 
     reference = _srt(SHIFT_WRONG_CUT)

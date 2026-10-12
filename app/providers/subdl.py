@@ -8,6 +8,7 @@ import httpx
 from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
+from app.services import release_scoring_integration as release_scoring
 from app.utils.language import get_subdl_lang_code, normalize_to_iso639_2
 from app.utils.uploader import extract_uploader
 
@@ -287,6 +288,8 @@ class SubdlProvider(BaseSubtitleProvider):
                     uploader=uploader,
                 )
             )
+
+            release_scoring.provider_evidence(results[-1], item)
 
         logger.info(
             f"[SubDL Filter Verification] Total: {total_fetched} | "

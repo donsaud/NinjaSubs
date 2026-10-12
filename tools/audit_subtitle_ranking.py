@@ -11,7 +11,6 @@ Provides deep inspection of the two-stage matcher:
 
 import argparse
 import os
-import re
 import sys
 import time
 from typing import Any
@@ -20,76 +19,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models import SubtitleRelease
 from app.services.subtitle_matcher import (
-    WEIGHT_EXACT_HASH,
     calculate_compatibility,
     extract_metadata,
     hard_compatibility_filter,
     rank_subtitles,
 )
-
-
-def extract_score_components(reasons: list[str]) -> dict[str, int]:
-    """
-    Parse reasons list into structured attribute score components.
-    Uses regex to extract signed integer points from reason strings like '(+40)' or '(-30)'.
-    """
-    components = {
-        "title": 0,
-        "season_episode": 0,
-        "year": 0,
-        "group": 0,
-        "source": 0,
-        "service": 0,
-        "edition": 0,
-        "fps": 0,
-        "resolution": 0,
-        "codec": 0,
-        "audio": 0,
-        "remux_repack": 0,
-        "hash": 0,
-    }
-
-    point_regex = re.compile(r"\(([+-]?\d+)\)")
-
-    for r in reasons:
-        m = point_regex.search(r)
-        pts = int(m.group(1)) if m else 0
-        r_lower = r.lower()
-
-        if "hash" in r_lower:
-            components["hash"] += WEIGHT_EXACT_HASH
-        elif "title" in r_lower:
-            components["title"] += pts
-        elif "season" in r_lower or "episode" in r_lower:
-            components["season_episode"] += pts
-        elif "year" in r_lower:
-            components["year"] += pts
-        elif "fansub" in r_lower or "group" in r_lower or "scene" in r_lower:
-            components["group"] += pts
-        elif "source" in r_lower or "cam" in r_lower or "disc" in r_lower or "web" in r_lower:
-            components["source"] += pts
-        elif (
-            "platform" in r_lower
-            or "streaming" in r_lower
-            or "hmax" in r_lower
-            or "amzn" in r_lower
-            or "netflix" in r_lower
-        ):
-            components["service"] += pts
-        elif "edition" in r_lower or "cut" in r_lower:
-            components["edition"] += pts
-        elif "fps" in r_lower:
-            components["fps"] += pts
-        elif "resolution" in r_lower:
-            components["resolution"] += pts
-        elif "codec" in r_lower or "hdr" in r_lower or "bit" in r_lower or "vision" in r_lower:
-            components["codec"] += pts
-        elif "audio" in r_lower or "atmos" in r_lower or "dts" in r_lower or "ddp" in r_lower:
-            components["audio"] += pts
-        elif "remux" in r_lower or "repack" in r_lower:
-            components["remux_repack"] += pts
-
-    return {k: v for k, v in components.items() if v != 0}
 
 
 def audit_ranking(
@@ -178,10 +112,11 @@ def audit_ranking(
     audit_records = []
     for rank_idx, item in enumerate(ranked, 1):
         rel_name = item.release_name
-        compat = getattr(item, "compatibility", None) or calculate_compatibility(
+        compat = calculate_compatibility(
             v_meta, rel_name, is_hash_match=item.is_hash_match
         )
-        components = extract_score_components(compat.reasons)
+        weighted = item.compatibility
+        components = {c.criterion: c.points for c in weighted.ranking_contributions}
 
         record = {
             "rank": rank_idx,

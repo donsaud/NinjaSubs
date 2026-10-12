@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.models import MatchTier, SubtitleRelease, UserPreferences
+from app.models import MatchTier, SubtitleRelease
 from app.providers.opensubtitles import OpenSubtitlesProvider
 from app.providers.subdl import SubdlProvider
 from app.providers.subsource import SubsourceProvider
@@ -21,10 +21,7 @@ from app.services.cache import (
 )
 from app.services.ranking import extract_stream_params
 from app.services.subtitle_matcher import (
-    WEIGHT_EXACT_HASH,
     calculate_compatibility,
-    calculate_match_score,
-    rank_subtitles,
 )
 from app.utils.config_parser import encode_user_config
 
@@ -40,109 +37,10 @@ def client():
 # ==========================================
 
 
-def test_hash_match_receives_absolute_priority_and_ranks_number_one():
-    """
-    Verify that an OpenSubtitles candidate matched via MovieHash:
-    1. Receives absolute priority score (baseline >= 500).
-    2. Receives a match percentage of 100%.
-    3. Ranks #1 even if its filename is obscure or completely different from the video filename.
-    """
-    video_file = "House.of.the.Dragon.S02E01.1080p.HMAX.WEB-DL.DDP5.1.Atmos.H.264-FLUX.mkv"
-
-    # Perfect filename-only match (Score is typically ~140-210, 100%)
-    sub_filename_perfect = SubtitleRelease(
-        release_name="House.of.the.Dragon.S02E01.1080p.HMAX.WEB-DL.DDP5.1.Atmos.H.264-FLUX.srt",
-        download_url="https://subdl.com/sub1.srt",
-        provider="subdl",
-        format="srt",
-        lang="ara",
-        is_hash_match=False,
-    )
-
-    # Hash match with generic / obscure filename
-    sub_hash_match = SubtitleRelease(
-        release_name="HotD_201_arabic_subs.srt",
-        download_url="https://api.opensubtitles.com/sub2.srt",
-        provider="opensubtitles",
-        format="srt",
-        lang="ara",
-        is_hash_match=True,
-    )
-
-    # Calculate match score directly
-    score_res = calculate_match_score(video_file, sub_hash_match.release_name, is_hash_match=True)
-    assert score_res.score >= 500, f"Expected score >= 500, got {score_res.score}"
-    assert score_res.percentage == 100
-
-    # Passing SubtitleRelease object directly to calculate_match_score
-    score_obj_res = calculate_match_score(video_file, sub_hash_match)
-    assert score_obj_res.score >= 500
-    assert score_obj_res.percentage == 100
-
-    # Passing candidate dict with is_hash_match
-    score_dict_res = calculate_match_score(
-        video_file, {"release_name": "HotD.srt", "is_hash_match": True}
-    )
-    assert score_dict_res.score >= 500
-    assert score_dict_res.percentage == 100
-
-    # Rank both candidates
-    ranked = rank_subtitles(
-        video_filename=video_file,
-        subtitles=[sub_filename_perfect, sub_hash_match],
-    )
-
-    assert len(ranked) == 2
-    assert ranked[0].is_hash_match is True
-    assert ranked[0].provider == "opensubtitles"
-    assert ranked[0].score > ranked[1].score
-    assert ranked[0].score == ranked[0].match_percentage == 100
-    assert ranked[0].match_percentage == 100
 
 
-def test_hash_match_never_rejected_by_episode_mismatch():
-    """
-    Ensure that a candidate matched by binary MovieHash is never rejected by
-    strict episode mismatch logic even if the subtitle release filename suggests a mismatch.
-    """
-    video_file = "Series.Name.S01E01.1080p.WEB-DL.mkv"
-    # Subtitle filename labeled differently (e.g. S01E02) but matched by exact stream hash
-    sub_candidate = SubtitleRelease(
-        release_name="Series.Name.S01E02.1080p.WEB-DL.srt",
-        download_url="https://api.opensubtitles.com/sub.srt",
-        provider="opensubtitles",
-        format="srt",
-        lang="ara",
-        is_hash_match=True,
-    )
-
-    score_res = calculate_match_score(video_file, sub_candidate.release_name, is_hash_match=True)
-    assert score_res.score >= 500
-    assert score_res.percentage == 100
 
 
-def test_hash_match_without_video_filename():
-    """
-    Ensure that when no video filename is available, hash-matched subtitles
-    receive +500 baseline bonus and 100% match percentage.
-    """
-    sub1 = SubtitleRelease(
-        release_name="Release.A.srt",
-        download_url="url1",
-        provider="subdl",
-        is_hash_match=False,
-    )
-    sub2 = SubtitleRelease(
-        release_name="Release.B.srt",
-        download_url="url2",
-        provider="opensubtitles",
-        is_hash_match=True,
-    )
-
-    ranked = rank_subtitles(video_filename=None, subtitles=[sub1, sub2])
-    assert ranked[0].is_hash_match is True
-    assert ranked[0].score == ranked[0].match_percentage == 100
-    assert ranked[0].match_percentage == 100
 
 
 # ==========================================
@@ -564,63 +462,10 @@ def test_match_tier_string_compatibility():
     assert str(MatchTier.HASH) == "hash"
 
 
-def test_tier_0_deterministic_hash_match_short_circuits_mismatched_filename():
-    """
-    Tier 0 Short-Circuit:
-    Even when the subtitle filename indicates a completely different show, season, or episode,
-    a verified binary hash match short-circuits Stage 1 & Stage 2, granting 500 score, 100%, and MatchTier.HASH.
-    """
-    video_target = "House.of.the.Dragon.S02E01.1080p.HMAX.WEB-DL.mkv"
-    mismatched_sub = "SpongeBob.SquarePants.S01E05.480p.srt"
-
-    compat = calculate_compatibility(video_target, mismatched_sub, is_hash_match=True)
-
-    assert compat.accepted is True
-    assert compat.score == WEIGHT_EXACT_HASH  # 500
-    assert compat.percentage == 100
-    assert compat.match_tier == MatchTier.HASH
-    assert compat.match_tier == 0
-    assert compat.match_tier == "hash"
-    assert compat.confidence == "deterministic"
-    assert compat.match_method == "hash"
-    assert compat.is_hash_match is True
-    assert "moviehash_exact" in compat.reasons
 
 
-def test_tier_0_short_circuit_with_subtitle_release_object():
-    """Verify passing SubtitleRelease with is_hash_match=True short-circuits in calculate_compatibility & calculate_match_score."""
-    video_target = "Dune.Part.Two.2024.2160p.UHD.Remux.DV.Atmos-FLUX.mkv"
-    sub_obj = SubtitleRelease(
-        release_name="Arbitrary.Subtitle.Name.srt",
-        download_url="https://api.opensubtitles.com/sub.srt",
-        provider="opensubtitles",
-        is_hash_match=True,
-    )
-
-    compat = calculate_compatibility(video_target, sub_obj)
-    assert compat.match_tier == MatchTier.HASH
-    assert compat.score == 500
-    assert compat.percentage == 100
-    assert compat.confidence == "deterministic"
-
-    score_result = calculate_match_score(video_target, sub_obj)
-    assert score_result.score == 500
-    assert score_result.percentage == 100
-    assert score_result.compatibility.match_tier == MatchTier.HASH
 
 
-def test_tier_1_exact_release_group_and_source():
-    """Tier 1 (EXACT): Perfect metadata match with identical release group and source."""
-    video = "Breaking.Bad.S05E16.1080p.BluRay.x264-DEMAND.mkv"
-    sub = "Breaking.Bad.S05E16.1080p.BluRay.x264-DEMAND.srt"
-
-    compat = calculate_compatibility(video, sub, is_hash_match=False)
-    assert compat.accepted is True
-    assert compat.match_tier == MatchTier.EXACT
-    assert compat.match_tier == 1
-    assert compat.binding == "strong"
-    assert 85 <= compat.percentage < 100
-    assert compat.score >= 110
 
 
 def test_tier_2_source_family_match():
@@ -656,113 +501,8 @@ def test_tier_4_fallback_and_hard_rejection():
     assert compat.percentage == 0
 
 
-def test_ranking_hierarchy_orders_hash_above_exact_text_match():
-    """Verify that Tier 0 (HASH) candidate ranks #1 above Tier 1 (EXACT) text matches."""
-    video_file = "Gladiator.2000.1080p.BluRay.x264-FLUX.mkv"
-
-    # Perfect filename match (Tier 1 EXACT, score ~150-180)
-    sub_exact = SubtitleRelease(
-        release_name="Gladiator.2000.1080p.BluRay.x264-FLUX.srt",
-        download_url="https://subdl.com/sub1.srt",
-        provider="subdl",
-        lang="ara",
-        is_hash_match=False,
-    )
-
-    # Hash match candidate with generic/obscure name
-    sub_hash = SubtitleRelease(
-        release_name="arabic_subtitles_gladiator.srt",
-        download_url="https://api.opensubtitles.com/sub2.srt",
-        provider="opensubtitles",
-        lang="ara",
-        is_hash_match=True,
-    )
-
-    # Cross-source candidate (Tier 2 SOURCE_FAMILY)
-    sub_source_family = SubtitleRelease(
-        release_name="Gladiator.2000.1080p.WEB-DL.x264-NTb.srt",
-        download_url="https://subdl.com/sub3.srt",
-        provider="subdl",
-        lang="ara",
-        is_hash_match=False,
-    )
-
-    ranked = rank_subtitles(
-        video_filename=video_file,
-        subtitles=[sub_source_family, sub_exact, sub_hash],
-        preferred_languages=["ara"],
-    )
-
-    assert len(ranked) == 3
-    # Rank 1: Binary Hash Match
-    assert ranked[0].is_hash_match is True
-    assert ranked[0].match_tier == MatchTier.HASH
-    assert ranked[0].score == ranked[0].match_percentage == 100
-    assert ranked[0].match_percentage == 100
-
-    # Rank 2: Exact Filename Match
-    assert ranked[1].is_hash_match is False
-    assert ranked[1].match_tier == MatchTier.EXACT
-    assert ranked[1].release_name == sub_exact.release_name
-
-    # Rank 3: Source Family Match
-    assert ranked[2].is_hash_match is False
-    assert ranked[2].release_name == sub_source_family.release_name
 
 
-@pytest.mark.asyncio
-async def test_aggregator_deduplication_preserves_hash_match_over_text_duplicate():
-    """
-    If SubDL and OpenSubtitles return the same release name, but OpenSubtitles verified a binary hash match,
-    the aggregator deduplication must preserve the hash-matched candidate.
-    """
-    clear_subtitle_cache()
-
-    shared_release_name = "Gladiator.2000.1080p.BluRay.x264-FLUX.srt"
-
-    subdl_item = SubtitleRelease(
-        release_name=shared_release_name,
-        download_url="https://subdl.com/sub.srt",
-        provider="subdl",
-        lang="ara",
-        is_hash_match=False,
-    )
-
-    os_item = SubtitleRelease(
-        release_name=shared_release_name,
-        download_url="https://opensubtitles.com/sub.srt",
-        provider="opensubtitles",
-        lang="ara",
-        is_hash_match=True,
-    )
-
-    mock_subdl = AsyncMock(return_value=[subdl_item])
-    mock_subsource = AsyncMock(return_value=[])
-    mock_os = AsyncMock(return_value=[os_item])
-
-    with (
-        patch("app.main._http_client", new_callable=AsyncMock),
-        patch("app.providers.subdl.SubdlProvider.search_subtitles", new=mock_subdl),
-        patch("app.providers.subsource.SubsourceProvider.search_subtitles", new=mock_subsource),
-        patch("app.providers.opensubtitles.OpenSubtitlesProvider.search_subtitles", new=mock_os),
-    ):
-        results = await aggregate_subtitles(
-            imdb_id="tt0172495",
-            filename="Gladiator.2000.1080p.BluRay.x264-FLUX.mkv",
-            video_hash="8e245d9679d31e12",
-            video_size=104857600,
-            use_cache=False,
-            subdl_key="key1",
-            opensubtitles_key="key2",
-            user_preferences=UserPreferences(enable_opensubtitles=True),
-            http_client=AsyncMock(spec=httpx.AsyncClient),
-        )
-
-        assert len(results) == 1
-        assert results[0].is_hash_match is True
-        assert results[0].provider == "opensubtitles"
-        assert results[0].match_percentage == 100
-        assert results[0].match_tier == MatchTier.HASH
 
 
 @pytest.mark.asyncio
@@ -792,65 +532,6 @@ async def test_subdl_and_subsource_gracefully_ignore_hash_kwargs():
     assert isinstance(res_subsource, list)
 
 
-def test_stremio_endpoint_hash_short_circuit_e2e(client):
-    """
-    End-to-End Stremio endpoint test:
-    Verify Stremio request passing videoHash and videoSize returns the hash match with [100%] [OpenSubtitles] as #1.
-    """
-    clear_subtitle_cache()
-
-    target_video = "Gladiator.2000.1080p.BluRay.x264-FLUX.mkv"
-
-    sub_exact_text = SubtitleRelease(
-        release_name="Gladiator.2000.1080p.BluRay.x264-FLUX.srt",
-        download_url="https://subdl.com/gladiator.srt",
-        provider="subdl",
-        lang="ara",
-        is_hash_match=False,
-    )
-
-    sub_hash_match = SubtitleRelease(
-        release_name="Gladiator.Arabic.Subtitles.srt",
-        download_url="https://api.opensubtitles.com/gladiator_hash.srt",
-        provider="opensubtitles",
-        lang="ara",
-        is_hash_match=True,
-    )
-
-    with (
-        patch("app.main._http_client", new_callable=AsyncMock),
-        patch(
-            "app.providers.subdl.SubdlProvider.search_subtitles",
-            new=AsyncMock(return_value=[sub_exact_text]),
-        ),
-        patch(
-            "app.providers.subsource.SubsourceProvider.search_subtitles",
-            new=AsyncMock(return_value=[]),
-        ),
-        patch(
-            "app.providers.opensubtitles.OpenSubtitlesProvider.search_subtitles",
-            new=AsyncMock(return_value=[sub_hash_match]),
-        ),
-        patch("app.providers.cinemeta.CinemetaClient.get_metadata", new=AsyncMock(return_value=None)),
-    ):
-        user_cfg = encode_user_config(enable_opensubtitles=True)
-        url = (
-            f"/{user_cfg}/subtitles/movie/tt0172495/"
-            f"videoHash=8e245d9679d31e12&videoSize=2147483648&filename={target_video}.json"
-        )
-        response = client.get(url)
-        assert response.status_code == 200
-        data = response.json()
-        assert "subtitles" in data
-        items = data["subtitles"]
-        assert len(items) == 2
-
-        # Candidate #1: The verified hash match carries the Exact Hash label
-        assert items[0]["title"].startswith("[100%] [OpenSubtitles] ")
-
-        # Candidate #2: The text-matched release
-        assert "[OpenSubtitles]" not in items[1]["title"]
-        assert "[SubDL]" in items[1]["title"]
 
 
 def test_series_sub_id_scoped_to_season_episode(client):

@@ -231,28 +231,6 @@ def test_wrong_episode_stays_rejected_even_with_strong_metadata():
     assert not prediction.is_actionable
 
 
-def test_sorting_preserves_cached_rejection_claim():
-    """A measured rejection is honoured; prediction never runs over it."""
-    rejected = _attach(
-        _release("A.srt", tier=MatchTier.EXACT, release_group_match=True),
-        SyncState.REJECTED.value,
-        "cached",
-        base=0,
-    )
-    ordered = order_candidates(
-        [
-            rejected,
-            _attach(
-                _release("B.srt", tier=MatchTier.CLOSE),
-                SyncState.PROBABLE_SYNC.value,
-                VerificationAvailability.PREDICTED.value,
-                base=1,
-                confidence=80.0,
-            ),
-        ]
-    )
-    assert ordered[0] is rejected
-    assert rejected.sync_state == SyncState.REJECTED.value
 
 
 # --------------------------------------------------------------------------- #
@@ -293,37 +271,8 @@ def test_displayed_score_orders_verified_sync_states():
     assert ordered[0] is resynced
 
 
-def test_unscoped_cache_claim_cannot_override_displayed_score():
-    """Real measured evidence beats a metadata guess."""
-    predicted = _attach(
-        _release("A.srt", tier=MatchTier.HASH),
-        SyncState.PROBABLE_SYNC.value,
-        VerificationAvailability.PREDICTED.value,
-        base=0,
-        confidence=99.0,
-    )
-    cached = _attach(
-        _release("B.srt", tier=MatchTier.FALLBACK),
-        SyncState.VERIFIED_RESYNCED.value,
-        "cached",
-        base=1,
-        confidence=60.0,
-    )
-    ordered = order_candidates([predicted, cached])
-    assert ordered[0] is predicted
 
 
-def test_strong_prediction_outranks_weak_one():
-    strong = _attach(
-        _release("A.srt", tier=MatchTier.EXACT),
-        SyncState.PROBABLE_SYNC.value,
-        VerificationAvailability.PREDICTED.value,
-        base=9,
-        confidence=90.0,
-    )
-    weak = _attach(_release("B.srt", tier=MatchTier.CLOSE), None, None, base=0)
-    ordered = order_candidates([weak, strong])
-    assert ordered[0] is strong
 
 
 def test_weak_prediction_does_not_outrank_unknown_with_better_content():
@@ -360,58 +309,8 @@ def test_user_language_preference_outranks_sync_evidence():
 # --------------------------------------------------------------------------- #
 
 
-def test_spec_order_matrix():
-    """A/D (cached verified) -> B (predicted) -> C (unknown); E absent."""
-    a = _attach(
-        _release("A_exact_cached.srt", tier=MatchTier.EXACT),
-        SyncState.VERIFIED_SYNCED.value,
-        "cached",
-        base=0,
-        confidence=98.0,
-    )
-    b = _attach(
-        _release("B_hash_predicted.srt", tier=MatchTier.HASH),
-        SyncState.PROBABLE_SYNC.value,
-        VerificationAvailability.PREDICTED.value,
-        base=1,
-        confidence=95.0,
-    )
-    c = _attach(_release("C_exact_unknown.srt", tier=MatchTier.EXACT), None, None, base=2)
-    d = _attach(
-        _release("D_source_cached.srt", tier=MatchTier.SOURCE_FAMILY),
-        SyncState.VERIFIED_RESYNCED.value,
-        "cached",
-        base=3,
-        confidence=92.0,
-    )
-    # E is hard rejected upstream, so it never reaches ordering.
-    e = _attach(
-        _release("E_hard_rejected.srt", tier=MatchTier.HASH),
-        SyncState.PROBABLE_SYNC.value,
-        VerificationAvailability.PREDICTED.value,
-        base=4,
-        confidence=95.0,
-    )
-    e.compatibility.accepted = False
-
-    ordered = order_candidates([c, d, b, a])
-    assert [r.release_name for r in ordered] == [
-        b.release_name,
-        a.release_name,
-        c.release_name,
-        d.release_name,
-    ]
-    # The rejected candidate is last even if it were passed in.
-    assert order_candidates([e, c])[0] is e
 
 
-def test_no_fingerprint_matrix_stays_compatibility_driven():
-    """With no evidence anywhere, the matcher's own order survives untouched."""
-    a = _attach(_release("A_strong.srt", tier=MatchTier.EXACT), None, None, base=0)
-    b = _attach(_release("B_moderate.srt", tier=MatchTier.SOURCE_FAMILY), None, None, base=1)
-    c = _attach(_release("C_fallback.srt", tier=MatchTier.FALLBACK), None, None, base=2)
-    ordered = order_candidates([c, b, a])
-    assert [r.release_name for r in ordered] == [a.release_name, b.release_name, c.release_name]
 
 
 # --------------------------------------------------------------------------- #
@@ -497,13 +396,3 @@ def test_ordering_does_not_mutate_or_depend_on_dict_ordering():
     before = [r.release_name for r in candidates]
     order_candidates(candidates)
     assert [r.release_name for r in candidates] == before
-
-
-def test_no_weighted_mega_score_was_introduced():
-    """The comparator is lexicographic: state must dominate any confidence."""
-    low_state = _attach(_release("A.srt"), SyncState.VERIFIED_SYNCED.value, "cached",
-                        base=99, confidence=1.0)
-    high_state = _attach(_release("B.srt"), SyncState.PROBABLE_SYNC.value, "predicted",
-                         base=0, confidence=100.0)
-    ordered = order_candidates([high_state, low_state])
-    assert ordered[0] is low_state

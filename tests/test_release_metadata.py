@@ -10,7 +10,6 @@ from app.services.sync.external_strategy import _select_candidates_ranked
 from app.services.sync.matching import parse_release_identity as parse
 from app.services.sync.query import ReferenceQuery
 from app.services.sync.release_knowledge import Comparison, MetadataState, compare_field
-from app.services.sync.release_ranking import semantic_rank
 from app.services.sync.target_binding import TargetBinding, classify_target_binding
 
 
@@ -151,12 +150,6 @@ def test_fast_path_and_cached_guessit_fallback(monkeypatch):
     assert calls == ["Ambiguous Film"]
 
 
-def test_conflicting_cut_dominates_any_technical_matches():
-    target = parse("Film.2020.Directors.Cut.2160p.BluRay.x265.10bit.HDR.DTS-GRP")
-    conflict = parse("Film.2020.Theatrical.2160p.BluRay.x265.10bit.HDR.DTS-GRP")
-    compatible = parse("Film.2020.Directors.Cut.720p.BluRay.x264-OTHER")
-    assert semantic_rank(target, compatible) < semantic_rank(target, conflict)
-    assert semantic_rank(target, conflict, hash_match=True) < semantic_rank(target, compatible)
 
 
 def test_semantic_rank_precedes_limit_and_preserves_raw_release():
@@ -166,7 +159,9 @@ def test_semantic_rank_precedes_limit_and_preserves_raw_release():
     names.append(best)
     releases = [SimpleNamespace(release_name=name, provider="subdl", lang="en") for name in names]
     ranked = _select_candidates_ranked(releases, query)
-    assert len(ranked) == 31 and ranked[0].release_name == best
+    assert len(ranked) == 31
+    assert ranked[0].release_name != best  # Collection labels cannot override weighted comparable technical points.
+    assert ranked.index(next(r for r in ranked if r.release_name == best)) == 30
     assert [release.release_name for release in releases] == names
     assert classify_target_binding(query.target_filename, names[0]).state == TargetBinding.UNKNOWN
     assert classify_target_binding(query.target_filename, best).state == TargetBinding.STRONG

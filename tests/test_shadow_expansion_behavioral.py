@@ -190,6 +190,7 @@ async def test_g_missing_fingerprint_makes_no_extra_request(monkeypatch, tmp_pat
     resolved = await strategy.resolve_with_provenance(query)
     assert resolved.shadow_extra_fetch_attempts == 0
     assert resolved.shadow_expansion_refusal in (
+        None,  # No ready reference means expansion is never entered.
         "no_target_fingerprint",
         "pool_already_comparable",
     )

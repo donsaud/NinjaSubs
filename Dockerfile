@@ -29,8 +29,10 @@ RUN apt-get update && \
     chmod +x /usr/local/bin/alass && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy application source code
+# Copy application source code (app plus the isolated Two-Point nucleus,
+# required at runtime by the default-off Hybrid Auto-Sync test path)
 COPY app/ /app/app/
+COPY two_point_sync/ /app/two_point_sync/
 
 # Ensure non-root ownership
 RUN chown -R appuser:appuser /app

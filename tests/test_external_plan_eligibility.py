@@ -198,7 +198,12 @@ async def test_os_hash_candidate_remains_eligible():
     strategy = Strategy([])
     strategy.add(strategy.os, "Show.S01E01.BluRay.x264-HASH", "eng",
                  _srt(600, "HASH"), is_hash_match=True)
-    plan = await strategy.plan_candidates(QUERY)
+    from dataclasses import replace
+
+    from app.services.release_scoring_integration import hash_proof
+    query = replace(QUERY, video_hash="1ec51ed4797c63ff", video_size=5727011301)
+    hash_proof(strategy.releases[-1][0], {"moviehash": query.video_hash, "moviebytesize": query.video_size}, True)
+    plan = await strategy.plan_candidates(query)
     assert len(plan) == 1
     assert plan[0][0].is_hash_match
 

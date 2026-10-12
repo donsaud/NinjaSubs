@@ -1,0 +1,49 @@
+{
+  "case_id": "movie_unknown_edition_not_a_conflict",
+  "target": {
+    "metadata": {
+      "media_type": "movie",
+      "title": "Movie",
+      "year": 2020,
+      "source": "BluRay",
+      "release_group": "ALPHA",
+      "resolution": "1080p",
+      "video_codec": "H264",
+      "audio_codec": "AC3",
+      "service_disc_family": "BD",
+      "cut": "theatrical"
+    }
+  },
+  "candidates": [
+    {
+      "id": "unknown",
+      "provider": "subdl",
+      "provider_id": "unknown",
+      "metadata": {
+        "media_type": "movie",
+        "title": "Movie",
+        "year": 2020,
+        "source": "BluRay",
+        "release_group": "ALPHA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD",
+        "cut": null
+      },
+      "language": "ara"
+    }
+  ],
+  "expected": {
+    "reference_order": [
+      "unknown"
+    ],
+    "display_order": [
+      "unknown"
+    ],
+    "scores": {
+      "unknown": 149
+    }
+  },
+  "provenance": "SYNTHETIC_BEHAVIORAL_EXPECTATION"
+}

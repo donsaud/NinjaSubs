@@ -1,0 +1,69 @@
+{
+  "case_id": "movie_explicit_cut_conflict",
+  "target": {
+    "metadata": {
+      "media_type": "movie",
+      "title": "Movie",
+      "year": 2020,
+      "source": "BluRay",
+      "release_group": "ALPHA",
+      "resolution": "1080p",
+      "video_codec": "H264",
+      "audio_codec": "AC3",
+      "service_disc_family": "BD",
+      "cut": "theatrical"
+    }
+  },
+  "candidates": [
+    {
+      "id": "directors",
+      "provider": "subdl",
+      "provider_id": "directors",
+      "metadata": {
+        "media_type": "movie",
+        "title": "Movie",
+        "year": 2020,
+        "source": "BluRay",
+        "release_group": "ALPHA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD",
+        "cut": "directorscut"
+      },
+      "language": "ara"
+    },
+    {
+      "id": "theatrical",
+      "provider": "subdl",
+      "provider_id": "theatrical",
+      "metadata": {
+        "media_type": "movie",
+        "title": "Movie",
+        "year": 2020,
+        "source": "BluRay",
+        "release_group": "ALPHA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD",
+        "cut": "theatrical"
+      },
+      "language": "ara"
+    }
+  ],
+  "expected": {
+    "reference_order": [
+      "theatrical"
+    ],
+    "display_order": [
+      "theatrical"
+    ],
+    "rejections": {
+      "directors": [
+        "cut_version_conflict"
+      ]
+    }
+  },
+  "provenance": "SYNTHETIC_BEHAVIORAL_EXPECTATION"
+}

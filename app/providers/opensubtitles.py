@@ -28,6 +28,7 @@ import httpx
 from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
+from app.services import release_scoring_integration as release_scoring
 from app.utils.language import get_opensubtitles_lang_code, normalize_to_iso639_2
 from app.utils.uploader import extract_uploader
 
@@ -406,6 +407,9 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
                             uploader=uploader,
                         )
                     )
+
+                    release_scoring.provider_evidence(results[-1], attributes, file_name)
+                    release_scoring.hash_proof(results[-1], params, attributes.get("moviehash_match"))
 
                 logger.info(f"[OpenSubtitles Response] Total items found: {len(results)}")
                 return results

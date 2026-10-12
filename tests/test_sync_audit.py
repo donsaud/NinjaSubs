@@ -307,6 +307,8 @@ def test_language_grouping_survives_sync_evidence(languages, names):
         )
     # Every candidate carries maximal, equal sync evidence, so only language
     # preference can decide the grouping.
+    from app.services.subtitle_matcher import rank_subtitles
+    candidates = rank_subtitles(None, candidates, preferred_languages=languages)
     ordered = order_candidates(candidates)
     seen = [rel.sync_lang_rank for rel in ordered]
     assert seen == sorted(seen), "language preference was overridden"

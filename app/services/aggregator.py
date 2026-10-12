@@ -25,7 +25,6 @@ from app.services.cache import (
     set_cached_subtitles,
 )
 from app.services.subtitle_matcher import rank_subtitles
-from app.utils.language import normalize_to_iso639_2
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -380,21 +379,11 @@ async def aggregate_subtitles(
         elif isinstance(r, Exception):
             logger.error("[Aggregator] Upstream provider query failed: %s", type(r).__name__)
 
-    # Deduplicate results based on release_name and normalized language (prioritizing hash matches)
-    all_releases.sort(key=lambda r: 0 if getattr(r, "is_hash_match", False) else 1)
-    seen_keys = set()
-    deduped_releases: list[SubtitleRelease] = []
-    for rel in all_releases:
-        norm_lang = normalize_to_iso639_2(getattr(rel, "lang", "ara"))
-        dedup_key = (rel.release_name.strip().lower(), norm_lang)
-        if dedup_key not in seen_keys:
-            seen_keys.add(dedup_key)
-            deduped_releases.append(rel)
 
     # Score and rank subtitle releases using comprehensive Subtitle Matcher Engine
     ranked_releases = rank_subtitles(
         video_filename=filename,
-        subtitles=deduped_releases,
+        subtitles=all_releases,
         preferred_languages=effective_langs,
         discard_mismatches=True if (filename or episode is not None) else False,
         exclude_sdh=effective_exclude_hi,
@@ -402,7 +391,8 @@ async def aggregate_subtitles(
         episode=parsed_episode,
         title=title,
         year=year,
-        hi_preference=hi_preference,
+        hi_preference=hi_preference, imdb_id=imdb_id, media_type=media_type,
+        video_hash=video_hash, video_size=video_size,
     )
 
     if use_cache:

@@ -108,7 +108,7 @@ async def test_warm_sync_cache_survives_reference_provider_outage(enabled_sync):
     from test_sync_strategies import _stub_analyzer
 
     strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(
-        return_value=ResolvedReference(_srt([1] * 10), "team", candidate=_meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP")["target_filename"])
+        return_value=ResolvedReference(_srt([1] * 10).replace("مرحبا", "Independent reference dialogue"), "team", candidate=_meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP")["target_filename"])
     ))
     service = SimpleNamespace(sync_async=AsyncMock(return_value=_srt([1] * 10)))
     orch = _orch(strategy, service)
@@ -136,7 +136,7 @@ async def test_non_positive_warm_entry_does_not_mask_provider_outage(enabled_syn
     unconfirmed artifact.
     """
     strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(
-        return_value=ResolvedReference(_srt([1] * 10), "team", candidate=_meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP")["target_filename"])
+        return_value=ResolvedReference(_srt([1] * 10).replace("مرحبا", "Independent reference dialogue"), "team", candidate=_meta(target_filename="Film.2020.1080p.BluRay.x264-TESTGROUP")["target_filename"])
     ))
     service = SimpleNamespace(sync_async=AsyncMock(return_value=_srt([1] * 10)))
     orch = _orch(strategy, service)
@@ -265,7 +265,7 @@ async def test_failed_alignment_is_not_repeated_on_every_retry(enabled_sync):
     # (first-dialogue delta 1s) yet misaligned (median 1s), so alass runs once,
     # fails, and the negative cache suppresses the retry.
     strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(
-        return_value=ResolvedReference(_srt([1] * 10), "edition")
+        return_value=ResolvedReference(_srt([1] * 10).replace("مرحبا", "Independent reference dialogue"), "edition")
     ))
     service = SimpleNamespace(sync_async=AsyncMock(return_value=None))
     orch = _orch(strategy, service)

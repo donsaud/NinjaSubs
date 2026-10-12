@@ -42,7 +42,7 @@ def isolated_sync_cache():
 
 
 @pytest.fixture(autouse=True)
-def settings_cache_points_at_tests():
+def settings_cache_points_at_tests(tmp_path):
     """Keep the live settings object pointed at the test cache.
 
     The environment variable covers modules imported before this ran; this
@@ -53,7 +53,9 @@ def settings_cache_points_at_tests():
     previous_cache = settings.CACHE_DIR
     previous_reference = settings.REFERENCE_CACHE_DIR
     settings.CACHE_DIR = str(_TEST_CACHE_DIR)
-    settings.REFERENCE_CACHE_DIR = str(_TEST_CACHE_DIR / "references")
+    # Video-scoped artifacts deliberately survive subtitle switches. Keep
+    # that production reuse within each test, never across unrelated fixtures.
+    settings.REFERENCE_CACHE_DIR = str(tmp_path / "references")
     try:
         yield
     finally:

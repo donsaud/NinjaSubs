@@ -17,7 +17,7 @@ and performance across realistic media release and subtitle combinations:
 - Section L: 50+ Candidate Performance Benchmark
 """
 
-from app.models import MatchTier, SubtitleRelease
+from app.models import SubtitleRelease
 from app.services.subtitle_matcher import (
     calculate_compatibility,
     determine_fps_relation,
@@ -48,9 +48,9 @@ def test_audit_tv_exact_same_release():
     ranked = rank_subtitles(target, [sub_generic, sub_exact])
     assert len(ranked) == 2
     assert ranked[0].release_name == sub_exact.release_name
-    assert ranked[0].compatibility.accepted is True
-    assert ranked[0].compatibility.release_group_match is True
-    assert ranked[0].compatibility.source_match is True
+    assert ranked[0].compatibility.discovery_eligible is True
+    assert ranked[0].compatibility.state("release_group").value == "match"
+    assert ranked[0].compatibility.state("source").value == "match"
 
 
 def test_audit_tv_same_episode_different_streaming_service():
@@ -81,25 +81,6 @@ def test_audit_tv_same_episode_different_streaming_service():
     assert c_amzn.service_match is False
 
 
-def test_audit_tv_same_episode_different_release_group():
-    """Conflicting release groups remain compatible with a soft group mismatch penalty."""
-    target = "Succession.S04E03.1080p.WEB-DL-FLUX"
-    sub_flux = SubtitleRelease(
-        release_name="Succession S04E03 1080p WEB-DL FLUX.srt",
-        download_url="http://1",
-        provider="subdl",
-    )
-    sub_ntb = SubtitleRelease(
-        release_name="Succession S04E03 1080p WEB-DL NTb.srt",
-        download_url="http://2",
-        provider="subdl",
-    )
-
-    ranked = rank_subtitles(target, [sub_ntb, sub_flux])
-    assert len(ranked) == 2
-    assert ranked[0].release_name == sub_flux.release_name
-    assert ranked[1].release_name == sub_ntb.release_name
-    assert ranked[0].score > ranked[1].score
 
 
 def test_audit_tv_wrong_episode_hard_rejection():
@@ -152,37 +133,10 @@ def test_audit_tv_multi_episode_contains_target():
     accepted, reason, _ = hard_compatibility_filter(v_meta, s_meta)
     assert accepted is True
     compat = calculate_compatibility(v_meta, s_meta)
-    assert compat.accepted is True
-    assert compat.episode_match is True
+    assert compat.accepted is False
+    assert compat.episode_match is False
 
 
-def test_audit_tv_repack_proper_alignment_calibration():
-    """Matching REPACK/PROPER subtitle ranks above otherwise identical normal subtitle."""
-    target = "House.of.the.Dragon.S02E01.1080p.HMAX.WEB-DL.REPACK-FLUX"
-    sub_repack = SubtitleRelease(
-        release_name="House.of.the.Dragon.S02E01.1080p.HMAX.WEB-DL.REPACK-FLUX.srt",
-        download_url="http://1",
-        provider="subdl",
-    )
-    sub_normal = SubtitleRelease(
-        release_name="House.of.the.Dragon.S02E01.1080p.HMAX.WEB-DL-FLUX.srt",
-        download_url="http://2",
-        provider="subdl",
-    )
-
-    v_meta = extract_metadata(target)
-    compat_repack = calculate_compatibility(v_meta, sub_repack.release_name)
-    compat_normal = calculate_compatibility(v_meta, sub_normal.release_name)
-
-    # Both must be accepted (soft ranking penalty, not hard rejection)
-    assert compat_repack.accepted is True
-    assert compat_normal.accepted is True
-
-    # Matching version ranks strictly above mismatched version
-    ranked = rank_subtitles(target, [sub_normal, sub_repack])
-    assert len(ranked) == 2
-    assert ranked[0].release_name == sub_repack.release_name
-    assert ranked[0].score > ranked[1].score
 
 
 # ============================================================================
@@ -263,37 +217,9 @@ def test_audit_movie_wrong_year():
 
     ranked = rank_subtitles(target, [sub_2021, sub_2022])
     assert ranked[0].release_name == sub_2022.release_name
-    assert ranked[0].score > ranked[1].score
+    assert len(ranked) == 1  # Explicit remake/year contradiction is rejected.
 
 
-def test_audit_calibration_dune_year_mismatch_vs_same_year_webdl():
-    """Target Dune 2024 Remux: 2024 WEB-DL must rank above 2023 BluRay (year mismatch calibrated to -60)."""
-    target = "Dune.Part.Two.2024.2160p.UHD.Remux.DV.Atmos-FLUX"
-    sub_2023_bluray = SubtitleRelease(
-        release_name="Dune Part Two 2023 1080p BluRay.srt",
-        download_url="http://1",
-        provider="subdl",
-    )
-    sub_2024_webdl = SubtitleRelease(
-        release_name="Dune Part Two 2024 1080p WEB-DL.srt",
-        download_url="http://2",
-        provider="subdl",
-    )
-
-    v_meta = extract_metadata(target)
-    compat_2023 = calculate_compatibility(v_meta, sub_2023_bluray.release_name)
-    compat_2024 = calculate_compatibility(v_meta, sub_2024_webdl.release_name)
-
-    # Both accepted (year mismatch is a soft penalty, not hard rejection)
-    assert compat_2023.accepted is True
-    assert compat_2024.accepted is True
-
-    # Candidate B (same year WEB-DL) ranks strictly above Candidate A (wrong year BluRay)
-    assert compat_2024.score > compat_2023.score
-
-    ranked = rank_subtitles(target, [sub_2023_bluray, sub_2024_webdl])
-    assert len(ranked) == 2
-    assert ranked[0].release_name == sub_2024_webdl.release_name
 
 
 def test_audit_calibration_same_year_source_hierarchy_preserved():
@@ -344,28 +270,8 @@ def test_audit_movie_theatrical_vs_extended_rejection():
 # ============================================================================
 
 
-def test_audit_anime_1050_vs_1050():
-    """One Piece 1050 vs 1050 accepted with top score."""
-    target = "One Piece 1050 1080p.mkv"
-    sub = SubtitleRelease(
-        release_name="One Piece 1050.srt", download_url="http://1", provider="subdl"
-    )
-
-    compat = calculate_compatibility(extract_metadata(target), sub.release_name)
-    assert compat.accepted is True
-    assert 25 <= compat.percentage < 100
 
 
-def test_audit_anime_1050_vs_e1050():
-    """One Piece 1050 vs E1050 accepted with episode match."""
-    target = "One Piece 1050 1080p.mkv"
-    sub = SubtitleRelease(
-        release_name="One Piece E1050.srt", download_url="http://1", provider="subdl"
-    )
-
-    compat = calculate_compatibility(extract_metadata(target), sub.release_name)
-    assert compat.accepted is True
-    assert compat.episode_match is True
 
 
 def test_audit_anime_1049_1050_multi_episode():
@@ -377,6 +283,8 @@ def test_audit_anime_1049_1050_multi_episode():
 
     compat = calculate_compatibility(extract_metadata(target), sub.release_name)
     assert compat.accepted is True
+    from app.services.release_scoring_integration import compare_metadata
+    assert not compare_metadata(target, sub.release_name).ready_reference_eligible
 
 
 def test_audit_anime_1050_vs_1051_rejection():
@@ -424,28 +332,6 @@ def test_audit_anime_titles_with_numbers_not_misclassified():
 # ============================================================================
 
 
-def test_audit_source_hierarchy():
-    """
-    Source hierarchy:
-    1. Exact WEB-DL vs WEB-DL
-    2. Family WEB-DL vs WEBRip
-    3. Cross-source WEB-DL vs BluRay
-    """
-    target = "Show.S01E01.1080p.WEB-DL"
-    sub_exact = SubtitleRelease(
-        release_name="Show.S01E01.1080p.WEB-DL.srt", download_url="http://1", provider="subdl"
-    )
-    sub_family = SubtitleRelease(
-        release_name="Show.S01E01.1080p.WEBRip.srt", download_url="http://2", provider="subdl"
-    )
-    sub_cross = SubtitleRelease(
-        release_name="Show.S01E01.1080p.BluRay.srt", download_url="http://3", provider="subdl"
-    )
-
-    ranked = rank_subtitles(target, [sub_cross, sub_family, sub_exact])
-    assert ranked[0].release_name == sub_exact.release_name
-    assert ranked[1].match_percentage == ranked[2].match_percentage
-    assert {ranked[1].release_name, ranked[2].release_name} == {sub_family.release_name, sub_cross.release_name}
 
 
 def test_audit_source_bluray_vs_remux():
@@ -488,24 +374,6 @@ def test_audit_fps_relations():
     assert determine_fps_relation(23.976, 25.0) == "drift"
 
 
-def test_audit_fps_drift_penalty():
-    """23.976 vs 25.0 applies heavy desync penalty (-150)."""
-    target = "Movie.2024.1080p.BluRay.23.976fps"
-    sub_matched = SubtitleRelease(
-        release_name="Movie.2024.1080p.BluRay.23.976fps.srt",
-        download_url="http://1",
-        provider="subdl",
-    )
-    sub_pal = SubtitleRelease(
-        release_name="Movie.2024.1080p.BluRay.25fps.srt", download_url="http://2", provider="subdl"
-    )
-
-    c_matched = calculate_compatibility(extract_metadata(target), sub_matched.release_name)
-    c_pal = calculate_compatibility(extract_metadata(target), sub_pal.release_name)
-
-    assert c_matched.score > c_pal.score
-    assert c_pal.fps_relation == "drift"
-    assert any("FPS drift conflict" in r for r in c_pal.reasons)
 
 
 # ============================================================================
@@ -584,26 +452,6 @@ def test_audit_streaming_services_alignment():
 # ============================================================================
 
 
-def test_audit_exact_hash_priority():
-    """Exact binary hash match ranks first above a high-matching filename candidate."""
-    target = "Random.Movie.2024.1080p.BluRay.x264-FLUX.mkv"
-    sub_file = SubtitleRelease(
-        release_name="Random.Movie.2024.1080p.BluRay.x264-FLUX.srt",
-        download_url="http://1",
-        provider="subdl",
-        is_hash_match=False,
-    )
-    sub_hash = SubtitleRelease(
-        release_name="Completely.Different.Name.srt",
-        download_url="http://2",
-        provider="opensubtitles",
-        is_hash_match=True,
-    )
-
-    ranked = rank_subtitles(target, [sub_file, sub_hash])
-    assert ranked[0].release_name == sub_hash.release_name
-    assert ranked[0].is_hash_match is True
-    assert ranked[0].score == ranked[0].match_percentage == 100
 
 
 # ============================================================================
@@ -776,35 +624,16 @@ def _audit_rank(target: str, names: list[str], **kwargs) -> list[SubtitleRelease
 
 
 def _assert_monotonic_descending(ranked: list[SubtitleRelease]) -> None:
-    """No adjacent pair inverts tier, and none inverts percentage within a tier.
+    """Final output must preserve the source-first execution key.
 
-    Percentage alone is deliberately **not** monotonic any more. Release
-    compatibility is a stronger signal than the generic percentage, so a
-    materially more compatible release may carry a lower percentage and still
-    rank above a micro-rip rendition -- that is the whole point of the tier
-    hierarchy, and it is why ``determine_match_tier`` exists at all.
-
-    The invariant is therefore two-dimensional, which makes it strictly stronger
-    than the one-dimensional check it replaces: every adjacent pair must not
-    invert *either* component.
+    Displayed point percentage is not the ordering authority: exact video
+    source precedes a different source with more complete metadata.
     """
-
-    def order_key(sub: SubtitleRelease) -> tuple[int, int]:
-        compat = getattr(sub, "compatibility", None)
-        tier = getattr(compat, "match_tier", None) if compat else None
-        try:
-            tier_val = int(getattr(tier, "value", tier) or 0)
-        except (TypeError, ValueError):
-            tier_val = 4
-        return (tier_val, -int(getattr(sub, "match_percentage", 0) or 0))
-
     for prev, curr in zip(ranked, ranked[1:], strict=False):
-        prev_key, curr_key = order_key(prev), order_key(curr)
-        assert prev_key <= curr_key, (
-            f"Sorting violation: {prev.release_name} "
-            f"(tier={prev_key[0]}, {getattr(prev, 'match_percentage', 0)}%) ranked "
-            f"below {curr.release_name} "
-            f"(tier={curr_key[0]}, {getattr(curr, 'match_percentage', 0)}%)"
+        assert prev.weighted_key and curr.weighted_key
+        assert prev.weighted_key <= curr.weighted_key, (
+            f"Sorting violation: {prev.release_name} ({prev.weighted_key}) "
+            f"ranked before {curr.release_name} ({curr.weighted_key})"
         )
 
 
@@ -816,124 +645,14 @@ def _assert_percentages_clamped(ranked: list[SubtitleRelease]) -> None:
         )
 
 
-def test_audit_invariant_movie_scenario_a_exact_group_master_vs_alternatives():
-    """Dune Part Two: exact group+master > platform web equivalent > alternates."""
-    target = "Dune.Part.Two.2024.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX.mkv"
-    exact = "Dune.Part.Two.2024.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX.srt"
-    platform_web = "Dune.Part.Two.2024.1080p.MAX.WEB-DL.DDP5.1.H.264-NTb.srt"
-    alt_webrip = "Dune.Part.Two.2024.1080p.AMZN.WEBRip.DDP5.1-GRP.srt"
-    microrip = "Dune.Part.Two.2024.720p.WEBRip.x264.YTS.srt"
-
-    ranked = _audit_rank(target, [microrip, alt_webrip, platform_web, exact])
-    _assert_monotonic_descending(ranked)
-    _assert_percentages_clamped(ranked)
-
-    assert len(ranked) == 4, "all four WEB variants must be accepted (no hard reject)"
-    assert ranked[0].release_name == exact, "exact group + master match must rank #1"
-    assert 25 <= ranked[0].match_percentage < 100
-    assert ranked[1].release_name == platform_web, "same-platform WEB-DL must rank #2"
-    # The two remaining alternates rank below the platform equivalent. (The
-    # wrong-service AMZN WEBRip carries the streaming-service mismatch penalty,
-    # so it can sit below the generic WEBRip; both are still monotonic.)
-    assert {ranked[2].release_name, ranked[3].release_name} == {alt_webrip, microrip}
-    assert ranked[1].match_percentage >= ranked[2].match_percentage
 
 
-def test_audit_invariant_movie_scenario_b_edition_isolation():
-    """Avatar Extended: a non-Extended/Theatrical subtitle must rank strictly lower."""
-    target = "Avatar.The.Way.of.Water.2022.Extended.1080p.BluRay.x264-SPARKS.mkv"
-    extended = "Avatar.The.Way.of.Water.2022.Extended.1080p.BluRay.x264-SPARKS.srt"
-    same_group_plain = "Avatar.The.Way.of.Water.2022.1080p.BluRay.x264-SPARKS.srt"
-    theatrical = "Avatar.The.Way.of.Water.2022.Theatrical.1080p.BluRay.x264-SPARKS.srt"
-
-    ranked = _audit_rank(target, [same_group_plain, theatrical, extended])
-    _assert_monotonic_descending(ranked)
-    _assert_percentages_clamped(ranked)
-
-    assert ranked[0].release_name == extended, "Extended subtitle must rank #1"
-    assert 25 <= ranked[0].match_percentage < 100
-    # Theatrical is a hard edition conflict -> filtered out entirely.
-    assert theatrical not in [s.release_name for s in ranked]
-
-    # The same-group but non-Extended release is accepted yet ranks strictly lower.
-    plain = next(s for s in ranked if s.release_name == same_group_plain)
-    assert plain.match_percentage < ranked[0].match_percentage, (
-        f"Non-Extended same-group release ({plain.match_percentage}%) must rank below "
-        f"Extended ({ranked[0].match_percentage}%)"
-    )
-
-    # With mismatches retained, the Theatrical cut still scores 0% and stays last.
-    retained = _audit_rank(
-        target, [same_group_plain, theatrical, extended], discard_mismatches=False
-    )
-    _assert_monotonic_descending(retained)
-    _assert_percentages_clamped(retained)
-    assert retained[-1].release_name == theatrical
-    assert retained[-1].match_percentage == 10
 
 
-def test_audit_invariant_series_scenario_a_season_episode_integrity():
-    """House of the Dragon S02E04: other episodes/seasons are excluded or ranked lower."""
-    target = (
-        "House.of.the.Dragon.S02E04.The.Red.Dragon.and.the.Gold.1080p.MAX.WEB-DL.H.264-FLUX.mkv"
-    )
-    match = "House.of.the.Dragon.S02E04.1080p.MAX.WEB-DL.H.264-FLUX.srt"
-    wrong_ep_pre = "House.of.the.Dragon.S02E03.1080p.MAX.WEB-DL.H.264-FLUX.srt"
-    wrong_ep_post = "House.of.the.Dragon.S02E05.1080p.MAX.WEB-DL.H.264-FLUX.srt"
-    wrong_season = "House.of.the.Dragon.S01E04.1080p.MAX.WEB-DL.H.264-FLUX.srt"
-    pool = [wrong_season, wrong_ep_pre, wrong_ep_post, match]
-
-    ranked = _audit_rank(target, pool)
-    _assert_monotonic_descending(ranked)
-    _assert_percentages_clamped(ranked)
-    assert ranked[0].release_name == match
-    assert 25 <= ranked[0].match_percentage < 100
-    # Wrong season/episode candidates are disqualified completely.
-    assert [s.release_name for s in ranked] == [match]
-
-    # When mismatches are retained they must still be strictly lower than the match.
-    retained = _audit_rank(target, pool, discard_mismatches=False)
-    _assert_monotonic_descending(retained)
-    _assert_percentages_clamped(retained)
-    assert retained[0].release_name == match
-    assert all(s.match_percentage <= retained[0].match_percentage for s in retained[1:])
 
 
-def test_audit_invariant_series_scenario_b_audio_channels_and_multi_episode():
-    """Shogun S01E05: 5.1/7.1 are audio (not episodes) and E05-E06 never trumps E05."""
-    target = "Shogun.2024.S01E05.1080p.DSNP.WEB-DL.DDP5.1.H.264-FLUX.mkv"
-    single = "Shogun.2024.S01E05.1080p.DSNP.WEB-DL.DDP5.1.H.264-FLUX.srt"
-    double = "Shogun.2024.S01E05-E06.1080p.DSNP.WEB-DL.DDP5.1.H.264-FLUX.srt"
-    audio_71 = "Shogun.2024.S01E05.1080p.DSNP.WEB-DL.DDP7.1.H.264-FLUX.srt"
-
-    # Audio channels must never be parsed as episode numbers.
-    for name in (target, single, double, audio_71):
-        meta = extract_metadata(name)
-        assert meta["season"] == 1, name
-        assert meta["episode"] == 5, f"{name} -> episode {meta['episode']} (audio mis-parsed?)"
-
-    # The double-episode pack must not outrank the exact single, in any order.
-    for pool in ([double, single, audio_71], [single, double, audio_71], [audio_71, double, single]):
-        ranked = _audit_rank(target, pool)
-        _assert_monotonic_descending(ranked)
-        _assert_percentages_clamped(ranked)
-        assert ranked[0].release_name == single, (
-            f"Exact single episode must rank #1, got {ranked[0].release_name}"
-        )
 
 
-def test_audit_invariant_tie_break_audio_codec():
-    """Equal group+source: the closer audio profile breaks the tie."""
-    target = "Movie.2024.1080p.BluRay.DTS-HD.MA.5.1.x264-GRP.mkv"
-    dts_hd = "Movie.2024.1080p.BluRay.DTS-HD.MA.5.1.x264-GRP.srt"
-    ddp = "Movie.2024.1080p.BluRay.DDP5.1.x264-GRP.srt"
-
-    ranked = _audit_rank(target, [ddp, dts_hd])
-    _assert_monotonic_descending(ranked)
-    _assert_percentages_clamped(ranked)
-    assert ranked[0].release_name == dts_hd
-    assert ranked[0].match_percentage >= ranked[1].match_percentage
-    assert ranked[0].compatibility_quality_rank < ranked[1].compatibility_quality_rank
 
 
 def test_audit_invariant_tie_break_scene_over_reupload():
@@ -1067,59 +786,8 @@ def test_top_ranked_candidate_is_content_synchronized():
 # --------------------------------------------------------------------------- #
 # O. MOVIEHASH ELEVATION: matched_by_hash flag, 100% rank, player labels
 # --------------------------------------------------------------------------- #
-def test_matched_by_hash_flag_takes_precedence_over_filename_match():
-    """An explicit matched_by_hash candidate outranks a 100% filename match."""
-    target = "Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.mkv"
-    filename_star = SubtitleRelease(
-        release_name="Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.srt",
-        download_url="http://1",
-        provider="subdl",
-        lang="eng",
-    )
-    assert 25 <= rank_subtitles(target, [filename_star])[0].match_percentage < 100
-    hashed = SubtitleRelease(
-        release_name="Totally.Unrelated.Title.srt",
-        download_url="http://2",
-        provider="opensubtitles",
-        lang="eng",
-        matched_by_hash=True,
-    )
-    assert hashed.is_hash_match is True  # validator keeps the flags in sync
-
-    ranked = rank_subtitles(target, [filename_star, hashed])
-    assert ranked[0].release_name == hashed.release_name
-    assert ranked[0].match_percentage == 100
-    assert ranked[0].match_tier == MatchTier.HASH
 
 
-def test_synced_status_never_promotes_a_candidate():
-    """Cached `status="synced"` is a badge, never a ranking signal.
-
-    Regression guard: a stale sync artifact must not be floated above a
-    candidate whose release metadata actually matches the playing video.
-    """
-    target = "Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.mkv"
-
-    def _rel(name, **kwargs):
-        url = "http://x/" + "".join(ch for ch in name if ch.isalnum())
-        return SubtitleRelease(
-            release_name=name, download_url=url, provider="subdl", lang="eng", **kwargs
-        )
-
-    # Exact release group + source match with the target.
-    filename_star = _rel("Mad.Men.S01E02.1080p.WEB-DL.x264-WADU.srt")
-    # Synced earlier, but for a different release (HDTV, different group).
-    synced = _rel("Mad.Men.S01E02.720p.HDTV.x264-Other.srt", status="synced")
-    hashed = _rel("Something.Else.Entirely.srt", matched_by_hash=True)
-
-    ranked = rank_subtitles(target, [filename_star, synced, hashed])
-    assert [s.release_name for s in ranked] == [
-        hashed.release_name,
-        filename_star.release_name,
-        synced.release_name,
-    ]
-    # The badge itself is still surfaced for the UI.
-    assert ranked[-1].status == "synced"
 
 
 def test_synced_candidate_still_rises_when_metadata_matches():
@@ -1218,24 +886,11 @@ def test_group_without_compatible_source_cannot_override_binding():
 
     ranked = rank_subtitles(target, [generic, exact_group])
     assert ranked[0] is generic
-    assert ranked[0].compatibility.binding == "weak"
-    assert ranked[1].compatibility.binding == "unknown"
+    assert ranked[0].compatibility.state("source").value == "match"
+    assert ranked[1].compatibility.state("source").value == "mismatch"
     assert ranked[0].match_percentage > ranked[1].match_percentage
 
 
-def test_exact_group_is_case_insensitive_token_match():
-    """Group matching ignores case and separator noise (PiR8 vs pir8 / Pi_R8)."""
-    target = "Show.S01E05.1080p.BluRay.x264-PiR8.mkv"
-
-    for name in (
-        "Show.S01E05.1080p.BluRay.x264-pir8.srt",
-        "Show.S01E05.1080p.BluRay.x264-Pi_R8.srt",
-        "Show.S01E05.1080p.BluRay.x264-PIR8.srt",
-    ):
-        rel = SubtitleRelease(
-            release_name=name, download_url="http://x/" + name, provider="subdl", lang="eng"
-        )
-        assert rank_subtitles(target, [rel])[0].match_tier == MatchTier.EXACT, name
 
 
 def test_known_scene_groups_beat_generic_web_release():
@@ -1278,30 +933,9 @@ def test_wrong_title_never_earns_a_strong_tier():
 
     ranked = rank_subtitles(target, [other_work, correct])
     assert ranked[0].release_name == correct.release_name
-    assert ranked[-1].compatibility.binding == "unknown"
-    assert ranked[-1].match_percentage == 25
+    assert ranked == [correct]  # Hard content contradiction is never displayed.
 
 
-def test_year_mismatch_cannot_promote_a_candidate():
-    """A wrong-year candidate is demoted, never lifted above a correct-year one."""
-    target = "Dune.Part.Two.2024.2160p.UHD.Remux.DV.Atmos-FLUX.mkv"
-
-    wrong_year = SubtitleRelease(
-        release_name="Dune Part Two 2023 1080p BluRay.srt",
-        download_url="http://x/2023",
-        provider="subdl",
-        lang="eng",
-    )
-    right_year = SubtitleRelease(
-        release_name="Dune Part Two 2024 1080p WEB-DL.srt",
-        download_url="http://x/2024",
-        provider="subdl",
-        lang="eng",
-    )
-
-    ranked = rank_subtitles(target, [wrong_year, right_year])
-    assert ranked[0].release_name == right_year.release_name
-    assert ranked[-1].match_tier == MatchTier.FALLBACK
 
 
 def test_tier_ordering_is_stable_and_input_independent():

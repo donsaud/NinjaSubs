@@ -14,3 +14,13 @@ All three files are required regression fixtures. The test independently
 generates output using only `target.srt` and `reference.srt`, then opens
 `expected.srt`. It requires 825 exact start matches and end error at most 1 ms.
 The oracle is never an input to synchronization or verification.
+
+## Live FraMeSToR reference (926 cues)
+
+`whiplash-live-framestor-926.srt` is a byte copy of the SubDL FraMeSToR
+reference naturally selected during the user-confirmed live playback
+(SHA-256 `c6c1038c4cfa5984b82b34294d9f500d92658ee5d562d155b3c910ff2b2772b3`).
+Do NOT confuse it with the 960-cue `reference.srt` above: the two files are
+different releases/members (926 vs 960 cues, different hashes) selected in
+different runs. The live file pins the Timeline Affine golden regression;
+the 960-cue file pins the offline Two-Point and PAL regressions.

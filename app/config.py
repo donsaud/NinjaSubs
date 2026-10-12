@@ -110,11 +110,12 @@ class Settings(BaseSettings):
     #: How much weaker the second correlation peak must be for the peak to
     #: count as unambiguous. Above this, evidence is ambiguous and abstains.
     VIDEO_TIMELINE_AMBIGUITY_RATIO: float = 0.85
-    # Hard inline budget for sync during a player request. Downloads from the
-    # reference providers + alass routinely take ~10s, so the budget is generous;
-    # past it we serve the original and let the (still-running) sync warm the
-    # cache for the next request.
+    # Initial inline sync wait. On expiry, keep waiting for this response:
+    # a background result cannot replace bytes already downloaded by Stremio.
     SYNC_TOTAL_REQUEST_BUDGET: float = 15.0
+    # Bounded total response wait for explicit Auto-Sync requests. Normal fast
+    # requests return immediately; hard expiry retains the original fallback.
+    SYNC_COMPLETION_REQUEST_BUDGET: float = 60.0
 
     # Persistent English-reference disk cache (30 days) for the sync pipeline.
     REFERENCE_CACHE_DIR: str | None = None

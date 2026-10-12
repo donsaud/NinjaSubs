@@ -1,0 +1,77 @@
+{
+  "case_id": "weighted_source_vs_group",
+  "target": {
+    "metadata": {
+      "media_type": "series",
+      "title": "Show",
+      "year": 2020,
+      "season": 1,
+      "episode": 1,
+      "source": "BluRay",
+      "release_group": "ALPHA",
+      "resolution": "1080p",
+      "video_codec": "H264",
+      "audio_codec": "AC3",
+      "service_disc_family": "BD"
+    }
+  },
+  "candidates": [
+    {
+      "id": "web",
+      "provider": "subdl",
+      "provider_id": "web",
+      "metadata": {
+        "media_type": "series",
+        "title": "Show",
+        "year": 2020,
+        "season": 1,
+        "episode": 1,
+        "source": "WEB-DL",
+        "release_group": "ALPHA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD"
+      },
+      "language": "ara"
+    },
+    {
+      "id": "disc",
+      "provider": "subdl",
+      "provider_id": "disc",
+      "metadata": {
+        "media_type": "series",
+        "title": "Show",
+        "year": 2020,
+        "season": 1,
+        "episode": 1,
+        "source": "BluRay",
+        "release_group": "BETA",
+        "resolution": "1080p",
+        "video_codec": "H264",
+        "audio_codec": "AC3",
+        "service_disc_family": "BD"
+      },
+      "language": "ara"
+    }
+  ],
+  "expected": {
+    "discovery_order": [
+      "disc",
+      "web"
+    ],
+    "reference_order": [
+      "disc",
+      "web"
+    ],
+    "display_order": [
+      "disc",
+      "web"
+    ],
+    "scores": {
+      "disc": 339,
+      "web": 314
+    }
+  },
+  "provenance": "SYNTHETIC_BEHAVIORAL_EXPECTATION"
+}

@@ -217,11 +217,11 @@ async def test_resolver_rejects_wrong_season_release():
 
         async def download_archive(self, url, api_key=None):
             self.downloaded.append(url)
-            return BIG
+            return _zip_with_srt("Dexter.S08E01.2006.BluRay.x265-GRP.srt", BIG.decode())
 
     provider = _P()
     resolver = DualReferenceResolver(subdl_provider=provider, subsource_provider=None, timeout=0.5)
-    query = ReferenceQuery(imdb_id="tt0773262", media_type="series", season=8, episode=1)
+    query = ReferenceQuery(imdb_id="tt0773262", media_type="series", season=8, episode=1, target_filename="Dexter.S08E01.2006.BluRay.x265-GRP.mkv")
     # The season-matched S08 pack is accepted (and sliced by member); S01 is not.
     content = await resolver.resolve(query)
     assert content is not None
@@ -352,7 +352,7 @@ async def test_resolver_logs_tiered_candidates(caplog):
                 target_filename="Dexter.S08E01.1080p.BluRay.x265-GRP.mkv",
             )
         )
-    assert "candidate semantic_rank=" in caplog.text
+    assert "[weighted-reference]" in caplog.text
     assert "selected reference" in caplog.text
 
 
@@ -417,7 +417,7 @@ async def test_resolver_season_filter_keeps_tagged_candidate(monkeypatch):
 
     provider = _P()
     resolver = DualReferenceResolver(subsource_provider=provider, subdl_provider=None, timeout=0.5)
-    query = ReferenceQuery(imdb_id="tt0773262", media_type="series", season=8, episode=1)
+    query = ReferenceQuery(imdb_id="tt0773262", media_type="series", season=8, episode=1, target_filename="Dexter.S08E01.1080p.WEB-DL.mkv")
     # The tagged S08E01 WEB-DL reference is accepted; untagged peers are dropped.
     assert await resolver.resolve(query) is not None
     assert provider.downloaded == ["http://good"]
@@ -942,7 +942,7 @@ async def test_resolver_downloads_edition_matched_bluray():
 
         async def download_archive(self, url, api_key=None):
             self.downloaded.append(url)
-            return BIG
+            return _zip_with_srt("Dexter.S08E01.720p.BluRay.x264-DEMAND.srt", BIG.decode())
 
     provider = _P()
     resolver = DualReferenceResolver(subsource_provider=provider, subdl_provider=None, timeout=0.5)
@@ -978,7 +978,7 @@ async def test_resolver_scores_matching_source_highest():
 
         async def download_archive(self, url, api_key=None):
             self.downloaded.append(url)
-            return BIG
+            return _zip_with_srt("Dexter.S08E01.720p.BluRay.x264-DEMAND.srt", BIG.decode())
 
     provider = _P()
     resolver = DualReferenceResolver(subdl_provider=provider, subsource_provider=None, timeout=0.5)
@@ -1019,8 +1019,8 @@ def test_select_zip_member_mixed_naming_picks_only_requested_episode():
 
 
 @pytest.mark.asyncio
-async def test_tier1_candidate_used_without_season_query(tmp_path):
-    """Any episode candidate is accepted immediately; no season fan-out."""
+async def test_cross_source_episode_candidate_triggers_season_query(tmp_path):
+    """Cross-source episode results must not hide a video-compatible pack."""
 
     class _TieredProvider:
         def __init__(self):
@@ -1061,8 +1061,10 @@ async def test_tier1_candidate_used_without_season_query(tmp_path):
         )
     )
     assert content is not None
-    assert provider.searches == [2]
-    assert provider.downloaded == ["http://hdtv"]
+    assert provider.searches == [2, None]
+    # The matching source pack is tried first. Its raw, unresolved payload
+    # is not usable episode evidence, so the ready HDTV fallback follows.
+    assert provider.downloaded == ["http://pack", "http://hdtv"]
 
 
 @pytest.mark.asyncio
@@ -1230,7 +1232,7 @@ async def test_tier2_relaxed_recovers_season_pack_for_uninformative_target(tmp_p
             target_filename="e4WcFo4Tz5J8PoFwiBfP880XsBuHk4dS.mkv",
         )
     )
-    assert content is not None
+    assert content is None  # Unknown target source cannot authorize a ready reference.
     assert provider.searches == [1, None]
     assert provider.downloaded == ["http://pack"]
 
@@ -1374,24 +1376,8 @@ def test_select_reference_picks_higher_tier_candidate():
     assert _select_reference([bluray, webdl], _mad_men_query()) is webdl
 
 
-def test_select_reference_falls_back_deterministically():
-    from app.services.sync.external_strategy import _select_reference
-
-    # Both in the fallback tier with no shared metadata: the release name is the
-    # final tie-breaker, so ordering is reproducible instead of input-dependent.
-    first = _cand("Mad.Men.S01E02.release.one.srt", lang="por", hi=True)
-    second = _cand("Mad.Men.S01E02.release.two.srt", lang="por", hi=True)
-    assert _select_reference([first, second], _mad_men_query()) is first
-    assert _select_reference([second, first], _mad_men_query()) is first
 
 
-def test_select_reference_exact_group_language_beats_generic_english():
-    from app.services.sync.external_strategy import _select_reference
-
-    generic_en = _cand("Mad.Men.S01E02.1080p.BluRay.23.976.FPS.x264-GRP.srt", lang="eng")
-    wadu_fr = _cand("Mad.Men.S01E02.2160p.HMAX.WEB-DL.H.265-WADU.srt", lang="fra")
-    # Tier (exact group) outranks the English-language preference.
-    assert _select_reference([generic_en, wadu_fr], _mad_men_query()) is wadu_fr
 
 
 @pytest.mark.asyncio
