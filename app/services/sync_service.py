@@ -416,7 +416,9 @@ _TIMEOUT_TIERS: tuple[tuple[int, float], ...] = (
 
 
 def _validate_synced_output(target_srt: str, synced_srt: str) -> bool:
-    """Validate that the alass-aligned subtitle is structurally sound and reasonable.
+    """Legacy structural diagnostic, retained for offline callers only.
+
+    Production proposals are judged by independent dialogue verification.
 
     Checks:
     - Minimum cue count is preserved.
@@ -521,7 +523,8 @@ class SubtitleSyncService:
         Runs ``alass <reference> <target> <output> --split-penalty <penalty>`` inside
         secure temporary files with a strict subprocess timeout.
 
-        A zero exit code with a non-empty output is trusted and returned as-is;
+        A zero exit code with non-empty output returns a timing proposal;
+        the caller must reconstruct content and verify independent dialogue.
         the remaining keyword arguments are accepted for call compatibility.
         """
         if not target_srt or not reference_srt:
@@ -552,23 +555,11 @@ class SubtitleSyncService:
             )
             return None
 
-        # Duration + timeline compatibility gate: files whose runtimes or cue
-        # populations diverge cannot be the same cut (season pack vs episode,
-        # wrong episode, extended vs broadcast, trailer, ...). Percentile
-        # durations ignore trailing credit/outro cues; edition references are
-        # additionally checked for cue-count and season-pack structure.
-        rejection = _timeline_rejection(
-            target_srt,
-            reference,
-            decision_kind=decision_kind,
-            relaxed=relaxed,
-            source_confirmed=source_confirmed,
-            reference_partial=reference_partial,
-        )
-        if rejection is not None:
-            logger.warning(
-                "[sync] %s -> aborting alass, serving original", rejection
-            )
+        # ALASS produces timing proposals, never synchronization verdicts.
+        # Runtime and cue population do not establish dialogue correspondence.
+        # An unresolved concatenated season remains an episode-identity error.
+        if _backward_jumps(_cue_spans(reference)) >= _MIN_PACK_RESETS:
+            logger.warning("[sync] reference looks like a season pack -> aborting alass")
             return None
 
         effective_timeout = self._effective_timeout(target_srt, reference)
@@ -706,9 +697,6 @@ class SubtitleSyncService:
                     synced = handle.read()
             if not synced:
                 logger.warning("[sync] alass output was empty text -> fallback")
-                return None
-
-            if not _validate_synced_output(target_srt, synced):
                 return None
 
             logger.info("[sync] success: produced %d chars of synced subtitle", len(synced))

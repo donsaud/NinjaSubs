@@ -78,6 +78,10 @@ class ReferenceQuery:
     episode: int | None = None
     api_keys: dict[str, str] = field(default_factory=dict)
     languages: tuple[str, ...] = ("eng",)
+    #: The requested subtitle's own language (e.g. ``ara``), for language
+    #: scoping of retained season-pack members. Never part of reference
+    #: identity beyond the member's language tag.
+    target_lang: str | None = None
     target_download_url: str | None = None
     target_sub_id: str | None = None
     target_sub_release_name: str | None = None
@@ -213,9 +217,18 @@ class ResolvedReference:
     #: It lets planning skip an exact source already in hand without logging or
     #: persisting a signed address.
     source_download_digest: str | None = None
+    #: True when this reference came from a retained same-lineage season pack
+    #: rather than a fresh download. Provenance only; verification is unchanged.
+    from_season_pack: bool = False
+    #: Previously verified association of this pack with a video lineage.
+    proven_video_lineage: dict | None = None
     #: True when this reference was replayed from the video-scoped artifact
     #: tier rather than downloaded during this request.
     from_video_cache: bool = False
+    #: True when this reference was replayed from the sticky verified
+    #: tier: a reference that previously produced a verified, deliverable
+    #: sync for this exact video. Provenance only; verification is unchanged.
+    from_sticky_reference: bool = False
     # A sampled/partial reference (e.g. only the first 15 min extracted from a
     # remote stream). Its end runtime is deliberately shorter than the target,
     # so duration-mismatch gates must not reject it.

@@ -34,6 +34,12 @@ subs_cache/
 # Dexter Two-Point fixtures: the real HDTV target and FraMeSToR reference
 # exercised by the genuine Two-Point and hybrid routing regressions.
 !tests/fixtures/two_point_sync/dexter/*.srt
+# Penny Dreadful verification-input fixtures: the real HDTV target (timing-
+# only cues), the Arabic and English BluRay references, and the measured ALASS
+# output pinning the leniency boundary regressions.
+!tests/fixtures/penny/*.srt
+# Exact cached E02/E04/E05 dialogue bytes used by the shared-policy regressions.
+!tests/fixtures/dialogue_alignment/**/*.srt
 
 # Python bytecode and compiler caches
 __pycache__/
@@ -76,6 +82,11 @@ Thumbs.db
 # Disposable local Stremio/Docker experiment transcripts (never source).
 hybrid-stremio-test-logs.txt
 hybrid-stremio-test2-logs.txt
+# Generated container-log transcripts (ninjasubs-last*.txt). Narrowly scoped:
+# no tracked source, fixture, or doc matches this prefix (verified).
+ninjasubs-*.txt
+# Local binary snapshots of the tree (never source, fixtures, or docs).
+*.rar
 Score
 
 # Local, never-committed real-media material: the 5.4 GB source video and any

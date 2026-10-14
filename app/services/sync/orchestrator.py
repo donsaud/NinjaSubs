@@ -83,6 +83,7 @@ from app.services.sync.matching import (
     is_informative_release_name,
     parse_release_identity,
 )
+from app.services.sync.metadata_gate import MetadataGateAction, decide_metadata_gate
 from app.services.sync.outcomes import (
     REJECTED,
     SYNC_OUTCOMES,
@@ -108,6 +109,22 @@ logger = logging.getLogger(__name__)
 # hash-derived reference may align a target that carries no identity of its
 # own; everything else is a heuristic guess.
 _HASH_DERIVED_REFERENCE_KINDS = frozenset({"hash"})
+
+#: Primary linear synchronization: two verified dialogue anchors fitted to
+#: ``t_new = scale * t + offset`` on the pristine original, judged only by
+#: the Unified timing measurement. ALASS remains the fallback for anything
+#: this cannot solve. Versioned into cache decision segments so future
+#: algorithm changes cannot masquerade as this one.
+TWO_POINT_STRATEGY_ID = "two_point"
+TWO_POINT_MODEL_VERSION = "two-point-v1"
+
+#: Wall-clock bound for one Two-Point anchor-detection run. Real releases
+#: measure 0.06-0.9s; adversarially repetitive texts can explode the RANSAC
+#: pair space instead of converging. Exceeding the bound abstains to the
+#: ALASS fallback (or to ORIGINAL) rather than stalling the request, and
+#: never changes a verdict: detection either completes identically or its
+#: result is discarded unused.
+TWO_POINT_DETECTION_TIMEOUT_SECONDS = 8.0
 
 
 class _PreResolvedReference:
@@ -301,7 +318,7 @@ def build_synced_cache_key(
             target_id
         )
     key = SyncCache.build_key(imdb_id, season_ep, fingerprint, target_id, decision, content_hash)
-    return f"{key}:unified-v1" if unified_authority_enabled(meta) else key
+    return f"{key}:timing-v3" if unified_authority_enabled(meta) else key
 
 
 #: Identifies this OS process, for cache diagnostics only.
@@ -478,6 +495,7 @@ class SyncOrchestrator:
                 "opensubtitles": meta.get("opensubtitles_key") or "",
             },
             languages=("eng", "ara"),
+            target_lang=(str(meta.get("lang") or "").strip().lower() or None),
         )
 
     async def evaluate_and_sync(
@@ -612,8 +630,88 @@ class SyncOrchestrator:
             return None
         return SyncCache.build_verdict_key(
             fingerprint, subtitle_hash, str(meta.get("lang") or "und"),
-            methodology="unified-v1" if unified_authority_enabled(meta) else None,
+            methodology="timing-v3" if unified_authority_enabled(meta) else None,
         )
+
+    def _reference_cache(self) -> Any | None:
+        """Shared on-disk reference store backing sticky promotion/lookup, if any.
+
+        Prefers the external strategy's store; any strategy cache exposing
+        the sticky tier works, since all of them share the reference root.
+        """
+        for _, strategy in self._strategies():
+            cache = getattr(strategy, "cache", None)
+            if (cache is not None
+                    and callable(getattr(cache, "get_sticky_reference", None))
+                    and callable(getattr(cache, "set_sticky_reference", None))):
+                return cache
+        return None
+
+    def _promote_sticky_reference(
+        self, *, meta: dict, target_id: str | None, pristine_text: str | None,
+        resolved: Any | None, evaluation: Any | None,
+    ) -> None:
+        """Record a verified, deliverable reference as this video's sticky first choice.
+
+        Called only on TRANSFORMED serve paths, after identity, distinctness,
+        Timing-First verification, reconstruction, binding, may_serve, and
+        delivery-eligibility all passed. Last verified serve wins
+        (replacement); failures never reach this method, so one bad request
+        can neither erase nor oscillate the preference. Every later reuse
+        still re-verifies, re-checks binding, and re-checks HTTP integrity.
+        Never raises and never affects the serve in progress.
+        """
+        try:
+            if evaluation is None or resolved is None:
+                return
+            if not unified_authority_enabled(meta):
+                # Legacy measurement regimes have their own cache contracts;
+                # sticky promotion is strictly a timing-v3 construct.
+                return
+            state = str(getattr(getattr(evaluation, "sync_state", ""), "value", "") or "")
+            if not state.startswith("verified"):
+                return
+            text = getattr(resolved, "text", None)
+            if not text:
+                return
+            from app.services.sync.reference_content_identity import identical_content
+
+            if identical_content(pristine_text, text):
+                return
+            query = self._build_query(meta, target_id, pristine_text)
+            from app.services.sync.season_pack import promote_season_pack
+
+            promote_season_pack(query, resolved)
+            cache = self._reference_cache()
+            if cache is None:
+                return
+            from app.services.sync_service import sanitize_subtitle
+
+            sanitized = sanitize_subtitle(text)
+            if not sanitized:
+                return
+            evidence = {
+                "sync_state": state,
+                "median_offset_ms": getattr(evaluation, "median_offset_ms", None),
+                "p95_offset_ms": getattr(evaluation, "p95_offset_ms", None),
+            }
+            cache.set_sticky_reference(
+                query,
+                provider=getattr(resolved, "provider", None),
+                candidate=getattr(resolved, "candidate", "") or "",
+                kind=getattr(resolved, "kind", "edition") or "edition",
+                text=sanitized,
+                member_season=getattr(resolved, "member_season", None),
+                member_episode=getattr(resolved, "member_episode", None),
+                score=getattr(resolved, "weighted_score", 0.0),
+                score_without_hash=getattr(resolved, "weighted_score_without_hash", 0.0),
+                source_download_digest=getattr(resolved, "source_download_digest", None),
+                bluray_match=bool(getattr(resolved, "bluray_match", False)),
+                partial=bool(getattr(resolved, "partial", False)),
+                evidence=evidence,
+            )
+        except Exception as exc:
+            logger.debug("[reference-sticky] promotion skipped: %s", type(exc).__name__)
 
     @staticmethod
     def _evaluation_from_verdict(verdict: dict) -> SubtitleEvaluation:
@@ -684,6 +782,24 @@ class SyncOrchestrator:
             return False
         reasons = verdict.get("reasons") or []
         return any("dialogue_text_modified" in str(reason) for reason in reasons)
+
+    @staticmethod
+    def _stale_unified_generation(verdict: dict) -> bool:
+        """True for Unified negatives measured before verification leniency.
+
+        Covers every negative shape (parse aborts, timing refusals, wasted
+        runs): all predate the current verification-input boundary, so each
+        stale key costs at most one extra evaluation, after which its fresh
+        marked verdict governs. Positives are never stale (verified artifacts
+        keep their bytes and digest checks).
+        """
+        if verdict.get("verification_method") != "unified":
+            return False
+        if verdict.get("verification_input") == "lenient-v1":
+            return False
+        return verdict.get("sync_state") in (
+            SyncState.UNVERIFIED.value, SyncState.REJECTED.value,
+        )
 
     def _audit_serve(
         self,
@@ -785,11 +901,11 @@ class SyncOrchestrator:
             if fingerprint:
                 alias_key = SyncCache.build_verdict_alias_key(
                     fingerprint, target_id,
-                    methodology="unified-v1" if unified_authority_enabled(meta) else None,
+                    methodology="timing-v3" if unified_authority_enabled(meta) else None,
                 )
         payload = evaluation.model_dump(mode="json")
         if meta and unified_authority_enabled(meta):
-            payload.update(verification_method="unified", verification_version="unified-v1")
+            payload.update(verification_method="unified", verification_version="timing-v3")
             payload["reference_sha"] = reference_sha
             # Candidate-provenance generation: v2 = timing-only reconstruction
             # boundary (original dialogue + ALASS timings). Pre-v2 Unified
@@ -799,6 +915,14 @@ class SyncOrchestrator:
             # rejections as stale exactly once, then this marker re-enables
             # normal reuse. Positives are unaffected (artifacts unchanged).
             payload["unified_pipeline"] = "v2"
+            # Verification-input generation: lenient-v1 = textless-cue
+            # exclusion with per-block accounting, ambiguous-block abstention,
+            # and dense cue renumbering. Earlier Unified negatives were
+            # measured under strict whole-document parsing, so reusing one
+            # would suppress a now-measurable request; unmarked negatives
+            # re-evaluate exactly once, then this marker re-enables normal
+            # reuse. Positives are unaffected.
+            payload["verification_input"] = "lenient-v1"
             if artifact_bytes is not None:
                 payload["artifact_sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
         if artifact_key:
@@ -819,9 +943,7 @@ class SyncOrchestrator:
             target_text=target_text, reference_text=reference_text,
             synced_text=candidate_text, candidate_algorithm=algorithm,
         )
-        logger.info("[unified] algorithm=%s legacy=%s unified=%s disagreement=%s evidence=%s",
-                    algorithm, legacy.model_dump(mode="json"), evaluation.model_dump(mode="json"),
-                    legacy.sync_state != evaluation.sync_state, telemetry)
+        logger.info("[verification] algorithm=%s evidence=%s", algorithm, telemetry)
         # Keep the existing withhold-only ReferencePolicy ceiling.
         trust = resolved.reference_trust if resolved else legacy.reference_trust
         evaluation.reference_trust = trust
@@ -831,22 +953,17 @@ class SyncOrchestrator:
         evaluation.reference_consensus = reference_evidence.reference_consensus
         evaluation.reference_independent_sources = reference_evidence.reference_independent_sources
         evaluation.reference_failure = reference_evidence.reference_failure
-        if (trust is not None and trust not in {"verified", "strong"}
-                and evaluation.sync_state in {SyncState.VERIFIED_SYNCED, SyncState.VERIFIED_RESYNCED}):
-            evaluation.set_verdict(SyncState.PROBABLE_SYNC, evaluation.verification)
-            evaluation.reasons.append(f"reference trust '{trust}' caps the verified claim")
+        # Trust/ranking labels remain provenance. The independently matched
+        # dialogue decides timing; identity is enforced at the delivery boundary.
         self._last_evaluation = evaluation
         return evaluation
 
     def _legacy_diagnostic(self, meta: dict, *args: Any, **kwargs: Any) -> SubtitleEvaluation:
+        if unified_authority_enabled(meta):
+            return SubtitleEvaluation()
         try:
-            evaluation = self._analyzer.analyze(*args, **kwargs)
-            if unified_authority_enabled(meta):
-                logger.info("[unified] legacy_measurement=%s", evaluation.model_dump(mode="json"))
-            return evaluation
+            return self._analyzer.analyze(*args, **kwargs)
         except Exception as exc:
-            if not unified_authority_enabled(meta):
-                raise
             logger.info("[unified] legacy_diagnostic_error=%s", type(exc).__name__)
             return SubtitleEvaluation(reasons=[f"legacy_diagnostic_error:{type(exc).__name__}"])
 
@@ -875,6 +992,48 @@ class SyncOrchestrator:
             timing.cached_reference_present |= bool(hit is not None and getattr(hit, "text", None))
 
         expanded: set[int] = set()
+        # Season-pack member lookup is request-scoped (not per strategy):
+        # the retained pack is shared evidence, so it is offered at most once.
+        _pack_digest: list[str | None] = [None]
+        # Sticky verified reference: one lookup per request, attempted before
+        # every other tier. Identical bytes met again later in this request
+        # are skipped via _sticky_digest (re-verifying them would only repeat
+        # a verdict this request already measured).
+        _sticky_digest: list[str | None] = [None]
+        _sticky_cache = self._reference_cache()
+        _sticky_hit = None
+        if _sticky_cache is not None:
+            try:
+                _sticky_hit = _sticky_cache.get_sticky_reference(query)
+            except Exception:  # lookup must never break sync
+                _sticky_hit = None
+        if _sticky_hit is not None and getattr(_sticky_hit, "text", None):
+            _sticky_digest[0] = hashlib.sha256(
+                str(_sticky_hit.text).encode("utf-8", "replace")
+            ).hexdigest()
+            timing.sticky_reference_attempted = True
+            yield "retained-reference#sticky", _PreResolvedReference(_sticky_hit)
+            sticky_source = getattr(_sticky_hit, "source_download_digest", None)
+            if sticky_source:
+                query.known_source_digests = (sticky_source,)
+        # Season-pack tier (once per request): a member retained from
+        # an earlier same-lineage episode serves locally with no
+        # provider search and no download. Episode-specific bytes
+        # only; verification downstream is unchanged.
+        try:
+            from app.services.sync.season_pack import season_pack_reference
+
+            _pack_hit = season_pack_reference(query)
+        except Exception:  # lookup must never break sync
+            _pack_hit = None
+        if _pack_hit is not None and getattr(_pack_hit, "text", None):
+            _pack_digest[0] = hashlib.sha256(
+                str(_pack_hit.text).encode("utf-8", "replace")).hexdigest()
+            timing.season_pack_reference_attempted = True
+            yield "retained-reference#season_pack", _PreResolvedReference(_pack_hit)
+            pack_digest = getattr(_pack_hit, "source_download_digest", None)
+            if pack_digest:
+                query.known_source_digests = (pack_digest,)
         for _name, _obj in attempts:
             _plan = getattr(_obj, "plan_candidates", None)
             _multi = getattr(_obj, "resolve_all_with_provenance", None)
@@ -896,6 +1055,12 @@ class SyncOrchestrator:
             # candidate); the planned releases then supply genuine alternatives,
             # each downloaded only if the loop actually reaches it.
             _shared: dict[str, Any] = {"downloaded": 0, "seen": set()}
+            if _pack_digest[0]:
+                _shared["seen"].add(_pack_digest[0])
+            if _sticky_digest[0] is not None:
+                # Bytes already attempted first this request: planned
+                # releases must not re-offer them under another name.
+                _shared["seen"].add(_sticky_digest[0])
             _planned: list[tuple[Any, Any]] = []
             has_plan = callable(_plan)
             cached_available = bool(_hit is not None and getattr(_hit, "text", None))
@@ -904,13 +1069,18 @@ class SyncOrchestrator:
                     # Keep the cached reference first. Seed the shared digest set
                     # with its content so the planned releases cannot re-offer
                     # identical bytes under a different release name.
-                    _shared["seen"].add(
-                        hashlib.sha256(
-                            str(_hit.text).encode("utf-8", "replace")
-                        ).hexdigest()
-                    )
-                    timing.cached_reference_attempted = True
-                    yield f"{_name}#cache", _PreResolvedReference(_hit)
+                    _hit_digest = hashlib.sha256(
+                        str(_hit.text).encode("utf-8", "replace")).hexdigest()
+                    _shared["seen"].add(_hit_digest)
+                    if _hit_digest in {_sticky_digest[0], _pack_digest[0]}:
+                        # Identical bytes were already attempted first via the
+                        # sticky tier this request; re-verifying them here can
+                        # only repeat that verdict, never improve it.
+                        logger.info("[sync] %s cached reference skipped: identical "
+                                    "bytes already attempted via sticky tier", _name)
+                    else:
+                        timing.cached_reference_attempted = True
+                        yield f"{_name}#cache", _PreResolvedReference(_hit)
             _video_hit = None
             if has_plan and not cached_available:
                 # Video-scoped artifact tier. The subtitle-scoped miss above only
@@ -933,8 +1103,17 @@ class SyncOrchestrator:
                 _shared["seen"].add(
                     hashlib.sha256(str(_video_hit.text).encode("utf-8", "replace")).hexdigest()
                 )
-                timing.cached_reference_attempted = True
-                yield f"{_name}#video_cache", _PreResolvedReference(_video_hit)
+                _video_digest = hashlib.sha256(
+                    str(_video_hit.text).encode("utf-8", "replace")).hexdigest()
+                if _video_digest in {_sticky_digest[0], _pack_digest[0]}:
+                    # Same bytes the sticky tier already attempted first this
+                    # request; skip the re-verification but keep the source
+                    # exclusion so planning cannot re-fetch its archive.
+                    logger.info("[sync] %s video-cache reference skipped: identical "
+                                "bytes already attempted via sticky tier", _name)
+                else:
+                    timing.cached_reference_attempted = True
+                    yield f"{_name}#video_cache", _PreResolvedReference(_video_hit)
                 source_digest = getattr(_video_hit, "source_download_digest", None)
                 if source_digest:
                     # Do not spend a bounded plan slot fetching the same archive
@@ -1081,7 +1260,7 @@ class SyncOrchestrator:
                         and (meta_record or {}).get("target_binding") in {"exact", "strong"}
                         and (not unified_authority_enabled(meta) or (
                             (meta_record or {}).get("verification_method") == "unified"
-                            and (meta_record or {}).get("verification_version") == "unified-v1"
+                            and (meta_record or {}).get("verification_version") == "timing-v3"
                             and re.fullmatch(r"[a-f0-9]{64}", str((meta_record or {}).get("reference_sha") or ""))
                             and (meta_record or {}).get("artifact_sha256") == hashlib.sha256(cached).hexdigest()))):
                     logger.info(
@@ -1162,7 +1341,7 @@ class SyncOrchestrator:
             remembered = await self._sync_cache.get_verdict(verdict_key) if self._sync_cache else None
             if remembered is None and self._sync_cache and unified_authority_enabled(meta):
                 # Preserve old measured rejection blocking, never old acceptance.
-                old_key = verdict_key.replace("verdict:8:unified-v1:", "verdict:7:", 1)
+                old_key = verdict_key.replace("verdict:8:timing-v3:", "verdict:7:", 1)
                 old = await self._sync_cache.get_verdict(old_key)
                 if old and self._reusable_rejection(old, historical=True):
                     remembered = old
@@ -1262,6 +1441,23 @@ class SyncOrchestrator:
                     target_id,
                 )
                 remembered = None
+            if (
+                remembered
+                and unified_authority_enabled(meta)
+                and self._stale_unified_generation(remembered)
+            ):
+                # Pre-leniency Unified negative: measured under strict
+                # whole-document parsing, which aborted on harmless formatting
+                # artifacts before any evidence existed. Re-evaluate once
+                # under the current verification-input boundary; the fresh
+                # verdict carries the generation marker, so normal reuse
+                # resumes immediately after. Positives are never skipped here.
+                logger.info(
+                    "[sync] cached Unified negative predates the verification-"
+                    "input boundary for sub=%s -> re-evaluating",
+                    target_id,
+                )
+                remembered = None
             if remembered and self._reusable_rejection(remembered):
                 self._metrics["verification_cache_hits"] += 1
                 self._last_evaluation = self._evaluation_from_verdict(remembered)
@@ -1281,6 +1477,40 @@ class SyncOrchestrator:
 
         if self._sync_service is None:  # pragma: no cover - defensive
             logger.warning("[sync] no sync service configured -> serving original subtitle")
+            return sub_bytes
+
+        # Stage 2 -- metadata gate. No reusable verdict exists at this point,
+        # so decide from already-local release evidence whether the expensive
+        # investigation (reference discovery, verification, ALASS) is
+        # warranted at all. The check is pure local parsing: no provider
+        # download, no subprocess, no timing measurement.
+        gate_started = time.monotonic()
+        gate = decide_metadata_gate(
+            meta.get("target_filename"), meta.get("release_name"),
+            explicit_sync_request=bool(
+                meta.get("force_sync") or meta.get("explicit_sync_request")),
+        )
+        timing.metadata_gate_decision = gate.action.value
+        timing.metadata_gate_reason = gate.reasons[0] if gate.reasons else None
+        timing.metadata_gate_ms = round((time.monotonic() - gate_started) * 1000, 3)
+        logger.info(
+            "[sync] metadata-gate decision=%s reason=%s video=%r subtitle=%r",
+            gate.action.value, ",".join(gate.reasons) or "none",
+            meta.get("target_filename"), meta.get("release_name"),
+        )
+        if gate.action is not MetadataGateAction.INVESTIGATE:
+            # Metadata-based original delivery, NOT verified synchronization:
+            # no verified cache entry is written, no Sticky Reference is
+            # promoted, and no timing-v3 evidence is manufactured. The same
+            # subtitle stays eligible for a later explicit sync request,
+            # which bypasses this gate via force_sync/explicit_sync_request.
+            self._record_outcome(meta, classify_outcome(False, None, False))
+            if gate.action is MetadataGateAction.IDENTITY_CONFLICT:
+                logger.warning(
+                    "[sync] metadata-gate identity conflict for sub=%s: %s -> "
+                    "serving original without investigation",
+                    target_id, ",".join(gate.reasons) or "none",
+                )
             return sub_bytes
 
         # Reference strategies in priority order (external-release-reference reference,
@@ -1306,6 +1536,8 @@ class SyncOrchestrator:
             then revealed as unusable; validating inside the strategy lets it
             walk to the next-ranked candidate instead of aborting the sync.
             """
+            if unified_authority_enabled(meta):
+                return bool(reference_text)
             verdict = validate_cue_sanity(
                 target_text,
                 reference_text,
@@ -1409,7 +1641,6 @@ class SyncOrchestrator:
         # path must never starve the response: once the budget is spent, later
         # rejected candidates skip shadow measurement (serving is unaffected;
         # the original is served either way).
-        shadow_spent_ms = 0.0
         # True once a reference was resolved, aligned, and REJECTED. The tail
         # must not then mark_failed: that flag means "no usable reference",
         # and overloading it with "the reference did not verify" would
@@ -1424,6 +1655,14 @@ class SyncOrchestrator:
         pal_target_snapshot = target_text
         pal_first_reference: str | None = None
         pal_resolved: ResolvedReference | None = None
+        # Immutable self-reference identity, precomputed once: the working
+        # copy mutates across iterations, so a per-iteration comparison alone
+        # misses byte-identical references evaluated after any preparation.
+        from app.services.sync.reference_content_identity import (
+            PristineTargetIdentity,
+        )
+
+        _pristine_identity = PristineTargetIdentity.precompute(pal_target_snapshot)
 
         async for strategy_name, strategy_obj in self._reference_attempts(
             attempts, query, _passes_cue_sanity, timing
@@ -1452,7 +1691,12 @@ class SyncOrchestrator:
             # the original subtitle is still served if none survives.
             from app.services.sync.reference_content_identity import identical_content
 
-            _self_reference_reason = identical_content(target_text, resolved.text)
+            # Pristine identity first: the working copy may already carry
+            # intro-stripping or pre-shift edits from an earlier iteration,
+            # which would let a byte-identical download slip through.
+            _self_reference_reason = _pristine_identity.matches(resolved.text)
+            if not _self_reference_reason:
+                _self_reference_reason = identical_content(target_text, resolved.text)
             if _self_reference_reason:
                 logger.warning(
                     "[sync] reference rejected: reason=%s reason_code="
@@ -1573,7 +1817,7 @@ class SyncOrchestrator:
             # produced something to judge. None on the normal path, which keeps
             # the ordinary serving decision untouched.
             large_offset_inv: LargeOffsetInvestigation | None = None
-            if not sanity["ok"]:
+            if not sanity["ok"] and not unified_authority_enabled(meta):
                 large_offset = _large_offset_assessment(reference)
                 if large_offset is not None and large_offset.accepted:
                     offset_ceiling_ms = LARGE_OFFSET_MAX_MS
@@ -1686,14 +1930,18 @@ class SyncOrchestrator:
                 # is a measured claim, not an assumption.
                 # Same handoff as the post-alass path: parse the text alass
                 # would have been given, then hand the collection over.
-                target_cues = parse_srt_cues(target_text)
-                logger.info(
-                    "[sync] verifier input: target_raw_chars=%d "
-                    "target_parsed_cue_count=%d verifier_target_cue_count=%d",
-                    len(target_text),
-                    len(target_cues),
-                    len(target_cues),
-                )
+                # Unified authority replaces the legacy diagnostic with a
+                # stub, so its document-wide parse is skipped when ON.
+                _unified_only = unified_authority_enabled(meta)
+                target_cues = [] if _unified_only else parse_srt_cues(target_text)
+                if not _unified_only:
+                    logger.info(
+                        "[sync] verifier input: target_raw_chars=%d "
+                        "target_parsed_cue_count=%d verifier_target_cue_count=%d",
+                        len(target_text),
+                        len(target_cues),
+                        len(target_cues),
+                    )
                 evaluation = self._legacy_diagnostic(meta,
                     target_cues,
                     None,
@@ -1762,6 +2010,10 @@ class SyncOrchestrator:
                 )
                 timing.winning_sync_strategy = "already_aligned"
                 timing.winning_candidate_index = timing.candidates_considered
+                self._promote_sticky_reference(
+                    meta=meta, target_id=target_id, pristine_text=pristine_shadow_target,
+                    resolved=resolved, evaluation=evaluation,
+                )
                 return self._delivery_payload(sub_bytes, sub_bytes, evaluation, meta, target_id,
                     hashlib.sha256(reference.encode("utf-8")).hexdigest())
 
@@ -1802,6 +2054,20 @@ class SyncOrchestrator:
                     self._alass_candidate_limit,
                 )
                 continue
+
+            # Two-Point primary: ordinary constant-offset and linear-drift
+            # cases are solved here on the pristine original, so ALASS never
+            # runs for a candidate Two-Point already verified. Returns None
+            # (anchor failure, unified refusal, binding refusal) exactly when
+            # the ALASS fallback below must still be tried.
+            two_point_served = await self._try_two_point_primary(
+                pristine_shadow_target, resolved, meta, target_id, content_hash,
+                resolution_key, verdict_key,
+                affine_reference_corroborated=affine_reference_corroborated,
+                source_family_reference_verified=source_family_reference_eligible,
+            )
+            if two_point_served is not None:
+                return two_point_served
 
             # Reference-first identity check for the large-offset path. Runs
             # here, on the exact ``target_text`` alass receives (post-stripping),
@@ -1935,14 +2201,18 @@ class SyncOrchestrator:
                 # sync service counted 584 target cues while the verifier was
                 # handed 0. Parsing at the boundary makes
                 # ``pre-alass count == verifier count`` an invariant.
-                target_cues = parse_srt_cues(target_text)
-                logger.info(
-                    "[sync] verifier input: target_raw_chars=%d "
-                    "target_parsed_cue_count=%d verifier_target_cue_count=%d",
-                    len(target_text),
-                    len(target_cues),
-                    len(target_cues),
-                )
+                # Unified authority replaces the legacy diagnostic with a
+                # stub, so its document-wide parse is skipped when ON.
+                _unified_only = unified_authority_enabled(meta)
+                target_cues = [] if _unified_only else parse_srt_cues(target_text)
+                if not _unified_only:
+                    logger.info(
+                        "[sync] verifier input: target_raw_chars=%d "
+                        "target_parsed_cue_count=%d verifier_target_cue_count=%d",
+                        len(target_text),
+                        len(target_cues),
+                        len(target_cues),
+                    )
                 evaluation = self._legacy_diagnostic(meta,
                     target_cues,
                     synced,
@@ -1963,6 +2233,13 @@ class SyncOrchestrator:
                 # replace the original in this response. The analyzer's own
                 # verdict above stays authoritative for ``sync_state`` and for
                 # cache reuse -- this decision only gates delivery of the bytes.
+                # Under Unified authority the large-offset/constant-shift serving
+                # exceptions below are fenced off, so a ``serving_denied`` here
+                # is purely diagnostic: it never overrides a Unified VERIFIED
+                # verdict, which alone (with binding and may_serve) controls
+                # serving. A denial followed later by TRANSFORMED delivery is
+                # therefore not a contradiction -- it is a diagnostic veto that
+                # did not apply, followed by an independent verified serve.
                 serving_state = LargeOffsetServingState.ORIGINAL
                 self._boundary_shadow.schedule(pristine_shadow_target, reference, synced, evaluation)
                 if large_offset_inv is not None:
@@ -2010,7 +2287,12 @@ class SyncOrchestrator:
                         ",".join(exemption.reason_codes) or "none",
                         exemption.summary(),
                     )
-                    if exemption.exempted:
+                    if exemption.exempted and not unified_authority_enabled(meta):
+                        # Legacy-only rewrite: under Unified authority the
+                        # stub diagnostic below carries no measurement to
+                        # exempt, and Unified supersedes this verdict at
+                        # _select_evaluation. Serving exceptions are fenced
+                        # off downstream for the same reason.
                         apply_exemption_to_evaluation(evaluation)
                         self._last_evaluation = evaluation
 
@@ -2182,38 +2464,6 @@ class SyncOrchestrator:
                         evaluation.verification.value,
                         serving_state.value,
                     )
-                    # NinjaSync Points SHADOW evaluation. Observational only:
-                    # runs the offline engine on this exact (target, reference)
-                    # pair, logs bounded telemetry, and changes nothing about
-                    # what is served, cached, or ranked. This branch is only
-                    # reached when Alass did not verify, so alass_verified is
-                    # always False here by construction.
-                    try:
-                        shadow_budget = float(
-                            getattr(settings, "NINJA_SHADOW_BUDGET_MS", 5000.0) or 5000.0
-                        )
-                    except (TypeError, ValueError):
-                        shadow_budget = 5000.0
-                    if bool(getattr(settings, "NINJA_SHADOW_ENABLED", True)) and (
-                        shadow_spent_ms < shadow_budget
-                    ):
-                        try:
-                            from app.services.sync.ninja_shadow import (
-                                run_shadow_evaluation,
-                            )
-
-                            shadow_result = run_shadow_evaluation(
-                                target_text,
-                                reference,
-                                alass_state_value=evaluation.sync_state.value,
-                                alass_verified=False,
-                                analyzer=self._analyzer,
-                            )
-                            shadow_spent_ms += max(
-                                0.0, shadow_result.duration_ms
-                            )
-                        except Exception as exc:  # fail closed, always
-                            logger.debug("[ninja-shadow] skipped: %s", exc)
                     served = sub_bytes
                 # One line that answers "which bytes went out?" without ever
                 # logging subtitle text. Digests only, so this is safe to keep in
@@ -2252,6 +2502,10 @@ class SyncOrchestrator:
                         meta,
                         classify_outcome(True, serving_state.value, False),
                     )
+                    self._promote_sticky_reference(
+                        meta=meta, target_id=target_id,
+                        pristine_text=pristine_shadow_target,
+                        resolved=resolved, evaluation=evaluation)
                     return self._delivery_payload(served, sub_bytes, evaluation, meta, target_id,
                         hashlib.sha256(reference.encode("utf-8")).hexdigest())
                 # A REJECTED candidate must NOT end the request.
@@ -2419,7 +2673,180 @@ class SyncOrchestrator:
         if timing is not None:
             timing.winning_sync_strategy = STRATEGY_ID
         capture_selected(resolved.text, result.transformed_text, STRATEGY_ID)
+        self._promote_sticky_reference(
+            meta=meta, target_id=target_id, pristine_text=target_text,
+            resolved=resolved, evaluation=evaluation)
         return self._delivery_payload(transformed, target_text.encode("utf-8"), evaluation,
+            meta, target_id, hashlib.sha256(resolved.text.encode("utf-8")).hexdigest())
+
+    async def _try_two_point_primary(
+        self,
+        pristine_text: str | None,
+        resolved: ResolvedReference,
+        meta: dict,
+        target_id: str,
+        content_hash: str,
+        resolution_key: str,
+        verdict_key: str | None,
+        *,
+        affine_reference_corroborated: bool = False,
+        source_family_reference_verified: bool = False,
+    ) -> bytes | None:
+        """Two-Point primary: fit two dialogue anchors, transform the pristine
+        original, serve only a Unified-verified artifact.
+
+        Runs per reference after the already-aligned shortcut and before any
+        ALASS subprocess, so ordinary constant-offset and linear-drift cases
+        never pay for alignment they do not need. The anchors calculate the
+        correction; only the independent Timing-First measurement across all
+        thirds authorizes serving. Timestamps alone change: dialogue,
+        credits, ordering, formatting, and unplaceable lines survive through
+        the block-level transfer. Returns served bytes or None (the ALASS
+        fallback proceeds unchanged).
+        """
+        from app.services.sync.candidate_reconstruction import apply_linear_timings
+        from two_point_sync.anchors import detect_anchors
+        from two_point_sync.parser import parse_srt_for_verification
+
+        if not unified_authority_enabled(meta):
+            return None
+        if not pristine_text or not resolved.text or resolved.partial:
+            logger.debug("[two-point] sub=%s evaluated=false reason=missing_input", target_id)
+            return None
+        try:
+            target_cues, _ = parse_srt_for_verification(
+                pristine_text, exclude_ambiguous=True)
+            reference_cues, _ = parse_srt_for_verification(
+                resolved.text, exclude_ambiguous=True)
+            if target_cues is None or reference_cues is None:
+                logger.info("[two-point] sub=%s evaluated=false reason=unparseable", target_id)
+                return None
+            # Anchor detection is bounded: repetitive texts can explode the
+            # RANSAC pair space instead of converging (real releases measure
+            # well under a second). Exceeding the bound abstains to the ALASS
+            # fallback; a result is either complete-identical or discarded.
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    detect_anchors, list(target_cues), list(reference_cues)),
+                TWO_POINT_DETECTION_TIMEOUT_SECONDS)
+        except Exception as exc:  # fail closed, always (includes TimeoutError)
+            logger.info("[two-point] sub=%s evaluated=false error=%s",
+                        target_id, type(exc).__name__)
+            return None
+        scale: float | None = None
+        offset_ms: float | None = None
+        regime_note: str | None = None
+        if (result.accepted and result.first_anchor is not None
+                and result.last_anchor is not None and result.scale is not None
+                and result.offset_ms is not None):
+            # The reported scale/offset derive strictly from the two accepted
+            # anchors (never a RANSAC-pair artefact).
+            scale, offset_ms = result.scale, result.offset_ms
+        elif "NONLINEAR_DISCONTINUITY" in result.reasons and result.regimes:
+            # A contradictory timing region (e.g. a differently-cut recap)
+            # vetoes the GLOBAL two-anchor claim -- but the majority primary
+            # regime may still be proposed for verification. The Unified
+            # verifier measures the bulk evidence independently (order-filtered
+            # correspondences across all thirds) and refuses unless it genuinely
+            # agrees, so authority moves from proposer-veto to evidence.
+            # Anything weaker (insufficient anchors, no model, thin or narrow
+            # primary support) still refuses, and ALASS owns those cases.
+            primary = result.regimes[0]
+            contra_support = sum(regime.support for regime in result.regimes[1:])
+            if primary.scale is not None and primary.scale > 0 and primary.offset_ms is not None:
+                scale, offset_ms = primary.scale, primary.offset_ms
+                regime_note = (
+                    "primary_regime_only:"
+                    f"{len(result.regimes) - 1}_contradictory_region_unmeasured")
+                logger.info(
+                    "[two-point] sub=%s discontinuity: proposing primary regime "
+                    "scale=%.6f offset_ms=%.0f support=%d span=%d-%dms "
+                    "contradictory_support=%d (verifier authorizes)",
+                    target_id, primary.scale, primary.offset_ms, primary.support,
+                    primary.span_start_ms, primary.span_end_ms, contra_support)
+        if scale is None or offset_ms is None:
+            logger.info("[two-point] sub=%s evaluated=true accepted=false reasons=%s",
+                        target_id, ",".join(result.reasons) or "none")
+            return None
+        candidate = apply_linear_timings(pristine_text, scale, offset_ms)
+        if candidate is None:
+            logger.info("[two-point] sub=%s evaluated=true accepted=false "
+                        "reason=unrepresentable_transform", target_id)
+            return None
+        evaluation = await self._select_evaluation(
+            SubtitleEvaluation(), target_text=pristine_text, reference_text=resolved.text,
+            candidate_text=candidate, meta=meta, algorithm=TWO_POINT_STRATEGY_ID,
+            resolved=resolved,
+        )
+        if not may_serve_synchronized(evaluation.sync_state, evaluation.verification):
+            logger.info("[two-point] sub=%s evaluated=true accepted=false "
+                        "reason=unified_refused state=%s",
+                        target_id, evaluation.sync_state.value)
+            return None
+        binding = self._target_binding(resolved, meta)
+        if not self._gate_target_binding(
+                evaluation, binding,
+                affine_reference_corroborated=affine_reference_corroborated,
+                source_family_reference_verified=source_family_reference_verified):
+            logger.info("[two-point] sub=%s evaluated=true accepted=false reason=binding refused "
+                        "binding=%s", target_id, binding)
+            return None
+        if regime_note is not None:
+            # Honest labelling: the served claim rests on bulk evidence; the
+            # contradictory region was preserved but never measured.
+            evaluation.reasons.append(regime_note)
+        transformed = candidate.encode("utf-8")
+        capture_transformed(resolved.text, candidate, TWO_POINT_STRATEGY_ID, evaluation)
+        key = build_synced_cache_key(
+            meta, target_id, content_hash=content_hash,
+            decision=f"{TWO_POINT_STRATEGY_ID}-{TWO_POINT_MODEL_VERSION}"
+        )
+        self._last_evaluation = evaluation
+        await self._store_verdict(
+            verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key,
+            artifact_bytes=transformed,
+            reference_sha=hashlib.sha256(resolved.text.encode("utf-8")).hexdigest(),
+        )
+        self._audit_serve(evaluation, meta, target_id, from_cache=False, resolved=resolved)
+        self._metrics["candidates_verified"] += 1
+        if self._sync_cache is not None:
+            await self._sync_cache.clear_failed(resolution_key)
+            outcome_meta = {
+                "artifact_sha256": hashlib.sha256(transformed).hexdigest(),
+                "sync_state": evaluation.sync_state.value,
+                "verification": evaluation.verification.value,
+                "sync_confidence": evaluation.sync_confidence,
+                "decision": TWO_POINT_STRATEGY_ID,
+                "model_version": TWO_POINT_MODEL_VERSION,
+                "reference_kind": resolved.kind,
+                "reference_sha": hashlib.sha256(resolved.text.encode()).hexdigest(),
+                "slope": result.scale,
+                "intercept_ms": result.offset_ms,
+                **self._binding_metadata(binding),
+                **self._methodology_metadata(meta),
+            }
+            await self._sync_cache.set(key, transformed)
+            await self._sync_cache.set_meta(key, outcome_meta)
+            await self._sync_cache.set(resolution_key, transformed)
+            await self._sync_cache.set_meta(resolution_key, outcome_meta)
+        self._record_outcome(meta, classify_outcome(True, TWO_POINT_STRATEGY_ID, False))
+        logger.info(
+            "[sync] delivery sub=%s strategy=%s reference_sha=%s reference_provenance=%s "
+            "verification=%s serving_state=synchronized served_is_transformed=True "
+            "slope=%s intercept_ms=%s groups=%s",
+            target_id, TWO_POINT_STRATEGY_ID,
+            hashlib.sha256(resolved.text.encode()).hexdigest()[:16],
+            resolved.kind, evaluation.verification.value, result.scale, result.offset_ms,
+            evaluation.coverage_score,
+        )
+        timing = current_sync_timing.get()
+        if timing is not None:
+            timing.winning_sync_strategy = TWO_POINT_STRATEGY_ID
+        capture_selected(resolved.text, candidate, TWO_POINT_STRATEGY_ID)
+        self._promote_sticky_reference(
+            meta=meta, target_id=target_id, pristine_text=pristine_text,
+            resolved=resolved, evaluation=evaluation)
+        return self._delivery_payload(transformed, pristine_text.encode("utf-8"), evaluation,
             meta, target_id, hashlib.sha256(resolved.text.encode("utf-8")).hexdigest())
 
     async def _try_pal_two_point_fallback(
@@ -2461,10 +2888,16 @@ class SyncOrchestrator:
             logger.debug("[pal-two-point] sub=%s evaluated=false reason=missing_input", target_id)
             return None
         try:
-            result = attempt_pal_two_point(
-                target_text, reference_text, self._analyzer
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    attempt_pal_two_point,
+                    target_text,
+                    reference_text,
+                    self._analyzer,
+                ),
+                TWO_POINT_DETECTION_TIMEOUT_SECONDS,
             )
-        except Exception as exc:  # fail closed, always
+        except Exception as exc:  # fail closed, always (includes TimeoutError)
             logger.info("[pal-two-point] sub=%s evaluated=false error=%s", target_id, type(exc).__name__)
             return None
         # One structured outcome line per tail-reached request. Without this a
@@ -2598,6 +3031,9 @@ class SyncOrchestrator:
             timing.reference_kind = timing.pal_reference_kind
             timing.winning_candidate_index = timing.pal_reference_index
         capture_selected(reference_text, result.transformed_text, PAL_STRATEGY_ID)
+        self._promote_sticky_reference(
+            meta=meta, target_id=target_id, pristine_text=target_text,
+            resolved=resolved, evaluation=evaluation)
         return self._delivery_payload(transformed, sub_bytes, evaluation, meta, target_id,
             hashlib.sha256(reference_text.encode("utf-8")).hexdigest())
 
@@ -2803,6 +3239,9 @@ class SyncOrchestrator:
         if timing is not None:
             timing.winning_sync_strategy = strategy
         capture_selected(reference_text, result.transformed_text, strategy)
+        self._promote_sticky_reference(
+            meta=meta, target_id=target_id, pristine_text=target_text,
+            resolved=resolved, evaluation=evaluation)
         return self._delivery_payload(transformed, sub_bytes, evaluation, meta, target_id,
             hashlib.sha256(reference_text.encode("utf-8")).hexdigest())
 
@@ -2876,6 +3315,34 @@ class SyncOrchestrator:
             exact_moviehash=(resolved.kind == "hash" and bool(str(meta.get("video_hash") or "").strip())),
             embedded=resolved.kind == "embedded",
         )
+        if unified_authority_enabled(meta):
+            from app.services.sync.release_metadata import words
+
+            target = binding.target
+            same_episode = (target.season is not None and target.season == reference.season
+                            and target.episode is not None and target.episode == reference.episode)
+            same_movie = (target.season is None and reference.season is None
+                          and target.year is not None and target.year == reference.year)
+            if (not target.ambiguous_fields and not reference.ambiguous_fields
+                    and target.title and reference.title and words(target.title) == words(reference.title)
+                    and (not target.year or not reference.year or target.year == reference.year)
+                    and (same_episode or same_movie)):
+                # Binding establishes media identity, not release compatibility.
+                # Only independently measured dialogue can authorize timing.
+                binding = replace(binding, state=TargetBinding.STRONG,
+                                  reasons=("media_identity_confirmed",))
+        if resolved.from_season_pack and resolved.proven_video_lineage:
+            from app.services.sync.season_pack import lineages_match, video_lineage
+
+            # Association was proved by a winning member, not by the pack's
+            # filename. Exact member identity and the current lineage still
+            # have to match; a title-only member name needs no new ranking.
+            if (lineages_match(resolved.proven_video_lineage, video_lineage(meta.get("target_filename")))
+                    and resolved.member_season == meta.get("season")
+                    and resolved.member_episode == meta.get("episode")
+                    and not reference.ambiguous_fields):
+                binding = replace(binding, state=TargetBinding.STRONG,
+                                  reasons=("season_pack_proven_video_lineage",))
         # Log canonical technical metadata only; never raw names or request config.
         logger.info(
             "[target-binding] provider=%s candidate_sha=%s state=%s reasons=%s "
@@ -2895,7 +3362,7 @@ class SyncOrchestrator:
 
     @staticmethod
     def _methodology_metadata(meta: dict) -> dict:
-        return ({"verification_method": "unified", "verification_version": "unified-v1"}
+        return ({"verification_method": "unified", "verification_version": "timing-v3"}
                 if unified_authority_enabled(meta) else {})
 
     @staticmethod

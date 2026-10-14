@@ -59,6 +59,9 @@ def test_real_verified_candidate_survives_final_rendering(case, response_format,
         target = DEX_TARGET.read_bytes().decode("utf-8-sig")
         reference = (DEX_FRAMESTOR if case == "framestor" else ROVERS_REFERENCE).read_bytes().decode("utf-8-sig")
         candidate = (DEX_VERIFIED_CANDIDATE if case == "framestor" else ROVERS_CANDIDATE).read_bytes().decode("utf-8-sig")
+    from app.services.sync.candidate_reconstruction import reconstruct_with_original_dialogue
+    candidate = reconstruct_with_original_dialogue(target, candidate)
+    assert candidate is not None
     verdict = verify_candidate(target, reference, candidate, candidate_algorithm=case)
     assert verdict.proposed_verdict == "VERIFIED", verdict.failure_reasons
     payload = authorized(candidate.encode(), target.encode(), case)
@@ -302,9 +305,10 @@ async def test_rejection_scope_and_exact_request_isolation(enabled, old, state, 
     cache = SyncCache()
     key = om.SyncOrchestrator._verdict_key(META, hashlib.sha256(original).hexdigest()[:16])
     if old:
-        key = key.replace("verdict:8:unified-v1:", "verdict:7:")
+        key = key.replace("verdict:8:timing-v3:", "verdict:7:")
     verdict = {"sync_state":state, "verification":"verified", "target_binding":"exact",
-               "verification_method":"unified", "verification_version":"unified-v1"}
+               "verification_method":"unified", "verification_version":"timing-v3",
+               "unified_pipeline":"v2", "verification_input":"lenient-v1"}
     if scope:
         verdict["rejection_scope"] = scope
     await cache.set_verdict(key, verdict)
@@ -328,7 +332,7 @@ async def test_cached_receipt_survives_reuse(enabled, monkeypatch, caplog):
     await orch._sync_cache.set(resolution, bytes(first))
     await orch._sync_cache.set_meta(resolution, {"sync_state":"verified_resynced", "verification":"verified",
         "target_binding":"exact", "artifact_sha256":sha256(first), "reference_sha":sha256(reference.encode()),
-        "verification_method":"unified", "verification_version":"unified-v1"})
+        "verification_method":"unified", "verification_version":"timing-v3"})
     result = await orch.evaluate_and_sync(target.encode(), META, "sub", auto_sync=True)
     assert isinstance(result, DeliveryPayload)
     assert result.authorization.reference_sha256 == sha256(reference.encode())
@@ -342,7 +346,7 @@ def test_final_record_has_only_correlated_authorized_evidence(caplog):
     candidate = _true_candidate(target, 1, 5000).encode()
     response = main._build_subtitle_response(authorized(candidate, target.encode(), "req-123"), "private")
     record = final_record(caplog)
-    for field in ["req=req-123", "engine=8", "method=unified-v1", "authoritative_verdict=VERIFIED",
+    for field in ["req=req-123", "engine=8", "method=timing-v3", "authoritative_verdict=VERIFIED",
                   "reference_sha256="+"b"*64, "binding=exact", "may_serve=True",
                   "approved_candidate_sha256="+sha256(candidate), "http_body_sha256="+sha256(response.body),
                   "response_format=srt", "decision=TRANSFORMED"]:

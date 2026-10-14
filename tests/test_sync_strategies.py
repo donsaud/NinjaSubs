@@ -375,7 +375,13 @@ async def test_aligned_pair_skips_alass_but_caches(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_group_names_do_not_gate_sync(monkeypatch):
-    """Release-group equality never skips resolution; content decides."""
+    """Group equality fast-delivers; an explicit request still investigates.
+
+    Same-source release pairs carry no mismatch evidence, so resolution is
+    skipped and the original is served. A group difference neither triggers
+    investigation on its own nor blocks an explicitly requested one: content
+    still decides whenever the pipeline runs.
+    """
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "ENABLE_SUBTITLE_SYNC", True)
@@ -388,6 +394,11 @@ async def test_group_names_do_not_gate_sync(monkeypatch):
     }
     orch = _orchestrator()
     assert await orch.evaluate_and_sync(_arabic_bytes(), meta, "t", True) == _arabic_bytes()
+    assert orch._hash_strategy.calls == 0 and orch._external_strategy.calls == 0
+
+    orch = _orchestrator()
+    explicit = dict(meta, force_sync=True)
+    assert await orch.evaluate_and_sync(_arabic_bytes(), explicit, "t", True) == _arabic_bytes()
     assert orch._hash_strategy.calls == 1 and orch._external_strategy.calls == 1
 
 
@@ -405,14 +416,16 @@ async def test_precheck_proceeds_on_mismatch_or_missing_group(monkeypatch):
     }
     orch = _orchestrator(hash_strategy=_FakeStrategy(BIG_REF.decode()))
     await orch.evaluate_and_sync(_arabic_bytes(), mismatched, "t", True)
-    assert orch._hash_strategy.calls == 1
+    # Same source family: a group difference alone is no mismatch evidence,
+    # so the metadata gate fast-delivers without consulting strategies.
+    assert orch._hash_strategy.calls == 0
 
     # Identical filenames (listing fallback) must not trivially match.
     identical = dict(mismatched, target_filename="Show.1080p.WEB-DL.x264-GRP.srt",
                      release_name="Show.1080p.WEB-DL.x264-GRP.srt")
     orch = _orchestrator(hash_strategy=_FakeStrategy(BIG_REF.decode()))
     await orch.evaluate_and_sync(_arabic_bytes(), identical, "t", True)
-    assert orch._hash_strategy.calls == 1
+    assert orch._hash_strategy.calls == 0
 
     # No group on either side: normal flow.
     bare = {"imdb_id": "tt1", "media_type": "movie", "lang": "ara"}

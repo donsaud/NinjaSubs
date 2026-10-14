@@ -348,6 +348,7 @@ def _make_harness():
 
 @pytest.mark.asyncio
 async def test_shadow_does_not_alter_serving(monkeypatch, caplog):
+    """Shadow evaluation was removed from the serving path: the flag changes nothing."""
     om, SyncOrchestrator, _Cache, _Svc, _Multi, meta = _make_harness()
     monkeypatch.setattr(om.settings, "ENABLE_SUBTITLE_SYNC", True, raising=False)
     sub = _srt(600, "T").encode()
@@ -363,7 +364,7 @@ async def test_shadow_does_not_alter_serving(monkeypatch, caplog):
         out_on = await o_on.evaluate_and_sync(bytes(sub), meta(), "tt2582802", auto_sync=True)
 
     assert out_on == out_off == bytes(sub)
-    assert any("ninja-shadow" in r.message for r in caplog.records)
+    assert not any("ninja-shadow" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

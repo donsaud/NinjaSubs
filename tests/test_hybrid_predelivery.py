@@ -61,7 +61,10 @@ def _reference() -> str:
 
 
 def _candidate() -> str:
-    return _read(ROVERS_CANDIDATE)
+    from app.services.sync.candidate_reconstruction import reconstruct_with_original_dialogue
+    restored = reconstruct_with_original_dialogue(_target(), _read(ROVERS_CANDIDATE))
+    assert restored is not None
+    return restored
 
 
 def _enable_hybrid(monkeypatch) -> None:
@@ -136,7 +139,7 @@ def test_predelivery_accepts_verified_candidate(monkeypatch) -> None:
         meta=dict(META), exemption="large_offset")
     assert proceed is True
     assert telemetry["evaluated"] is True
-    assert telemetry["route"] == "nonlinear"
+    assert telemetry["route"] == "dialogue_timing"
     assert telemetry["verification_method"] == "unified"
     assert telemetry["verdict"] == "ACCEPTED"
     assert telemetry["transformed_sha"] == hashlib.sha256(

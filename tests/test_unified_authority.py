@@ -53,7 +53,7 @@ async def test_selection_uses_only_unified(enabled, monkeypatch, verdict):
 
 
 @pytest.mark.parametrize("trust", ["strong", "acceptable", "unknown", "rejected"])
-async def test_reference_policy_still_caps_claim(enabled, trust):
+async def test_reference_label_does_not_override_measured_dialogue(enabled, trust):
     target, reference = _linear_pair()
     result = await om.SyncOrchestrator()._select_evaluation(
         _legacy(False), target_text=target, reference_text=reference,
@@ -61,7 +61,7 @@ async def test_reference_policy_still_caps_claim(enabled, trust):
         resolved=ResolvedReference(reference, reference_trust=trust),
     )
     assert result.reference_trust == trust
-    assert result.sync_state == (SyncState.VERIFIED_RESYNCED if trust == "strong" else SyncState.PROBABLE_SYNC)
+    assert result.sync_state == SyncState.VERIFIED_RESYNCED
 
 
 async def test_disabled_and_scoped_out_never_run_unified(monkeypatch):
@@ -109,6 +109,12 @@ async def test_every_serving_path_selects_unified(enabled, monkeypatch, path, ac
         monkeypatch.setattr(orch, "_try_timeline_affine", AsyncMock(return_value=None))
         monkeypatch.setattr(orch, "_try_hybrid_sync", AsyncMock(return_value=None))
         monkeypatch.setattr(orch, "_try_pal_two_point_fallback", AsyncMock(return_value=None))
+        # Two-Point primary is intentionally bypassed here: with the authority
+        # mocked to always VERIFIED it would preempt ALASS on anchorable pairs
+        # before the path under test executes. Priority is covered by the
+        # dedicated Two-Point/large-offset suites; here each legacy path must
+        # still select Unified.
+        monkeypatch.setattr(orch, "_try_two_point_primary", AsyncMock(return_value=None))
         monkeypatch.setattr(om, "decide_anchor_preshift", lambda *a: SimpleNamespace(accepted=False, reason="test_disabled"))
         if path in {"alass", "large_offset", "constant_shift"}:
             monkeypatch.setattr(om, "measure_alignment_consistency", lambda *a, **k: None)
@@ -130,7 +136,7 @@ async def test_every_serving_path_selects_unified(enabled, monkeypatch, path, ac
         output = await orch.evaluate_and_sync(target.encode(), META, "sub", auto_sync=True)
         assert output == (candidate.encode() if accepted else target.encode())
         if path == "large_offset":
-            assert decisions, "large-offset exemption path was not reached"
+            assert not decisions, "obsolete large-offset policy must not run under Unified"
         if accepted:
             # Both positive early-cache returns must preserve the selected authority.
             calls = review.await_count
@@ -173,29 +179,33 @@ async def test_old_caches_cannot_authorize_under_gate(enabled, monkeypatch):
     monkeypatch.setattr(router, "_enabled", True)
     assert om.SyncOrchestrator._flight_key(META, "sub", target) != old_payload
     new_verdict = om.SyncOrchestrator._verdict_key(META, "hash")
-    assert new_verdict != old_verdict and new_verdict.startswith("verdict:8:unified-v1:")
+    assert new_verdict != old_verdict and new_verdict.startswith("verdict:8:timing-v3:")
     await cache.set_verdict(new_verdict, {**_legacy().model_dump(mode="json"), "target_binding": "exact"})
     assert await cache.get_verdict(new_verdict) is None
 
 
 async def test_unified_primary_and_alias_require_methodology(enabled):
     cache = SyncCache()
-    key = SyncCache.build_verdict_key("video", "target", "ara", methodology="unified-v1")
-    alias = SyncCache.build_verdict_alias_key("video", "sub", methodology="unified-v1")
+    key = SyncCache.build_verdict_key("video", "target", "ara", methodology="timing-v3")
+    alias = SyncCache.build_verdict_alias_key("video", "sub", methodology="timing-v3")
     payload = {**_legacy().model_dump(mode="json"), "target_binding": "exact",
-               "verification_method": "unified", "verification_version": "unified-v1"}
+               "verification_method": "unified", "verification_version": "timing-v3"}
     await cache.set_verdict(key, payload, alias_key=alias)
     assert (await cache.get_verdict(key))["engine_version"] == 8
-    assert (await cache.get_verdict_by_ref("video", "sub", methodology="unified-v1"))["verification"] == "cached"
+    assert (await cache.get_verdict_by_ref("video", "sub", methodology="timing-v3"))["verification"] == "cached"
     assert await cache.get_verdict_by_ref("video", "sub") is None
 
 
-async def test_legacy_error_is_diagnostic_only(enabled):
+async def test_legacy_error_is_diagnostic_only(enabled, monkeypatch):
     def broken(*a, **k):
         raise RuntimeError("legacy unavailable")
 
     orch = om.SyncOrchestrator()
     orch._analyzer = SimpleNamespace(analyze=broken)
+    # Gate ON: legacy never runs, so no legacy error can break serving.
+    assert orch._legacy_diagnostic(META).reasons == []
+    # Gate OFF: a legacy failure is captured as a diagnostic reason.
+    monkeypatch.setattr(router, "_enabled", False)
     assert "legacy_diagnostic_error:RuntimeError" in orch._legacy_diagnostic(META).reasons
 
 
@@ -222,7 +232,7 @@ async def test_old_unverified_verdict_still_blocks(enabled, monkeypatch):
     target = b"original subtitle"
     content_hash = hashlib.sha256(target).hexdigest()[:16]
     new_key = om.SyncOrchestrator._verdict_key(META, content_hash)
-    old_key = new_key.replace("verdict:8:unified-v1:", "verdict:7:")
+    old_key = new_key.replace("verdict:8:timing-v3:", "verdict:7:")
     payload = _legacy().model_dump(mode="json")
     payload.update(sync_state="unverified", target_binding="exact")
     await cache.set_verdict(old_key, payload)
@@ -231,6 +241,62 @@ async def test_old_unverified_verdict_still_blocks(enabled, monkeypatch):
                               sync_service=SimpleNamespace(sync_async=AsyncMock()))
     assert await orch.evaluate_and_sync(target, META, "sub", auto_sync=True) == target
     strategy.resolve_with_provenance.assert_not_called()
+
+
+async def test_compatible_verdict_serves_original_without_work(enabled):
+    """Fast path headline: proven-compatible serves ORIGINAL, zero sync work."""
+    import hashlib
+
+    from tests.test_unified_verification import _linear_pair
+
+    target, _ = _linear_pair()
+    original = target.encode()
+    cache = SyncCache()
+    key = om.SyncOrchestrator._verdict_key(META, hashlib.sha256(original).hexdigest()[:16])
+    assert key is not None and "timing-v3" in key
+    await cache.set_verdict(key, {
+        "sync_state": "verified_synced", "verification": "verified",
+        "target_binding": "exact", "verification_method": "unified",
+        "verification_version": "timing-v3",
+        "artifact_sha256": hashlib.sha256(original).hexdigest(),
+        "reference_sha": "c" * 64,
+    })
+    strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(side_effect=AssertionError("no discovery")))
+    service = SimpleNamespace(sync_async=AsyncMock(side_effect=AssertionError("no alass")))
+    orch = om.SyncOrchestrator(sync_cache=cache, external_strategy=strategy,
+                              sync_service=service)
+    assert await orch.evaluate_and_sync(original, META, "sub", auto_sync=True) == original
+    strategy.resolve_with_provenance.assert_not_called()
+    service.sync_async.assert_not_called()
+
+
+async def test_cached_transformed_reused_without_recompute(enabled):
+    """Verified transformed artifact HIT: reuse bytes, no discovery, no ALASS."""
+    import hashlib
+
+    from tests.test_unified_verification import _linear_pair, _true_candidate
+
+    target, _ = _linear_pair()
+    transformed = _true_candidate(target, 1.0, 5_000).encode()
+    cache = SyncCache()
+    orch = om.SyncOrchestrator(sync_cache=SyncCache())
+    resolution = orch._flight_key(META, "sub", target.encode())
+    reference_sha = hashlib.sha256(b"reference").hexdigest()
+    await cache.set(resolution, transformed)
+    await cache.set_meta(resolution, {
+        "sync_state": "verified_resynced", "verification": "verified",
+        "target_binding": "exact",
+        "artifact_sha256": hashlib.sha256(transformed).hexdigest(),
+        "reference_sha": reference_sha,
+        "verification_method": "unified", "verification_version": "timing-v3"})
+    strategy = SimpleNamespace(resolve_with_provenance=AsyncMock(side_effect=AssertionError("no discovery")))
+    service = SimpleNamespace(sync_async=AsyncMock(side_effect=AssertionError("no alass")))
+    orch = om.SyncOrchestrator(sync_cache=cache, external_strategy=strategy,
+                              sync_service=service)
+    out = await orch.evaluate_and_sync(target.encode(), META, "sub", auto_sync=True)
+    assert bytes(out) == transformed
+    strategy.resolve_with_provenance.assert_not_called()
+    service.sync_async.assert_not_called()
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
@@ -244,11 +310,11 @@ async def test_download_fallback_uses_exact_unified_artifact(enabled, monkeypatc
     release = SimpleNamespace(provider="subsource", release_name="Film.srt", download_url="url")
     ref = main._fallback_candidate_ref(release, "subsource", None, None)
     fingerprint = cache.video_fingerprint_from_meta(META)
-    key = cache.build_verdict_key(fingerprint, "target", "ara", methodology="unified-v1")
-    alias = cache.build_verdict_alias_key(fingerprint, ref, methodology="unified-v1")
-    artifact_key = "artifact:unified-v1"
+    key = cache.build_verdict_key(fingerprint, "target", "ara", methodology="timing-v3")
+    alias = cache.build_verdict_alias_key(fingerprint, ref, methodology="timing-v3")
+    artifact_key = "artifact:timing-v3"
     payload = {**_legacy().model_dump(mode="json"), "target_binding": "exact",
-               "verification_method": "unified", "verification_version": "unified-v1",
+               "verification_method": "unified", "verification_version": "timing-v3",
                "reference_sha": "b" * 64,
                "artifact_key": artifact_key, "artifact_sha256": hashlib.sha256(b"correct").hexdigest()}
     await cache.set_verdict(key, payload, alias_key=alias)
@@ -267,15 +333,15 @@ async def test_listing_uses_methodology_alias(enabled):
     cache = SimpleNamespace(get_verdict_by_ref=AsyncMock(return_value=None))
     release = SimpleNamespace(provider="subdl", download_url="url")
     assert await _lookup_search_verdict(cache, "video", "sub", release,
-                                       methodology="unified-v1") is None
-    cache.get_verdict_by_ref.assert_awaited_once_with("video", "sub", methodology="unified-v1")
+                                       methodology="timing-v3") is None
+    cache.get_verdict_by_ref.assert_awaited_once_with("video", "sub", methodology="timing-v3")
 
 
 async def test_legacy_broad_scans_cannot_find_unified_artifacts():
     cache = SyncCache()
     legacy_key = SyncCache.build_key("tt1", "movie", "video", "sub", "edition", "target")
-    await cache.set(f"{legacy_key}:unified-v1", b"unified")
-    await cache.set(f"{legacy_key}:unified-v1:v3:True:context:auth", b"unified resolution")
+    await cache.set(f"{legacy_key}:timing-v3", b"unified")
+    await cache.set(f"{legacy_key}:timing-v3:v3:True:context:auth", b"unified resolution")
     assert await cache.find_synced_for("tt1", "sub") is None
     assert await cache.find_synced_for_target("tt1", "movie", "video", "sub") is None
     await cache.set(legacy_key, b"legacy")

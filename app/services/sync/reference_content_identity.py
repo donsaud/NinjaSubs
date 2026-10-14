@@ -20,6 +20,7 @@ immediately and never logged.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import re
 
@@ -70,3 +71,46 @@ def identical_content(
     if target_digest and target_digest == normalized_content_digest(reference):
         return "normalized_identical"
     return ""
+
+
+@dataclasses.dataclass(frozen=True)
+class PristineTargetIdentity:
+    """Precomputed identity of the immutable request target.
+
+    The orchestrator mutates its working copy (intro stripping, anchor
+    pre-shift) while iterating reference candidates, so per-candidate
+    self-reference checks must anchor on these precomputed digests rather
+    than re-hashing the mutated text — otherwise a byte-identical reference
+    evaluated after any preparation silently passes the guard. Byte identity
+    is compared first, normalized dialogue identity second, exactly like
+    :func:`identical_content`.
+    """
+
+    byte_sha256: str = ""
+    normalized_digest: str = ""
+
+    @staticmethod
+    def precompute(target: str | bytes | None) -> PristineTargetIdentity:
+        if not target:
+            return PristineTargetIdentity()
+        target_bytes = (
+            target if isinstance(target, bytes) else target.encode("utf-8", "replace")
+        )
+        return PristineTargetIdentity(
+            byte_sha256=hashlib.sha256(target_bytes).hexdigest(),
+            normalized_digest=normalized_content_digest(target),
+        )
+
+    def matches(self, reference: str | bytes | None) -> str:
+        """Reason ``reference`` is not independent, or ``""`` if it is."""
+        if not reference or not self.byte_sha256:
+            return ""
+        reference_bytes = (
+            reference if isinstance(reference, bytes) else reference.encode("utf-8", "replace")
+        )
+        if hashlib.sha256(reference_bytes).hexdigest() == self.byte_sha256:
+            return "byte_identical"
+        reference_digest = normalized_content_digest(reference)
+        if self.normalized_digest and self.normalized_digest == reference_digest:
+            return "normalized_identical"
+        return ""

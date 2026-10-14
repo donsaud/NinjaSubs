@@ -379,6 +379,10 @@ def test_orchestrator_override_requires_the_full_decision(caplog, monkeypatch):
         "video_fingerprint": "a1b2c3d4" * 8,
         "target_filename": "Dexter.s8e04.Scar.tissue.1080p.BluRay.TrueHD5.1.AVC-PiR8.mkv",
         "video_size": 5_414_925_805,
+        # Explicit investigation request: compatible release metadata would
+        # otherwise fast-deliver the original, so this override-path test
+        # must opt out of the metadata gate to exercise the branch it pins.
+        "force_sync": True,
     }
 
     strategy = _Reference()

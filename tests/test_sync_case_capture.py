@@ -350,7 +350,7 @@ def test_exact_alass_file_and_normalized_verifier_bytes_bound_separately(monkeyp
     assert (capture.directory / "attempt-01/verifier_transformed.srt").read_bytes() == RAW.encode()
 
 
-async def test_service_capture_before_validation_refusal_preserves_argv(monkeypatch, tmp_path):
+async def test_service_capture_preserves_timing_proposal_and_argv(monkeypatch, tmp_path):
     from app.services import sync_service as service_module
     from app.services.sync_service import SubtitleSyncService
     target = (Path(__file__).parent / "fixtures/large_offset/dexter_s08e04_reference.srt").read_text()
@@ -365,9 +365,8 @@ async def test_service_capture_before_validation_refusal_preserves_argv(monkeypa
         Path(command[3]).write_bytes(raw)
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
     monkeypatch.setattr(service_module.subprocess, "run", run)
-    monkeypatch.setattr(service_module, "_validate_synced_output", lambda *a: False)
     result = await SubtitleSyncService(alass_path="test-alass").sync_async(target, target)
-    assert result is None
+    assert result == target.replace("\r\n", "\n")
     attempt = metadata(capture)["attempts"][0]
     assert attempt["raw_transformed_sha256"] == cc.digest(raw)
     assert attempt["producer_observation"] == "alass_output_file"

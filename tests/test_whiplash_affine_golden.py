@@ -80,10 +80,10 @@ def test_unified_verifies_live_candidate(whiplash) -> None:
     verdict = verify_candidate(target, reference, result.transformed_text,
                                candidate_algorithm="timeline_affine")
     assert verdict.proposed_verdict == "VERIFIED", verdict.failure_reasons
-    assert verdict.independent_evidence_count == 51
-    assert verdict.coverage == {"opening": 23, "middle": 17, "ending": 11}
-    assert verdict.residual_statistics["median"] == 86.0
-    assert verdict.residual_statistics["max"] == 1854.0
+    assert verdict.independent_evidence_count == 23
+    assert verdict.coverage == {"opening": 7, "middle": 11, "ending": 5}
+    assert verdict.residual_statistics["median"] == 84.0
+    assert verdict.residual_statistics["max"] == 165.0
 
 
 def test_live_candidate_preserves_dialogue_and_order(whiplash) -> None:
@@ -143,6 +143,10 @@ async def test_affine_path_serves_live_bytes_with_authorization(monkeypatch, whi
 
 async def test_affine_weak_binding_withholds_transformed(monkeypatch, whiplash) -> None:
     target, reference = whiplash
+    # Isolate the affine binding mechanism. A subsequent independent proposal
+    # may now verify the same dialogue under the consolidated timing policy.
+    monkeypatch.setattr(om.SyncOrchestrator, "_try_two_point_primary", AsyncMock(return_value=None))
+    monkeypatch.setattr(om.SyncOrchestrator, "_try_hybrid_sync", AsyncMock(return_value=None))
     monkeypatch.setattr(router, "_enabled", True)
     monkeypatch.delenv(router.TEST_SCOPE_ENV, raising=False)
     monkeypatch.setattr(om.settings, "ENABLE_SUBTITLE_SYNC", True)

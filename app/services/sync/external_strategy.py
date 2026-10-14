@@ -1639,6 +1639,24 @@ class ExternalExactStrategy:
         bluray_match = is_retail_disc_source(
             _source_kind(query.target_filename)
         ) and is_retail_disc_source(_source_kind(best_name))
+        source_digest = download_source_digest(
+            self._provider_label(provider), getattr(best, "download_url", None)
+        )
+        # Demand-driven season-pack retention: if this download was a pack
+        # archive, index it once so later same-lineage episodes reuse their
+        # member locally. Never prefetches; never delays this request.
+        try:
+            from app.services.sync.season_pack import retain_season_pack
+
+            retain_season_pack(
+                raw=raw,
+                provider_label=self._provider_label(provider),
+                pack_candidate=best_name,
+                source_download_digest=source_digest,
+                query=query,
+            )
+        except Exception:  # retention must never break sync
+            logger.debug("[season-pack] retain skipped: hook failed")
         capture_provider(text, self._provider_label(provider))
         return ResolvedReference(
             text,
@@ -1650,9 +1668,7 @@ class ExternalExactStrategy:
             member_episode=proof["episode"],
             weighted_score=float(proof["score"]),
             weighted_score_without_hash=float(proof["score_without_hash"]),
-            source_download_digest=download_source_digest(
-                self._provider_label(provider), getattr(best, "download_url", None)
-            ),
+            source_download_digest=source_digest,
         )
 
     async def _download_reference(

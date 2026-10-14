@@ -32,6 +32,12 @@ class SyncTiming:
     external_plan_ms: float | None = None
     cached_reference_present: bool = False
     cached_reference_attempted: bool = False
+    #: A sticky verified reference supplied this request's first attempt,
+    #: so provider planning was eligible to be skipped.
+    sticky_reference_attempted: bool = False
+    #: A retained same-lineage season-pack member supplied this request's
+    #: reference, so provider planning was eligible to be skipped.
+    season_pack_reference_attempted: bool = False
     #: Candidates the external planner RETURNED, before any download.
     candidate_count_planned: int = 0
     #: Every reference attempt the loop actually reached, across all strategies,
@@ -48,6 +54,14 @@ class SyncTiming:
     reference_kind: str | None = None
     winning_sync_strategy: str | None = None
     cache_hit: bool = False
+    #: Metadata-gate outcome for this request (fast_original, investigate,
+    #: identity_conflict, or None when the gate abstained before judging).
+    #: Closed allowlist enforced by the gate module; never a raw filename.
+    metadata_gate_decision: str | None = None
+    #: Primary gate reason code (same allowlist discipline as the decision).
+    metadata_gate_reason: str | None = None
+    #: Wall-clock cost of the local metadata comparison (no I/O inside).
+    metadata_gate_ms: float | None = None
     #: Bounded counts of why reference attempts ended, keyed by REFERENCE_OUTCOMES.
     reference_outcomes: dict = field(default_factory=dict)
     #: Fixed telemetry definitions. A planned candidate is an attempt slot
@@ -68,11 +82,13 @@ class SyncTiming:
     def log(self, result: str, total_ms: float) -> None:
         # Avoided means successful completion with a configured planner that was not run.
         # Errors, cancellations, and ordinary failure fallbacks are not latency savings.
+        # A metadata-fast delivery avoided planning by policy decision, not by luck.
+        gate_fast = self.metadata_gate_decision == "fast_original"
         avoided = (
             result in {"original", "transformed", "cached"}
             and self.external_plan_available
             and not self.external_plan_started
-            and (self.cache_hit or self.winning_sync_strategy is not None)
+            and (self.cache_hit or self.winning_sync_strategy is not None or gate_fast)
         )
         # Provenance is an allowlisted category, never a provider-controlled string.
         kind = self.reference_kind if self.reference_kind in {
@@ -84,6 +100,9 @@ class SyncTiming:
         logger.info(
             "[sync-latency] job=%s external_plan_started=%s external_plan_avoided=%s "
             "external_plan_ms=%s cached_reference_present=%s cached_reference_attempted=%s "
+            "sticky_reference_attempted=%s "
+            "season_pack_reference_attempted=%s "
+            "metadata_gate_decision=%s metadata_gate_reason=%s metadata_gate_ms=%s "
             "candidate_count_planned=%d candidates_considered=%d references_downloaded=%d "
             "references_deduplicated=%d ALASS_processes_launched=%d "
             "planned_definition=%s considered_definition=%s "
@@ -91,6 +110,9 @@ class SyncTiming:
             "total_ms=%.3f result=%s | reference_outcomes: %s",
             self.job_id, self.external_plan_started, avoided,
             self.external_plan_ms, self.cached_reference_present, self.cached_reference_attempted,
+            self.sticky_reference_attempted,
+            self.season_pack_reference_attempted,
+            self.metadata_gate_decision, self.metadata_gate_reason, self.metadata_gate_ms,
             self.candidate_count_planned, self.candidates_considered, self.references_downloaded,
             self.references_deduplicated, self.alass_processes_launched,
             self.planned_definition, self.considered_definition,

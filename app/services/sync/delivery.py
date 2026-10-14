@@ -7,7 +7,11 @@ import re
 from dataclasses import dataclass
 
 from app.utils import cleaners, rtl
-from two_point_sync.parser import parse_srt
+from two_point_sync.parser import (
+    SubtitleParseError,
+    parse_srt,
+    parse_srt_for_verification,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +84,30 @@ def _cues(payload: bytes, response_format: str):
             if " --> " in line else line for line in text.splitlines())
     elif response_format != "srt":
         raise ValueError("unsupported authorized response format")
-    cues = parse_srt(text)
+    cues = _parse_response_cues(text)
     if not cues:
         raise ValueError("empty response")
     return [(cue.start_ms, cue.end_ms, cue.text) for cue in cues]
+
+
+def _parse_response_cues(text: str):
+    """Parse served text with the verifier's own input boundary.
+
+    Strict first: well-formed subtitles compare exactly as before. An
+    inherited formatting irregularity (a stray unplaceable line the
+    sanitizer also excludes from alignment) falls back to the lenient
+    verification-input parse — the same cue basis the timing verdict was
+    measured on — so a harmless source wart cannot veto delivery of an
+    otherwise authorized subtitle. Comparison logic is unchanged: every
+    retained cue must still match timing and order exactly.
+    """
+    try:
+        return parse_srt(text)
+    except SubtitleParseError:
+        cues, _report = parse_srt_for_verification(text, exclude_ambiguous=True)
+        if cues is None:
+            raise ValueError("unplaceable response") from None
+        return cues
 
 
 def final_body_preserves_authorization(
@@ -121,7 +145,7 @@ def log_final_delivery(
     integrity: bool, decision: str,
 ) -> None:
     logger.info(
-        "[unified-delivery] req=%s engine=8 method=unified-v1 authoritative_verdict=%s "
+        "[unified-delivery] req=%s engine=8 method=timing-v3 authoritative_verdict=%s "
         "reference_sha256=%s binding=%s may_serve=%s approved_candidate_sha256=%s "
         "http_body_sha256=%s response_format=%s decision=%s final_integrity=%s",
         auth.request_id, auth.authoritative_verdict, auth.reference_sha256 or "none",

@@ -438,18 +438,12 @@ def _offset_srt(srt_text: str, offset_seconds: float) -> str:
     return _TIMESPAN_LINE_REGEX.sub(_shift, srt_text)
 
 
-def test_duration_gate_aborts_gross_mismatch(monkeypatch, caplog):
-    """50min target vs 40min reference: alass must never run."""
-    def forbidden_run(*args, **kwargs):  # pragma: no cover - must not run
-        raise AssertionError("alass must not spawn on duration mismatch")
-
-    import subprocess
-
-    monkeypatch.setattr(subprocess, "run", forbidden_run)
-    with caplog.at_level("WARNING"):
-        out = SubtitleSyncService().sync(_span_srt(6, 3000.0), _span_srt(6, 2400.0))
-    assert out is None
-    assert "duration mismatch detected (target: 3000.0s, ref: 2400.0s)" in caplog.text
+def test_duration_difference_does_not_veto_timing_proposal(monkeypatch):
+    """A differing runtime is measured by dialogue verification after ALASS."""
+    target = _span_srt(6, 3000.0)
+    proposed = _offset_srt(target, 2.0)
+    _mock_alass_output(monkeypatch, proposed)
+    assert SubtitleSyncService().sync(target, _span_srt(6, 2400.0)) == proposed
 
 
 def test_duration_gate_allows_small_gaps(monkeypatch):
@@ -460,35 +454,18 @@ def test_duration_gate_allows_small_gaps(monkeypatch):
     assert out is not None and "shifted" in out
 
 
-def test_duration_gate_aborts_short_runtime_mismatch(monkeypatch, caplog):
-    """5min gap on a 10-15min short exceeds the series tolerance: aborts."""
-    import subprocess
-
-    monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no alass"))
-    )
-    with caplog.at_level("WARNING"):
-        out = SubtitleSyncService().sync(_span_srt(6, 600.0), _span_srt(6, 900.0))
-    assert out is None
-    assert "duration mismatch detected (target: 600.0s, ref: 900.0s)" in caplog.text
+def test_short_runtime_difference_does_not_veto_proposal(monkeypatch):
+    target = _span_srt(6, 600.0)
+    proposed = _offset_srt(target, 2.0)
+    _mock_alass_output(monkeypatch, proposed)
+    assert SubtitleSyncService().sync(target, _span_srt(6, 900.0)) == proposed
 
 
-def test_duration_gate_film_band_tolerance(monkeypatch, caplog):
-    """Feature films tolerate 5min gaps but abort beyond max(300s, 8%)."""
-    import subprocess
-
-    target = _span_srt(6, 3950.0, text="shifted")
-    _mock_alass_output(monkeypatch, _offset_srt(target, 2.0))
-    out = SubtitleSyncService().sync(target, _span_srt(6, 3700.0))
-    assert out is not None and "shifted" in out
-
-    monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no alass"))
-    )
-    with caplog.at_level("WARNING"):
-        out = SubtitleSyncService().sync(_span_srt(6, 4100.0), _span_srt(6, 3700.0))
-    assert out is None
-    assert "duration mismatch detected" in caplog.text
+def test_film_runtime_difference_does_not_veto_proposal(monkeypatch):
+    target = _span_srt(6, 4100.0, text="shifted")
+    proposed = _offset_srt(target, 2.0)
+    _mock_alass_output(monkeypatch, proposed)
+    assert SubtitleSyncService().sync(target, _span_srt(6, 3700.0)) == proposed
 
 
 def test_duration_ignores_trailing_credit_cues(monkeypatch):

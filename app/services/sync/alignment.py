@@ -69,6 +69,14 @@ MAX_MAD_MS_FOR_STABLE = 800.0
 MAX_DRIFT_MS_PER_MINUTE = 120.0
 # A change point is a step in the running median beyond this magnitude.
 CHANGE_POINT_MS = 5000.0
+# Minimum supporting pairs before a timing segment counts as a regime. Mirrors
+# the change-point detector's own window: anything smaller cannot establish a
+# local median, and would let one outlier look artificially perfect.
+MIN_SEGMENT_CUES = 4
+# More regimes than this is alternating noise or fragmentation, not a
+# defensible timing structure: segmentation is refused and dispersion is
+# measured globally instead.
+MAX_TIMING_SEGMENTS = 3
 # Minimum number of aligned cues required before claiming any sync at all.
 MIN_CUES_FOR_VERIFICATION = 5
 # Minimum cue population before a *verified* claim. Measurement is possible
@@ -189,6 +197,16 @@ class SubtitleEvaluation(BaseModel):
     verification_confidence: float | None = None
 
     # Alignment measurements; ``None`` means "not measurable", never "good".
+    # ``median_offset_ms`` is the shift (magnitude: how far the subtitle must
+    # move). ``mad_offset_ms`` and ``p95_offset_ms`` are dispersion of the
+    # residuals around that shift (stability: how consistently the dialogue
+    # follows one timing transformation). A large constant offset therefore
+    # reports a large median with a small MAD/P95, never instability.
+    # Historical note: legacy ``_measure`` records written before the
+    # residual-dispersion correction store an absolute-magnitude P95 here.
+    # Those values surface only in display/telemetry strings; no acceptance,
+    # reuse, or delivery rule reads a stored P95, so old and new records
+    # cannot be silently reinterpreted as different verdicts.
     median_offset_ms: float | None = None
     mad_offset_ms: float | None = None
     p95_offset_ms: float | None = None
@@ -516,11 +534,29 @@ def analyze_drift(pairs: list[tuple[int, float]]) -> float | None:
     Distinguishes a *stable global offset* from *progressive drift*:
     a stable alignment has a slope near zero, whereas a subtitle being
     progressively re-timed does not.
+
+    A genuine step change between two stable regimes (recap, commercial
+    edit, different cut) is not progressive drift, so the slope is measured
+    inside the most-evidenced regime once :func:`segment_pairs` finds one.
+    With no step the computation is unchanged: a single global fit. This
+    reports a measurement only; it adds no acceptance rule, and callers
+    that need regime vetoes (Two-Point discontinuity, timing-v3 regional
+    coverage) are untouched.
     """
     if len(pairs) < MIN_CUES_FOR_ANALYSIS:
         return None
-    xs = [position / 60_000.0 for position, _ in pairs]
-    ys = [delta for _, delta in pairs]
+    ordered = sorted(pairs, key=lambda pair: pair[0])
+    target = ordered
+    segments = segment_pairs(ordered)
+    if len(segments) > 1:
+        qualified = [run for run in segments if len(run) >= MIN_CUES_FOR_ANALYSIS]
+        if qualified:
+            # Most corresponding pairs, not blindly the longest span: every
+            # regime here already cleared the segment-support floor, and the
+            # fallback below keeps thin evidence on the global fit.
+            target = max(qualified, key=len)
+    xs = [position / 60_000.0 for position, _ in target]
+    ys = [delta for _, delta in target]
     mean_x = sum(xs) / len(xs)
     mean_y = sum(ys) / len(ys)
     variance = sum((x - mean_x) ** 2 for x in xs)
@@ -555,6 +591,70 @@ def detect_change_points(
             if not found or pairs[index][0] - found[-1][0] > window * 5_000:
                 found.append((pairs[index][0], step))
     return found
+
+
+def segment_pairs(
+    pairs: list[tuple[int, float]],
+) -> list[list[tuple[int, float]]]:
+    """Split ``(position_ms, delta_ms)`` pairs into chronological timing regimes.
+
+    Reuses :func:`detect_change_points` (no second detector): a boundary is
+    only drawn where the running median steps by at least
+    ``CHANGE_POINT_MS``. The input pairs are themselves the supporting
+    dialogue evidence -- correspondence is established by the caller, never
+    by this split -- and every regime must keep at least
+    ``MIN_SEGMENT_CUES`` supporting pairs, so a single outlier can never
+    form a perfect one-cue segment. Tiny runs merge into the neighbour with
+    the nearer local median (an outlier then penalises that regime instead
+    of hiding). More than ``MAX_TIMING_SEGMENTS`` regimes means alternating
+    noise or fragmentation rather than defensible structure, so segmentation
+    is refused and the pairs are returned as one global segment. Too few
+    pairs to run the detector also returns one global segment.
+
+    Callers still verify correspondence independently: this measures
+    stability, it never claims alignment and never masks a contradictory
+    region (vetoes elsewhere see the same pairs).
+    """
+    ordered = sorted(pairs, key=lambda pair: pair[0])
+    if len(ordered) < MIN_CUES_FOR_ANALYSIS * 2:
+        return [ordered]
+    boundaries = {position for position, _ in detect_change_points(ordered)}
+    if not boundaries:
+        return [ordered]
+    runs: list[list[tuple[int, float]]] = []
+    current: list[tuple[int, float]] = []
+    for pair in ordered:
+        if pair[0] in boundaries and current:
+            runs.append(current)
+            current = []
+        current.append(pair)
+    if current:
+        runs.append(current)
+    while len(runs) > 1 and any(len(run) < MIN_SEGMENT_CUES for run in runs):
+        smallest = min(range(len(runs)), key=lambda index: len(runs[index]))
+        candidates = []
+        if smallest > 0:
+            candidates.append(smallest - 1)
+        if smallest < len(runs) - 1:
+            candidates.append(smallest + 1)
+        neighbour = min(
+            candidates,
+            key=lambda index: (
+                abs(_median([delta for _, delta in runs[smallest]])
+                    - _median([delta for _, delta in runs[index]])),
+                -len(runs[index]),
+            ),
+        )
+        if neighbour < smallest:
+            runs[neighbour].extend(runs.pop(smallest))
+        else:
+            runs[smallest].extend(runs.pop(neighbour))
+        runs = [sorted(run, key=lambda pair: pair[0]) for run in runs]
+    if len(runs) > MAX_TIMING_SEGMENTS:
+        return [ordered]
+    if len(runs) == 1:
+        return [ordered]
+    return runs
 
 
 def is_reusable_verified(state: str | None, verification: str | None) -> bool:
@@ -785,19 +885,24 @@ class AlignmentAnalyzer:
     def _measure(
         self, evaluation: SubtitleEvaluation, pairs: list[tuple[int, float]]
     ) -> None:
-        """Populate offset statistics from paired cue deltas."""
+        """Populate offset statistics from paired cue deltas.
+
+        ``median_offset_ms`` records the shift itself (magnitude). MAD and
+        P95 record dispersion of the residuals around that shift, so a
+        large but stable correction is measured as stable. This matches the
+        residual-path statistics in :meth:`_classify_alignment` and the
+        timing-v3 residual bounds, where post-transform errors already
+        centre near zero.
+        """
         if not pairs:
             return
         deltas = [delta for _, delta in pairs]
         median = _median(deltas)
         evaluation.median_offset_ms = round(median, 1)
-        evaluation.mad_offset_ms = round(
-            _median([abs(delta - median) for delta in deltas]), 1
-        )
+        residuals = [abs(delta - median) for delta in deltas]
+        evaluation.mad_offset_ms = round(_median(residuals), 1)
         if len(deltas) >= MIN_CUES_FOR_PERCENTILES:
-            evaluation.p95_offset_ms = round(
-                _percentile([abs(delta) for delta in deltas], 0.95), 1
-            )
+            evaluation.p95_offset_ms = round(_percentile(residuals, 0.95), 1)
         evaluation.drift_ms_per_minute = drift = analyze_drift(pairs)
         if drift is not None:
             evaluation.drift_ms_per_minute = round(drift, 2)

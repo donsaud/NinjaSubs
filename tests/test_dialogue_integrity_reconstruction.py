@@ -82,7 +82,9 @@ def test_live_failure_reproduced_at_verifier(dexter) -> None:
     target, reference, _live_input, live_output = dexter
     verdict = verify_candidate(target, reference, live_output, candidate_algorithm="alass")
     assert verdict.proposed_verdict == "REJECTED"
-    assert verdict.failure_reasons == ("dialogue_text_modified:1",)
+    # Exact text retention also detects ALASS whitespace edits; reconstruction
+    # restores all seven changed cues from the pristine source.
+    assert verdict.failure_reasons == ("dialogue_text_modified:7",)
 
 
 def test_offending_cue_is_sanitization_provenance(dexter) -> None:
@@ -228,6 +230,10 @@ async def test_hybrid_nonlinear_reconstructs_original_dialogue(monkeypatch, dext
 def _orchestrator_with_live_bytes(monkeypatch, live_output: str, reference: str):
     from app.services.sync.target_binding import TargetBinding
 
+    # Exercise the ALASS reconstruction boundary even when a primary-regime
+    # proposal now passes the shared verifier first.
+    monkeypatch.setattr(om.SyncOrchestrator, "_try_two_point_primary", AsyncMock(return_value=None))
+
     strong = SimpleNamespace(
         state=TargetBinding.STRONG, reasons=("test_strong",), supports_verified=True,
         target=SimpleNamespace(), reference=SimpleNamespace(),
@@ -357,8 +363,8 @@ async def test_marked_integrity_negative_reuses(monkeypatch, dexter) -> None:
         "sync_state": "unverified", "verification": "verified",
         "reasons": ["unified_rejected: dialogue_text_modified:1"],
         "target_binding": "exact",
-        "verification_method": "unified", "verification_version": "unified-v1",
-        "unified_pipeline": "v2",
+        "verification_method": "unified", "verification_version": "timing-v3",
+        "unified_pipeline": "v2", "verification_input": "lenient-v1",
     })
     out = await orch.evaluate_and_sync(target.encode("utf-8"), META, "sub", auto_sync=True)
     assert out == target.encode("utf-8")
@@ -414,9 +420,11 @@ def test_golden_live_anchors(dexter) -> None:
     verdict = verify_candidate(target, reference, reconstructed,
                                candidate_algorithm="alass")
     assert verdict.proposed_verdict == "VERIFIED"
-    assert verdict.independent_evidence_count == 47
-    assert verdict.coverage == {"opening": 12, "middle": 18, "ending": 9}
-    assert verdict.residual_statistics["median"] == 351.0
+    # Endpoint dialogue events used by Two-Point fitting are held out of
+    # timing measurement, so measurable groups are total minus holdout.
+    assert verdict.independent_evidence_count == 27
+    assert verdict.coverage == {"opening": 6, "middle": 14, "ending": 7}
+    assert verdict.residual_statistics["median"] == 203.0
 
 
 async def test_golden_legacy_positive_cannot_authorize(monkeypatch, dexter) -> None:
@@ -481,6 +489,171 @@ async def test_framestor_second_reference_end_to_end(monkeypatch) -> None:
     assert isinstance(out, DeliveryPayload)
     assert out.authorization.may_serve is True
     assert out.authorization.authoritative_verdict == "VERIFIED"
-    assert bytes(out) == candidate.encode("utf-8")
+    assert bytes(out) == reconstruct_with_original_dialogue(target, candidate).encode("utf-8")
     assert orch._last_evaluation is not None
     assert str(orch._last_evaluation.sync_state.value).startswith("verified")
+
+
+# --------------------------------------- validated-offset transfer ---
+
+def _offset_target() -> str:
+    """Synthetic original with sanitizer-excluded content.
+
+    Twelve dialogue cues plus an empty-text cue, a stray unplaceable line,
+    and a translator-credit cue that sanitization drops from the working
+    copy (ad/credit policy), so no exact 1:1 mapping exists.
+    """
+    from two_point_sync.parser import format_timestamp as _fmt
+
+    blocks = []
+    for number in range(1, 13):
+        start = number * 60_000
+        blocks.append(f"{number}\n{_fmt(start)} --> {_fmt(start + 2_000)}\n"
+                      f"Dialogue line number {number} here")
+    blocks.append(f"13\n{_fmt(13 * 60_000)} --> {_fmt(13 * 60_000 + 2_000)}\n")
+    blocks.append("stray wrapped continuation line")
+    blocks.append(f"14\n{_fmt(14 * 60_000)} --> {_fmt(14 * 60_000 + 2_000)}\n"
+                  "Translation by Adeeb")
+    return "\n\n".join(blocks) + "\n"
+
+
+def _shifted_alass(text: str, shift_ms: int) -> str:
+    """Independently shift every timed block (test-only ALASS stand-in)."""
+    from two_point_sync.parser import (
+        TIMING_LINE_RE,
+        _split_blocks,
+        format_timestamp,
+        parse_srt,
+        parse_timestamp,
+    )
+
+    out = []
+    for block in _split_blocks(text.lstrip("﻿")):
+        lines = block.split("\n")
+        timing = TIMING_LINE_RE.search(lines[1]) if len(lines) >= 2 else None
+        if timing is None:
+            out.append(block)
+            continue
+        start = parse_timestamp(timing.group("start")) + shift_ms
+        end = parse_timestamp(timing.group("end")) + shift_ms
+        lines[1] = TIMING_LINE_RE.sub(
+            f"{format_timestamp(start)} --> {format_timestamp(end)}", lines[1], count=1)
+        out.append("\n".join(lines))
+    rendered = "\n\n".join(out) + "\n"
+    assert parse_srt(rendered) is not None
+    return rendered
+
+
+def test_offset_transfer_preserves_excluded_content() -> None:
+    """Dropped credit/empty/stray content survives with corrected timing."""
+    from app.services.sync_service import prepare_alass_target
+    from two_point_sync.parser import _split_blocks, parse_srt_for_verification
+
+    target = _offset_target()
+    sanitized = prepare_alass_target(target)
+    san_cues, _ = parse_srt_for_verification(sanitized, exclude_ambiguous=True)
+    assert san_cues is not None and len(san_cues) == 12
+    produced = _shifted_alass(sanitized, 12_025)
+    rebuilt = reconstruct_with_original_dialogue(target, produced)
+    assert rebuilt is not None
+    original_cues, _ = parse_srt_for_verification(target, exclude_ambiguous=True)
+    rebuilt_cues, _ = parse_srt_for_verification(rebuilt, exclude_ambiguous=True)
+    assert original_cues is not None and rebuilt_cues is not None
+    assert len(rebuilt_cues) == len(original_cues) == 13
+    assert [c.text for c in rebuilt_cues] == [c.text for c in original_cues]
+    assert all((b.start_ms - a.start_ms) == 12_025 for a, b in
+               zip(original_cues, rebuilt_cues, strict=True))
+    # Credit cue kept and shifted; empty cue kept; stray line byte-identical.
+    assert rebuilt_cues[-1].text == "Translation by Adeeb"
+    old_blocks = _split_blocks(target.lstrip("﻿"))
+    new_blocks = _split_blocks(rebuilt.lstrip("﻿"))
+    assert len(old_blocks) == len(new_blocks) == 15
+    assert old_blocks[13] == new_blocks[13] == "stray wrapped continuation line"
+
+
+def test_offset_transfer_rejects_nonlinear_drift() -> None:
+    """A split regime (+5s/+9s) must never be approximated with one shift."""
+    from app.services.sync_service import prepare_alass_target
+    from two_point_sync.parser import (
+        TIMING_LINE_RE,
+        _split_blocks,
+        format_timestamp,
+        parse_timestamp,
+    )
+
+    target = _offset_target()
+    sanitized = prepare_alass_target(target)
+    blocks = _split_blocks(sanitized.lstrip("﻿"))
+    drifted = []
+    for position, block in enumerate(blocks):
+        lines = block.split("\n")
+        timing = TIMING_LINE_RE.search(lines[1]) if len(lines) >= 2 else None
+        if timing is None:
+            drifted.append(block)
+            continue
+        shift = 5_000 if position < len(blocks) // 2 else 9_000
+        start = parse_timestamp(timing.group("start")) + shift
+        end = parse_timestamp(timing.group("end")) + shift
+        lines[1] = TIMING_LINE_RE.sub(
+            f"{format_timestamp(start)} --> {format_timestamp(end)}", lines[1], count=1)
+        drifted.append("\n".join(lines))
+    assert reconstruct_with_original_dialogue(target, "\n\n".join(drifted) + "\n") is None
+
+
+def test_offset_transfer_rejects_rewritten_dialogue() -> None:
+    """ALASS timings prove nothing once working-copy dialogue changed."""
+    from app.services.sync_service import prepare_alass_target
+
+    target = _offset_target()
+    produced = _shifted_alass(prepare_alass_target(target), 12_025)
+    tampered = produced.replace("Dialogue line number 4 here",
+                                "Completely rewritten dialogue", 1)
+    assert reconstruct_with_original_dialogue(target, tampered) is None
+
+
+def test_offset_transfer_rejects_negative_result() -> None:
+    """A shift underrunning an excluded early cue abstains instead of clamping."""
+    from app.services.sync_service import prepare_alass_target
+    from two_point_sync.parser import (
+        TIMING_LINE_RE,
+        _split_blocks,
+        format_timestamp,
+        parse_timestamp,
+    )
+    from two_point_sync.parser import format_timestamp as _fmt
+
+    # Early ad cue (dropped from the working copy) plus dialogue from 60s.
+    early = ("1\n00:00:03,000 --> 00:00:05,000\nfacebook.com/EarlyPage\n\n"
+             + "\n\n".join(
+                 f"{n}\n{_fmt((n + 1) * 60_000)} --> {_fmt((n + 1) * 60_000 + 2_000)}\n"
+                 f"Dialogue line number {n} here" for n in range(2, 14)))
+    target = early + "\n"
+    sanitized = prepare_alass_target(target)
+    # Uniform -10s shift in the sanitized domain (consistent there), but the
+    # excluded 3s ad cue would land before zero: no clamping, no guessing.
+    blocks = []
+    for block in _split_blocks(sanitized.lstrip("﻿")):
+        lines = block.split("\n")
+        timing = TIMING_LINE_RE.search(lines[1]) if len(lines) >= 2 else None
+        if timing is None:
+            blocks.append(block)
+            continue
+        start = parse_timestamp(timing.group("start")) - 10_000
+        end = parse_timestamp(timing.group("end")) - 10_000
+        lines[1] = TIMING_LINE_RE.sub(
+            f"{format_timestamp(start)} --> {format_timestamp(end)}", lines[1], count=1)
+        blocks.append("\n".join(lines))
+    assert reconstruct_with_original_dialogue(
+        target, "\n\n".join(blocks) + "\n") is None
+
+
+def test_offset_transfer_rejects_alass_dropped_cue() -> None:
+    """ALASS-side cue loss is deletion, never silently skipped."""
+    from app.services.sync_service import prepare_alass_target
+    from two_point_sync.parser import _split_blocks
+
+    target = _offset_target()
+    produced = _shifted_alass(prepare_alass_target(target), 12_025)
+    blocks = _split_blocks(produced.lstrip("﻿"))
+    assert reconstruct_with_original_dialogue(
+        target, "\n\n".join(blocks[:5] + blocks[6:]) + "\n") is None

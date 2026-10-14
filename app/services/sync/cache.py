@@ -33,6 +33,14 @@ _KNOWN_KINDS = ("team", "edition", "hash", "embedded")
 #: stem so the two namespaces can never collide on disk.
 _VIDEO_SCOPE_MARKER = "video"
 
+#: Filename marker for the sticky verified-reference tier. One pointer per
+#: exact video stem, so the namespace can never collide with artifact files.
+_STICKY_MARKER = "sticky"
+
+#: Sticky pointers are tiny metadata; the bound only stops unbounded growth
+#: across videos. Artifacts themselves stay under the video-tier lifecycle.
+MAX_STICKY_ENTRIES = 128
+
 
 def _safe_score(value: object) -> float:
     """Return a numeric artifact score without letting malformed metadata win."""
@@ -555,3 +563,267 @@ class ReferenceDiskCache:
         except OSError as exc:
             logger.warning("[reference] failed to write video-scoped reference cache: %s", exc)
             return False
+
+    # ---------------- sticky verified reference (one pointer per video) --- #
+
+    def _sticky_path(self, query: ReferenceQuery) -> Path:
+        """Pointer file for this exact video stem (never an artifact)."""
+        return self.root / f"{query.video_scope_stem}.{_STICKY_MARKER}.json"
+
+    def _prune_sticky(self) -> None:
+        """Keep the sticky namespace bounded, oldest evicted first.
+
+        Only pointers are evicted here; artifact bytes stay under the
+        video-tier lifecycle so other tiers keep working.
+        """
+        try:
+            entries = [p for p in self.root.glob(f"*.{_STICKY_MARKER}.json") if p.is_file()]
+        except OSError:
+            return
+        if len(entries) <= MAX_STICKY_ENTRIES:
+            return
+        entries.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0)
+        for stale in entries[: len(entries) - MAX_STICKY_ENTRIES]:
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _sticky_methodology(self) -> tuple[str, str]:
+        """Current verification methodology; sticky records are bound to it."""
+        try:
+            from app.services.sync.unified_verification import METHOD, VERSION
+
+            return str(METHOD), str(VERSION)
+        except Exception:
+            return "unified", "timing-v3"
+
+    def set_sticky_reference(
+        self,
+        query: ReferenceQuery,
+        *,
+        provider: str | None,
+        candidate: str = "",
+        kind: str = "edition",
+        text: str,
+        member_season: int | str | None = None,
+        member_episode: int | str | None = None,
+        score: float = 0.0,
+        score_without_hash: float = 0.0,
+        source_download_digest: str | None = None,
+        bluray_match: bool = False,
+        partial: bool = False,
+        evidence: dict | None = None,
+    ) -> bool:
+        """Promote a verified, deliverable reference as this video's sticky first choice.
+
+        Only ever called on the TRANSFORMED serve path, after identity,
+        distinctness, Timing-First verification, reconstruction, binding,
+        may_serve, and delivery-eligibility all passed. Last verified serve
+        wins (replacement); failures never reach this method, so one bad
+        request can neither erase nor oscillate the preference.
+
+        The artifact bytes are reused when already present under this stem
+        (matched by content SHA); otherwise they are written through the
+        same :meth:`set_video_scoped` gate, which refuses unproven members.
+        The pointer records methodology, so a methodology change can never
+        reinterpret an old promotion.
+        """
+        if not text:
+            return False
+        member_season = _cache_member_number(member_season)
+        member_episode = _cache_member_number(member_episode)
+        if query.season is not None and member_season != _cache_member_number(query.season):
+            return False
+        if query.episode is not None and member_episode != _cache_member_number(query.episode):
+            return False
+        if query.episode is not None and member_episode is None:
+            return False
+        kind = self._safe_kind(kind)
+        method, version = self._sticky_methodology()
+        try:
+            evidence_json = json.dumps(evidence or {}, sort_keys=True)
+        except (TypeError, ValueError):
+            return False
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            content_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            path = self._sticky_artifact_path(query, content_sha)
+            if path is None:
+                wrote = self.set_video_scoped(
+                    query, provider, text, kind=kind, bluray_match=bluray_match,
+                    candidate=candidate, partial=partial,
+                    member_season=member_season, member_episode=member_episode,
+                    score=score, score_without_hash=score_without_hash,
+                    source_download_digest=source_download_digest,
+                )
+                if not wrote:
+                    return False
+                path = self._sticky_artifact_path(query, content_sha)
+            if path is None:
+                return False
+            pointer = self._sticky_path(query)
+            replaced = pointer.is_file()
+            record = {
+                "scope": _STICKY_MARKER,
+                "stem": query.video_scope_stem,
+                "artifact": path.name,
+                "content_sha": content_sha,
+                "provider": self._safe_source(provider),
+                "candidate": candidate,
+                "kind": kind,
+                "verification_method": method,
+                "verification_version": version,
+                "evidence": json.loads(evidence_json),
+                "promoted_at": time.time(),
+            }
+            self._atomic_write(pointer, json.dumps(record, sort_keys=True))
+            self._prune_sticky()
+            logger.info(
+                "[reference-sticky] promoted=%s replaced=%s video=%s provider=%s "
+                "candidate=%s sha=%s",
+                True, replaced, query.video_scope_stem,
+                self._safe_source(provider), candidate or "?",
+                content_sha[:12],
+            )
+            return True
+        except OSError as exc:
+            logger.warning("[reference-sticky] promotion write failed: %s", exc)
+            return False
+
+    def _sticky_artifact_path(
+        self, query: ReferenceQuery, content_sha: str
+    ) -> Path | None:
+        """Existing video-tier artifact file with these exact bytes, if any."""
+        if not self.root.is_dir():
+            return None
+        for path in sorted(self.root.glob(f"{query.video_scope_stem}.{_VIDEO_SCOPE_MARKER}.*.srt")):
+            try:
+                meta = json.loads(self._sidecar_path(path).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(meta, dict) and meta.get("content_sha") == content_sha:
+                return path
+        return None
+
+    def get_sticky_reference(
+        self, query: ReferenceQuery
+    ) -> ResolvedReference | None:
+        """Return this video's sticky verified reference artifact, or ``None``.
+
+        Validation boundaries, all fail closed (a bad pointer is deleted, the
+        artifact files themselves are left to the video-tier lifecycle):
+
+        * pointer exists, parses, is fresh (TTL), and names this exact stem;
+        * methodology still matches, so an old generation can never be
+          reinterpreted as a current promotion;
+        * the artifact file exists with valid subtitle bytes whose SHA matches
+          the pointer AND its own sidecar, with a matching engine version and
+          the requested episode member.
+
+        Timing agreement is deliberately NOT checked: the reference is only
+        ever attempted first; synchronization quality is decided downstream
+        by the real verifier on every request.
+        """
+        stem = query.video_scope_stem
+        pointer = self._sticky_path(query)
+        if not pointer.is_file():
+            logger.debug("[reference-sticky] lookup=not_found video=%s", stem)
+            return None
+        try:
+            age = time.time() - pointer.stat().st_mtime
+        except OSError:
+            return None
+        if age > self.ttl:
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=expired video=%s", stem)
+            return None
+        try:
+            record = json.loads(pointer.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=artifact_invalid video=%s reason=unparseable", stem)
+            return None
+        if not isinstance(record, dict) or record.get("stem") != stem:
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=scope_mismatch video=%s", stem)
+            return None
+        method, version = self._sticky_methodology()
+        if (record.get("verification_method") != method
+                or record.get("verification_version") != version):
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=methodology_mismatch video=%s", stem)
+            return None
+        artifact_name = str(record.get("artifact") or "")
+        if not artifact_name or "/" in artifact_name or "\\" in artifact_name:
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=artifact_invalid video=%s reason=bad_name", stem)
+            return None
+        path = self.root / artifact_name
+        if not path.is_file() or not str(path.name).startswith(stem + "."):
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=artifact_invalid video=%s reason=missing", stem)
+            return None
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=artifact_invalid video=%s reason=unreadable", stem)
+            return None
+        if not (text and len(text.encode("utf-8")) > self.min_bytes and "-->" in text):
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=artifact_invalid video=%s reason=unusable", stem)
+            return None
+        content_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if content_sha != record.get("content_sha"):
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=artifact_invalid video=%s reason=sha_mismatch", stem)
+            return None
+        try:
+            meta = json.loads(self._sidecar_path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        if (meta.get("content_sha") != content_sha
+                or int(meta.get("engine_version", 0)) < ENGINE_VERSION
+                or (getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True)
+                    and meta.get("strict") is not True)):
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=artifact_invalid video=%s reason=sidecar", stem)
+            return None
+        if (
+            _cache_member_number(meta.get("member_season")) != _cache_member_number(query.season)
+            or _cache_member_number(meta.get("member_episode")) != _cache_member_number(query.episode)
+        ):
+            self._remove_sticky(pointer)
+            logger.info("[reference-sticky] lookup=scope_mismatch video=%s reason=episode", stem)
+            return None
+        kind = self._safe_kind(meta.get("kind") or record.get("kind"))
+        logger.info(
+            "[reference-sticky] lookup=hit video=%s provider=%s candidate=%s sha=%s",
+            stem, meta.get("provider", "?"), meta.get("candidate", "?"),
+            content_sha[:12],
+        )
+        return ResolvedReference(
+            text=text,
+            kind=kind,
+            bluray_match=meta.get("bluray_match") is True and kind != "abort",
+            candidate=str(meta.get("candidate", "")),
+            provider=str(meta.get("provider", "")) or None,
+            member_season=meta.get("member_season"),
+            member_episode=meta.get("member_episode"),
+            weighted_score=_safe_score(meta.get("score")),
+            weighted_score_without_hash=_safe_score(meta.get("score_without_hash")),
+            source_download_digest=str(meta.get("source_download_digest") or "") or None,
+            from_sticky_reference=True,
+            partial=meta.get("partial") is True,
+        )
+
+    @staticmethod
+    def _remove_sticky(pointer: Path) -> None:
+        """Delete a bad pointer; artifact bytes stay for the video tier."""
+        try:
+            pointer.unlink(missing_ok=True)
+        except OSError:
+            pass

@@ -863,7 +863,7 @@ async def _fetch_subtitles_handler(
         # Cache dominates prediction: real evidence beats a metadata guess.
         verdict = await _lookup_search_verdict(
             _sync_cache, verdict_fingerprint, rel_sub_id, rel,
-            methodology="unified-v1" if unified_listing else None,
+            methodology="timing-v3" if unified_listing else None,
         )
         if verdict:
             rel.sync_evidence_trusted = verdict.get("target_binding") in {"exact", "strong"}
@@ -1487,7 +1487,7 @@ async def _reusable_verified_fallback_sync(
     unified = unified_authority_enabled(fingerprint_meta)
     try:
         verdict = await _sync_cache.get_verdict_by_ref(
-            fingerprint, ref, **({"methodology": "unified-v1"} if unified else {})
+            fingerprint, ref, **({"methodology": "timing-v3"} if unified else {})
         )
     except Exception as exc:  # pragma: no cover - cache must not break the request
         logger.debug("[fallback-cache] verdict lookup failed: %s", exc)
@@ -1527,7 +1527,7 @@ async def _reusable_verified_fallback_sync(
             if not re.fullmatch(r"[a-f0-9]{64}", str(verdict.get("reference_sha") or "")):
                 return None
             artifact_key = verdict.get("artifact_key")
-            if not isinstance(artifact_key, str) or not artifact_key.endswith(":unified-v1"):
+            if not isinstance(artifact_key, str) or not artifact_key.endswith(":timing-v3"):
                 return None
             payload = await _sync_cache.get(artifact_key)
             if payload is not None and verdict.get("artifact_sha256") != hashlib.sha256(payload).hexdigest():

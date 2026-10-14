@@ -16,7 +16,6 @@ import pytest
 from app.services.sync.unified_verification import (
     METHOD,
     VERSION,
-    shadow_compare,
     to_evaluation,
     verify_candidate,
 )
@@ -98,24 +97,29 @@ def test_whiplash_unified_verified() -> None:
     assert verdict.candidate_sha256 == hashlib.sha256(candidate.encode()).hexdigest()
     assert verdict.target_identity["cues"] == len(cues) == 825
     assert verdict.temporal_result["movement_magnitude_ms"] > 60_000
-    assert verdict.structural_result["available"] is True
+    assert verdict.structural_result == {}
 
 
 def test_dexter_framestor_unified_verified() -> None:
+    from app.services.sync.candidate_reconstruction import reconstruct_with_original_dialogue
     target, reference = _read(DEX_TARGET), _read(DEX_FRAMESTOR)
     candidate = _read(DEX_VERIFIED_CANDIDATE)
+    candidate = reconstruct_with_original_dialogue(target, candidate)
+    assert candidate is not None
     verdict = verify_candidate(target, reference, candidate, candidate_algorithm="alass")
     assert verdict.proposed_verdict == "VERIFIED", verdict.failure_reasons
-    assert len(verdict.temporal_result.get("regimes", [])) >= 1
+    assert verdict.temporal_result["route"] == "dialogue_timing"
     assert verdict.independent_evidence_count >= 5
-    assert any(entry.get("kind") == "within_reference_span"
-               for entry in verdict.risk_findings)
+    assert verdict.correspondence_result["independent"] >= 5
     assert verdict.residual_statistics["median"] <= 750.0
 
 
 def test_dexter_rovers_unified_verified() -> None:
+    from app.services.sync.candidate_reconstruction import reconstruct_with_original_dialogue
     target, reference = _read(DEX_TARGET), _read(ROVERS_REFERENCE)
     candidate = _read(ROVERS_CANDIDATE)
+    candidate = reconstruct_with_original_dialogue(target, candidate)
+    assert candidate is not None
     verdict = verify_candidate(target, reference, candidate, candidate_algorithm="alass")
     assert verdict.proposed_verdict == "VERIFIED", verdict.failure_reasons
     assert verdict.independent_evidence_count >= 5
@@ -145,28 +149,11 @@ def test_pal_affine_output_verified() -> None:
                                candidate_algorithm="two_point")
     assert verdict.proposed_verdict == "VERIFIED", verdict.failure_reasons
     # Integer-ms rounding of reference times bounds the fitted scale.
-    assert abs(verdict.temporal_result["scale"] - 25.0 / 23.976) < 5e-6
+    assert verdict.residual_statistics["max"] <= 1
 
 
-def test_shadow_compare_explains_dexter_disagreement() -> None:
-    target, reference = _read(DEX_TARGET), _read(DEX_FRAMESTOR)
-    candidate = _read(DEX_VERIFIED_CANDIDATE)
-    comparison = shadow_compare(target, reference, candidate, candidate_algorithm="alass")
-    assert comparison["legacy"]["evaluated"] is True
-    assert comparison["legacy"]["sync_state"] == "unverified"
-    assert comparison["v2"]["evaluated"] is True
-    assert comparison["unified"]["proposed_verdict"] == "VERIFIED"
-    assert comparison["agreement"] is False
-    assert comparison["elapsed_ms"] >= 0
 
 
-def test_shadow_compare_agrees_on_clean_pair() -> None:
-    target_text, reference_text = _linear_pair(14)
-    candidate = _true_candidate(target_text, 1.0, 5_000.0)
-    comparison = shadow_compare(target_text, reference_text, candidate,
-                                candidate_algorithm="two_point")
-    assert comparison["unified"]["proposed_verdict"] == "VERIFIED"
-    assert comparison["agreement"] is True
 
 
 # ------------------------------------------------------------ adversarial ---
@@ -200,7 +187,7 @@ def test_incorrect_scale_rejected() -> None:
     verdict = verify_candidate(target_text, reference_text, candidate,
                                candidate_algorithm="two_point")
     assert verdict.proposed_verdict == "REJECTED"
-    assert any("drift" in reason or "median" in reason or "max" in reason
+    assert any("drift" in reason or "median" in reason or "max" in reason or "conflicting_dialogue" in reason
                for reason in verdict.failure_reasons)
 
 
@@ -221,7 +208,7 @@ def test_mistimed_opening_rejected() -> None:
     verdict = verify_candidate(target_text, reference_text, format_srt(bad),
                                candidate_algorithm="two_point")
     assert verdict.proposed_verdict == "REJECTED"
-    assert any("opening" in reason for reason in verdict.failure_reasons)
+    assert "conflicting_dialogue_timing" in verdict.failure_reasons
 
 
 def test_mistimed_ending_rejected() -> None:
@@ -233,10 +220,10 @@ def test_mistimed_ending_rejected() -> None:
     verdict = verify_candidate(target_text, reference_text, format_srt(bad),
                                candidate_algorithm="two_point")
     assert verdict.proposed_verdict == "REJECTED"
-    assert any("ending" in reason for reason in verdict.failure_reasons)
+    assert "conflicting_dialogue_timing" in verdict.failure_reasons
 
 
-def test_hidden_second_regime_rejected() -> None:
+def test_different_cut_edge_scope_reported() -> None:
     """Dominant constant movement (MAD≈0) hiding a mistimed opening."""
     target = build_dialogue(14, step_ms=60_000)
     reference = apply_affine(target, 1.0, 5_000.0)
@@ -251,8 +238,10 @@ def test_hidden_second_regime_rejected() -> None:
     candidate = _true_candidate(target_text, 1.0, 5_000.0)
     verdict = verify_candidate(target_text, shifted_text, candidate,
                                candidate_algorithm="alass")
-    assert verdict.proposed_verdict == "REJECTED", verdict.failure_reasons
-    assert len(verdict.temporal_result.get("regimes", [])) >= 1
+    assert verdict.proposed_verdict == "VERIFIED", verdict.failure_reasons
+    assert verdict.regional_result["conflicting_edge_groups"] == 2
+    assert verdict.regional_result["global_alignment_claim"] is False
+    assert verdict.temporal_result["route"] == "dialogue_timing"
 
 
 def test_concentrated_cluster_rejected_but_scattered_listed() -> None:
@@ -382,7 +371,7 @@ def test_cross_language_abstains_with_evidence() -> None:
     verdict = verify_candidate(target, reference, candidate, candidate_algorithm="alass")
     assert verdict.proposed_verdict == "UNVERIFIED"
     assert any("cross_language" in reason for reason in verdict.failure_reasons)
-    assert verdict.structural_result.get("available") is True
+    assert verdict.structural_result == {}
 
 
 def test_structural_false_high_never_verifies_alone() -> None:
@@ -395,7 +384,7 @@ def test_structural_false_high_never_verifies_alone() -> None:
     verdict = verify_candidate(target_text, reference, target_text,
                                candidate_algorithm="two_point")
     assert verdict.proposed_verdict == "UNVERIFIED"
-    assert verdict.structural_result.get("available") is True
+    assert verdict.structural_result == {}
 
 
 def test_wrong_timestamp_similar_reference_insufficient() -> None:
@@ -441,16 +430,17 @@ def test_internal_error_fails_closed() -> None:
     target_text, reference_text = _linear_pair()
     import app.services.sync.unified_verification as module
 
-    original = module.detect_anchors
+    module._correspondence.cache_clear()
+    original = module.dialogue_correspondences
     try:
         def _boom(*args, **kwargs):
             raise RuntimeError("boom")
 
-        module.detect_anchors = _boom
+        module.dialogue_correspondences = _boom
         verdict = verify_candidate(target_text, reference_text, target_text,
                                    candidate_algorithm="two_point")
     finally:
-        module.detect_anchors = original
+        module.dialogue_correspondences = original
     assert verdict.proposed_verdict == "UNVERIFIED"
     assert any("correspondence_error" in reason for reason in verdict.failure_reasons)
 
@@ -482,7 +472,7 @@ def test_cache_identity_segments_methodology() -> None:
                            candidate_text=candidate,
                            video_binding={"video": "tt0773262", "binding": "strong"})
     assert first["verification_method"] == "unified"
-    assert first["verification_version"] == "unified-v1"
+    assert first["verification_version"] == VERSION
     assert first["candidate_sha256"] == hashlib.sha256(candidate.encode()).hexdigest()
     altered = cache_identity(target_text=target_text, reference_text=reference_text,
                              candidate_text=candidate + " ",
@@ -519,18 +509,20 @@ def test_single_parse_per_document() -> None:
     target_text, reference_text = _linear_pair(12)
     candidate = _true_candidate(target_text, 1.0, 5_000.0)
     calls: list[str] = []
-    original = module.parse_srt
+    original = module.parse_srt_for_verification
 
-    def _counting(text: str):
+    module._prepared.cache_clear()
+
+    def _counting(text: str, **kwargs):
         calls.append(text[:16])
-        return original(text)
+        return original(text, **kwargs)
 
-    module.parse_srt = _counting
+    module.parse_srt_for_verification = _counting
     try:
         verdict = module.verify_candidate(target_text, reference_text, candidate,
                                           candidate_algorithm="two_point")
     finally:
-        module.parse_srt = original
+        module.parse_srt_for_verification = original
     assert verdict.proposed_verdict == "VERIFIED"
     assert len(calls) == 3, f"expected one parse per document, got {len(calls)}"
 

@@ -163,6 +163,100 @@ def parse_srt_bytes(data: bytes) -> list[Cue]:
     return parse_srt(text)
 
 
+@dataclass(frozen=True)
+class VerificationParseReport:
+    """Accounting for verification-input leniency (see parse_srt_for_verification)."""
+
+    excluded: tuple[tuple[int, str], ...] = ()
+    ambiguous: tuple[int, ...] = ()
+    renumbered: bool = False
+
+
+def parse_srt_for_verification(
+    content: str,
+    *, exclude_ambiguous: bool = False,
+) -> tuple[list[Cue] | None, VerificationParseReport]:
+    """Parse SRT ``content`` for Unified verification measurement.
+
+    Verification-input boundary ONLY: the serving/strict ``parse_srt`` is
+    untouched. Differences from strict parsing, all fail-safe:
+
+    * Cue-shaped blocks (number + timing) with no dialogue text, or with a
+      non-positive duration, carry no correspondence evidence — the same
+      blocks the ALASS sanitizer drops before aligning. They are excluded
+      and recorded in ``report.excluded`` as ``(block_number, kind)`` with
+      kind ``"empty_text"`` or ``"non_positive_duration"``. This is
+      accounted exclusion, never confused with missing dialogue: genuine
+      dialogue loss still changes cue counts/text and fails integrity.
+    * A text-bearing block that cannot be placed (no timing line, bad cue
+      index, malformed timing) is AMBIGUOUS: attaching it would invent cue
+      boundaries and dropping it would discard dialogue. Returns
+      ``(None, report)`` with the 1-based block numbers in
+      ``report.ambiguous`` so the caller abstains explicitly.
+    * Kept cues are densely renumbered (``renumbered=True``) so the number
+      space matches the sanitized working copy ALASS aligns; order follows
+      document position and timings/text are verbatim.
+
+    Raises :class:`SubtitleParseError` for empty input or when no dialogue
+    cue survives (parity with strict parsing: nothing to measure).
+    """
+    if content is None or content.strip() == "":
+        raise SubtitleParseError("Empty subtitle content")
+    content = content.lstrip("\ufeff")
+    blocks = _split_blocks(content)
+    cues: list[Cue] = []
+    excluded: list[tuple[int, str]] = []
+    ambiguous: list[int] = []
+    for position, block in enumerate(blocks):
+        lines = block.split("\n")
+        if len(lines) < 2 and _is_formatting_residue(block):
+            continue
+        timing_present = TIMING_LINE_RE.search(block) is not None
+        if not timing_present:
+            if _is_formatting_residue(block):
+                continue
+            ambiguous.append(position + 1)
+            continue
+        try:
+            int(lines[0].strip())
+        except ValueError:
+            if _is_formatting_residue(block):
+                continue
+            ambiguous.append(position + 1)
+            continue
+        timing = TIMING_LINE_RE.search(lines[1])
+        if timing is None:
+            ambiguous.append(position + 1)
+            continue
+        try:
+            start_ms = parse_timestamp(timing.group("start"))
+            end_ms = parse_timestamp(timing.group("end"))
+        except SubtitleParseError:
+            ambiguous.append(position + 1)
+            continue
+        text = "\n".join(lines[2:])
+        if end_ms <= start_ms:
+            excluded.append((position + 1, "non_positive_duration"))
+            continue
+        if text.strip() == "":
+            excluded.append((position + 1, "empty_text"))
+            continue
+        cues.append(
+            Cue(number=len(cues) + 1, order=position,
+                start_ms=start_ms, end_ms=end_ms, text=text)
+        )
+    if ambiguous and not exclude_ambiguous:
+        return None, VerificationParseReport(
+            excluded=tuple(excluded), ambiguous=tuple(ambiguous),
+            renumbered=True,
+        )
+    if not cues:
+        raise SubtitleParseError("No subtitle cues found")
+    return cues, VerificationParseReport(
+        excluded=tuple(excluded), ambiguous=tuple(ambiguous), renumbered=True,
+    )
+
+
 def validate_cues(cues: list[Cue]) -> list[CueIssue]:
     """Report structural issues without removing or mutating any cue."""
     issues: list[CueIssue] = []

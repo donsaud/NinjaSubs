@@ -214,7 +214,7 @@ class SyncCache:
         prefix = f"final_sub:{SYNC_PAYLOAD_VERSION}:{imdb}:"
         needle = f":{sid}:"
         for key in list(self._local.keys()):
-            if key.startswith(prefix) and needle in key and "unified-v1" not in key.split(":"):
+            if key.startswith(prefix) and needle in key and not {"timing-v2", "timing-v3"}.intersection(key.split(":")):
                 value = self._local.get(key)
                 if value:
                     return value
@@ -225,7 +225,7 @@ class SyncCache:
                     cursor, keys = await self._redis.scan(cursor, match=f"{prefix}*", count=200)
                     for key in keys:
                         text = key.decode() if isinstance(key, bytes) else str(key)
-                        if needle in text and "unified-v1" not in text.split(":"):
+                        if needle in text and not {"timing-v2", "timing-v3"}.intersection(text.split(":")):
                             value = await self._redis.get(text)
                             if value:
                                 return value if isinstance(value, bytes) else str(value).encode()
@@ -265,7 +265,7 @@ class SyncCache:
         prefix = f"final_sub:{SYNC_PAYLOAD_VERSION}:{imdb}:{season_ep}:{fp}:{sid}"
         head = f"{prefix}:"
         for key in list(self._local.keys()):
-            if (key == prefix or key.startswith(head)) and "unified-v1" not in key.split(":"):
+            if (key == prefix or key.startswith(head)) and not {"timing-v2", "timing-v3"}.intersection(key.split(":")):
                 value = self._local.get(key)
                 if value:
                     return value
@@ -278,7 +278,7 @@ class SyncCache:
                         text = key.decode() if isinstance(key, bytes) else str(key)
                         if text != prefix and not text.startswith(head):
                             continue
-                        if "unified-v1" in text.split(":"):
+                        if {"timing-v2", "timing-v3"}.intersection(text.split(":")):
                             continue
                         value = await self._redis.get(text)
                         if value:
@@ -367,12 +367,12 @@ class SyncCache:
             return None
         if not isinstance(data, dict):
             return None
-        unified = key.startswith(("verdict:8:unified-v1:", "verdict-alias:8:unified-v1:"))
+        unified = key.startswith(("verdict:8:timing-v3:", "verdict-alias:8:timing-v3:"))
         expected_engine = 8 if unified else SYNC_VERDICT_ENGINE_VERSION
         if int(data.get("engine_version") or 0) != expected_engine:
             return None
         if unified and (data.get("verification_method") != "unified"
-                        or data.get("verification_version") != "unified-v1"):
+                        or data.get("verification_version") != "timing-v3"):
             return None
         if (str(data.get("sync_state", "")).startswith("verified")
                 and data.get("target_binding") not in {"exact", "strong"}):
@@ -436,7 +436,7 @@ class SyncCache:
                 return
         try:
             payload = dict(verdict)
-            payload["engine_version"] = 8 if key.startswith("verdict:8:unified-v1:") else SYNC_VERDICT_ENGINE_VERSION
+            payload["engine_version"] = 8 if key.startswith("verdict:8:timing-v3:") else SYNC_VERDICT_ENGINE_VERSION
             raw = json.dumps(payload)
         except (TypeError, ValueError) as exc:
             logger.debug("[sync-cache] verdict not serializable, skipping: %s", exc)

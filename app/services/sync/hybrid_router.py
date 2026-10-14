@@ -23,13 +23,6 @@ from app.services.sync.alignment import (
     AlignmentAnalyzer,
     may_serve_synchronized,
 )
-from app.services.sync.correspondence_verification import (
-    anchor_pairs,
-    to_evaluation,
-    verify_linear_candidate,
-    verify_nonlinear_candidate,
-    verify_nonlinear_regions,
-)
 from app.services.sync.reference_content_identity import identical_content
 from two_point_sync.anchors import AnchorResult, detect_anchors
 from two_point_sync.parser import (
@@ -42,7 +35,6 @@ from two_point_sync.parser import (
 )
 from two_point_sync.sanitizer import classify_all
 from two_point_sync.transform import LinearTransform, apply_transform, fit_from_anchors
-from two_point_sync.validator import Checkpoint, validate_transform
 
 logger = logging.getLogger(__name__)
 
@@ -238,41 +230,6 @@ class HybridRouteResult:
     reference_sha: str = ""
 
 
-def _correspondence_telemetry(verdict: Any) -> dict[str, Any]:
-    """Flatten a CorrespondenceVerdict to privacy-safe telemetry (§14)."""
-    return {
-        "verification_method": verdict.method,
-        "candidate_algorithm": verdict.candidate_algorithm,
-        "reference_sha": verdict.reference_sha,
-        "correspondence_groups_found": verdict.groups_found,
-        "independent_groups_used": verdict.independent_used,
-        "overlapping_groups_excluded": verdict.overlapping_excluded,
-        "temporal_coverage_thirds": dict(verdict.coverage_thirds),
-        "regional_coverage": dict(verdict.coverage_thirds),
-        "median_residual_ms": verdict.median_residual_ms,
-        "p90_residual_ms": verdict.p90_residual_ms,
-        "p95_residual_ms": verdict.p95_residual_ms,
-        "max_residual_ms": verdict.max_residual_ms,
-        "movement_magnitude_ms": verdict.movement_magnitude_ms,
-        "transformation_model": dict(verdict.transformation_model),
-        "regional_discontinuities": [
-            {key: entry.get(key) for key in
-             ("label", "implied_offset_ms", "support", "span_start_ms", "span_end_ms")}
-            for entry in verdict.regional_discontinuities
-        ],
-        "outlier_count": verdict.outlier_count,
-        "outliers": [
-            {"target_ms": entry.get("target_ms"),
-             "residual_ms": entry.get("residual_ms"),
-             "kind": entry.get("kind")}
-            for entry in verdict.outliers
-        ],
-        "clamped": list(verdict.clamped),
-        "unmatched_reference_spans": list(verdict.unmatched_reference_spans),
-        "failure_reasons": list(verdict.failure_reasons),
-        "reasons": list(verdict.failure_reasons),
-        "final_verdict": "accepted" if verdict.accepted else "rejected",
-    }
 
 
 def _reference_sha(reference_text: str) -> str:
@@ -365,43 +322,6 @@ def build_linear_output(
     return format_srt(converted), transform
 
 
-def verify_linear_nucleus(
-    anchor_result: AnchorResult, film_start_ms: int, film_end_ms: int
-) -> dict[str, Any]:
-    """Independent nucleus validation of the linear inlier checkpoints."""
-    first = anchor_result.first_anchor
-    last = anchor_result.last_anchor
-    if first is None or last is None:
-        return {"accepted": False, "reasons": ("missing_anchors",)}
-    try:
-        transform = fit_from_anchors(
-            first.target_ms, first.reference_ms, last.target_ms, last.reference_ms
-        )
-    except Exception as exc:
-        return {"accepted": False, "reasons": (f"refit_failed:{type(exc).__name__}",)}
-    checkpoints = [
-        Checkpoint(
-            target_number=item.target_number,
-            reference_number=item.reference_number,
-            target_ms=item.target_ms,
-            reference_ms=item.reference_ms,
-        )
-        for item in anchor_result.checkpoints
-    ]
-    report = validate_transform(
-        transform, checkpoints, span_start_ms=film_start_ms, span_end_ms=film_end_ms
-    )
-    return {
-        "accepted": report.accepted,
-        "median_abs_ms": report.median_abs_ms,
-        "max_abs_ms": report.max_abs_ms,
-        "p90_abs_ms": report.p90_abs_ms,
-        "regions": dict(report.region_medians_ms),
-        "counts": dict(report.region_counts),
-        "reasons": tuple(report.reasons),
-    }
-
-
 async def attempt_hybrid(
     target_text: str,
     reference_text: str,
@@ -418,7 +338,6 @@ async def attempt_hybrid(
     a result the caller serves only when every gate (including Target
     Binding, enforced by the caller) passes.
     """
-    from app.services.subtitle_matcher import parse_srt_cues
 
     timings_ms: dict[str, float] = {}
     reference_sha = _reference_sha(reference_text)
@@ -426,358 +345,58 @@ async def attempt_hybrid(
     timings_ms.update(classification.get("timings_ms", {}))
     route = classification.get("route", "insufficient")
 
-    use_unified = is_enabled() if unified_authority is None else unified_authority
-    if use_unified:
-        # Algorithms propose bytes; only Unified judges their correctness.
-        candidate = None
-        scale = offset_ms = None
-        try:
-            if route == "linear":
-                built = build_linear_output(classification["target_cues"], classification["anchor_result"])
-                if built:
-                    candidate, transform = built
-                    scale, offset_ms = transform.scale, transform.offset_ms
-            elif route == "nonlinear" and not reference_partial and alass_runner is not None:
-                candidate = await alass_runner(target_text, reference_text)
-        except Exception as exc:
-            return HybridRouteResult(True, route, False,
-                                     reason_codes=(f"candidate_error:{type(exc).__name__}",))
-        if not candidate:
-            return HybridRouteResult(True, route, False, reason_codes=("no_candidate",))
-        if route == "nonlinear":
-            # Same sanitization boundary as the ordinary ALASS path: the
-            # runner aligns a sanitized working copy while Unified judges
-            # against the original. Reconstruct original dialogue under the
-            # verified ALASS timings when unambiguous; otherwise verify the
-            # raw bytes (fail closed). Linear candidates preserve target text
-            # by construction and need no reconstruction.
-            from app.services.sync.candidate_reconstruction import (
-                reconstruct_with_original_dialogue,
-            )
-
-            try:
-                rebuilt = reconstruct_with_original_dialogue(target_text, candidate)
-            except Exception:
-                rebuilt = None
-            if rebuilt is not None:
-                candidate = rebuilt
-        evaluation, telemetry = await unified_review_async(
-            target_text=target_text, reference_text=reference_text,
-            synced_text=candidate, candidate_algorithm=f"hybrid_{route}",
-        )
-        # Losing Legacy verdict is retained in telemetry, never selected.
-        try:
-            legacy = (analyzer or AlignmentAnalyzer()).analyze(
-                parse_srt_cues(target_text), candidate, reference_text,
-                alass_applied=True, alass_successful=True,
-                max_plausible_offset_ms=max_plausible_offset_ms,
-            )
-            telemetry["legacy_evaluation"] = legacy.model_dump(mode="json")
-        except Exception as exc:
-            telemetry["legacy_error"] = type(exc).__name__
-        return HybridRouteResult(
-            True, route, may_serve_synchronized(evaluation.sync_state, evaluation.verification),
-            transformed_text=candidate, evaluation=evaluation,
-            correspondence=telemetry, reason_codes=tuple(telemetry.get("reasons", ())),
-            reference_sha=reference_sha, scale=scale, offset_ms=offset_ms, timings_ms=timings_ms,
-        )
-
-    if route == "insufficient":
-        return HybridRouteResult(
-            evaluated=True,
-            route="insufficient",
-            accepted=False,
-            reason_codes=(classification.get("reason", "insufficient_evidence"),),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-
-    analyzer = analyzer or AlignmentAnalyzer()
+    # Algorithms propose bytes; only Unified judges their correctness.
+    candidate = None
+    scale = offset_ms = None
     try:
-        production_target_cues = parse_srt_cues(target_text)
+        if route == "linear":
+            built = build_linear_output(classification["target_cues"], classification["anchor_result"])
+            if built:
+                candidate, transform = built
+                scale, offset_ms = transform.scale, transform.offset_ms
+        elif route == "nonlinear" and not reference_partial and alass_runner is not None:
+            candidate = await alass_runner(target_text, reference_text)
     except Exception as exc:
+        reason = (f"alass_failed:{type(exc).__name__}" if route == "nonlinear"
+                  else f"candidate_error:{type(exc).__name__}")
+        return HybridRouteResult(True, route, False, reason_codes=(reason,),
+                                 reference_sha=reference_sha, timings_ms=timings_ms)
+    if not candidate:
         return HybridRouteResult(
-            evaluated=True,
-            route="failed",
-            accepted=False,
-            reason_codes=(f"production_parse_failed:{type(exc).__name__}",),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
+            True, route, False,
+            reason_codes=(str(classification.get("reason") or "no_candidate"),),
+            reference_sha=reference_sha, timings_ms=timings_ms)
+    if route == "nonlinear":
+        # Same sanitization boundary as the ordinary ALASS path: the
+        # runner aligns a sanitized working copy while Unified judges
+        # against the original. Reconstruct original dialogue under the
+        # verified ALASS timings when unambiguous; otherwise verify the
+        # raw bytes (fail closed). Linear candidates preserve target text
+        # by construction and need no reconstruction.
+        from app.services.sync.candidate_reconstruction import (
+            reconstruct_with_original_dialogue,
         )
 
-    if route == "linear":
-        started = time.monotonic()
-        anchor_result: AnchorResult = classification["anchor_result"]
-        target_cues: list[NucleusCue] = classification["target_cues"]
-        built = build_linear_output(target_cues, anchor_result)
-        timings_ms["transform_ms"] = (time.monotonic() - started) * 1000.0
-        if built is None:
-            return HybridRouteResult(
-                evaluated=True,
-                route="failed",
-                accepted=False,
-                reason_codes=("linear_transform_invalid",),
-                timings_ms=timings_ms,
-                reference_sha=reference_sha,
-            )
-        transformed_text, transform = built
-        film_start_ms = min(cue.start_ms for cue in target_cues)
-        film_end_ms = max(cue.end_ms for cue in target_cues)
-        nucleus_report = verify_linear_nucleus(anchor_result, film_start_ms, film_end_ms)
-        if not nucleus_report.get("accepted"):
-            return HybridRouteResult(
-                evaluated=True,
-                route="linear",
-                accepted=False,
-                scale=transform.scale,
-                offset_ms=transform.offset_ms,
-                regional=nucleus_report,
-                reason_codes=tuple(nucleus_report.get("reasons", ("nucleus_rejected",))),
-                timings_ms=timings_ms,
-                reference_sha=reference_sha,
-            )
-        started = time.monotonic()
-        correspondence_verdict = verify_linear_candidate(
-            target_text=target_text,
-            reference_text=reference_text,
-            candidate_text=transformed_text,
-            anchor_result=anchor_result,
-            reference_sha=reference_sha,
-            candidate_algorithm="two_point",
-        )
-        timings_ms["correspondence_ms"] = (time.monotonic() - started) * 1000.0
-        correspondence = _correspondence_telemetry(correspondence_verdict)
-        correspondence_evaluation = (
-            to_evaluation(correspondence_verdict) if correspondence_verdict.accepted else None
-        )
-        started = time.monotonic()
         try:
-            evaluation = analyzer.analyze(
-                production_target_cues,
-                transformed_text,
-                reference_text,
-                alass_applied=True,
-                alass_successful=True,
-                max_plausible_offset_ms=max_plausible_offset_ms,
-            )
-        except Exception as exc:
-            return HybridRouteResult(
-                evaluated=True,
-                route="linear",
-                accepted=False,
-                scale=transform.scale,
-                offset_ms=transform.offset_ms,
-                regional=nucleus_report,
-                reason_codes=(f"production_verifier_raised:{type(exc).__name__}",),
-                timings_ms=timings_ms,
-                reference_sha=reference_sha,
-            )
-        timings_ms["verify_ms"] = (time.monotonic() - started) * 1000.0
-        legacy_ok = bool(may_serve_synchronized(evaluation.sync_state, evaluation.verification))
-        correspondence_ok = correspondence_verdict.accepted
-        if not legacy_ok and not correspondence_ok:
-            return HybridRouteResult(
-                evaluated=True,
-                route="linear",
-                accepted=False,
-                scale=transform.scale,
-                offset_ms=transform.offset_ms,
-                evaluation=evaluation,
-                regional=nucleus_report,
-                correspondence=correspondence,
-                correspondence_evaluation=None,
-                reason_codes=(
-                    "production_verifier_rejected",
-                    f"state={evaluation.sync_state.value}",
-                    f"verification={evaluation.verification.value}",
-                    "correspondence_rejected",
-                    *tuple(correspondence_verdict.failure_reasons),
-                ),
-                timings_ms=timings_ms,
-                reference_sha=reference_sha,
-            )
-        return HybridRouteResult(
-            evaluated=True,
-            route="linear",
-            accepted=True,
-            transformed_text=transformed_text,
-            scale=transform.scale,
-            offset_ms=transform.offset_ms,
-            evaluation=evaluation,
-            regional=nucleus_report,
-            correspondence=correspondence,
-            correspondence_evaluation=correspondence_evaluation,
-            reason_codes=(
-                ("legacy_accepted",) if legacy_ok else ()
-            ) + (
-                ("correspondence_accepted",) if correspondence_ok else ()
-            ),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-
-    # route == "nonlinear"
-    anchor_result = classification["anchor_result"]
-    target_cues = classification["target_cues"]
-    if reference_partial:
-        return HybridRouteResult(
-            evaluated=True,
-            route="nonlinear",
-            accepted=False,
-            reason_codes=("reference_partial_not_supported",),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-    if alass_runner is None:
-        return HybridRouteResult(
-            evaluated=True,
-            route="nonlinear",
-            accepted=False,
-            reason_codes=("alass_runner_unavailable",),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-    started = time.monotonic()
-    try:
-        candidate_text = await alass_runner(target_text, reference_text)
-    except Exception as exc:
-        return HybridRouteResult(
-            evaluated=True,
-            route="failed",
-            accepted=False,
-            reason_codes=(f"alass_failed:{type(exc).__name__}",),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-    timings_ms["alass_ms"] = (time.monotonic() - started) * 1000.0
-    if not candidate_text:
-        return HybridRouteResult(
-            evaluated=True,
-            route="nonlinear",
-            accepted=False,
-            reason_codes=("alass_empty_output",),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-    try:
-        candidate_cues = parse_srt(candidate_text)
-    except SubtitleParseError as exc:
-        return HybridRouteResult(
-            evaluated=True,
-            route="nonlinear",
-            accepted=False,
-            reason_codes=(f"alass_output_unparseable:{type(exc).__name__}",),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-    retention = len(candidate_cues) / max(1, len(target_cues))
-    if retention < MIN_TARGET_RETENTION:
-        return HybridRouteResult(
-            evaluated=True,
-            route="nonlinear",
-            accepted=False,
-            reason_codes=(f"alass_cue_retention_too_low:{retention:.2f}",),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-    by_number = {cue.number: cue for cue in candidate_cues}
-    # Substitute candidate timings by cue-number correspondence: the candidate
-    # preserves cue numbers, so each anchor maps to its candidate cue.
-    # Signature deduplication (anchor_pairs) keeps overlapping groups single.
-    resolved_pairs: list[tuple[int, int, int]] = []
-    for _, reference_ms, region_ms, target_numbers, _ in anchor_pairs(anchor_result):
-        cue = by_number.get(target_numbers[0])
-        if cue is None:
-            continue
-        resolved_pairs.append((cue.start_ms, reference_ms, region_ms))
-    film_start_ms = min(cue.start_ms for cue in target_cues)
-    film_end_ms = max(cue.end_ms for cue in target_cues)
-    regional = verify_nonlinear_regions(candidate_cues, resolved_pairs, film_start_ms, film_end_ms)
-    if not regional.get("accepted"):
-        return HybridRouteResult(
-            evaluated=True,
-            route="nonlinear",
-            accepted=False,
-            evaluation=None,
-            regional=regional,
-            reason_codes=tuple(regional.get("reasons", ("regional_rejected",))),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-    started = time.monotonic()
-    correspondence_verdict = verify_nonlinear_candidate(
-        target_text=target_text,
-        reference_text=reference_text,
-        candidate_text=candidate_text,
-        anchor_result=anchor_result,
-        reference_sha=reference_sha,
-        candidate_algorithm="alass",
+            rebuilt = reconstruct_with_original_dialogue(target_text, candidate)
+        except Exception:
+            rebuilt = None
+        if rebuilt is not None:
+            candidate = rebuilt
+    evaluation, telemetry = await unified_review_async(
+        target_text=target_text, reference_text=reference_text,
+        synced_text=candidate, candidate_algorithm=f"hybrid_{route}",
     )
-    timings_ms["correspondence_ms"] = (time.monotonic() - started) * 1000.0
-    correspondence = _correspondence_telemetry(correspondence_verdict)
-    correspondence_evaluation = (
-        to_evaluation(correspondence_verdict) if correspondence_verdict.accepted else None
-    )
-    started = time.monotonic()
-    try:
-        evaluation = analyzer.analyze(
-            production_target_cues,
-            candidate_text,
-            reference_text,
-            alass_applied=True,
-            alass_successful=True,
-            max_plausible_offset_ms=max_plausible_offset_ms,
-        )
-    except Exception as exc:
-        return HybridRouteResult(
-            evaluated=True,
-            route="nonlinear",
-            accepted=False,
-            evaluation=None,
-            regional=regional,
-            reason_codes=(f"production_verifier_raised:{type(exc).__name__}",),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
-    timings_ms["verify_ms"] = (time.monotonic() - started) * 1000.0
-    legacy_ok = bool(may_serve_synchronized(evaluation.sync_state, evaluation.verification))
-    correspondence_ok = correspondence_verdict.accepted
-    if not legacy_ok and not correspondence_ok:
-        return HybridRouteResult(
-            evaluated=True,
-            route="nonlinear",
-            accepted=False,
-            evaluation=evaluation,
-            regional=regional,
-            correspondence=correspondence,
-            correspondence_evaluation=None,
-            reason_codes=(
-                "production_verifier_rejected",
-                f"state={evaluation.sync_state.value}",
-                f"verification={evaluation.verification.value}",
-                "correspondence_rejected",
-                *tuple(correspondence_verdict.failure_reasons),
-            ),
-            timings_ms=timings_ms,
-            reference_sha=reference_sha,
-        )
+    accepted = may_serve_synchronized(evaluation.sync_state, evaluation.verification)
     return HybridRouteResult(
-        evaluated=True,
-        route="nonlinear",
-        accepted=True,
-        transformed_text=candidate_text,
-        evaluation=evaluation,
-        regional=regional,
-        correspondence=correspondence,
-        correspondence_evaluation=correspondence_evaluation,
-        reason_codes=(
-            ("legacy_accepted",) if legacy_ok else ()
-        ) + (
-            ("correspondence_accepted",) if correspondence_ok else ()
-        ),
-        timings_ms=timings_ms,
-        reference_sha=reference_sha,
+        True, route, accepted,
+        # Unverified bytes never leave this function: callers may only serve
+        # transformed_text when accepted is True (enforced again downstream).
+        transformed_text=candidate if accepted else None, evaluation=evaluation,
+        correspondence=telemetry, reason_codes=tuple(telemetry.get("reasons", ())),
+        reference_sha=reference_sha, scale=scale, offset_ms=offset_ms, timings_ms=timings_ms,
     )
+
 
 
 #: Bound for one pre-delivery verification pass. Detection on full-episode
@@ -813,6 +432,7 @@ def unified_review(*, target_text: str, reference_text: str, synced_text: str,
         "proceed": accepted, "reasons": verdict.failure_reasons,
         "independent_groups_used": verdict.independent_evidence_count,
         "temporal_coverage_thirds": verdict.coverage,
+        "dialogue_scope": verdict.regional_result,
         "median_residual_ms": verdict.residual_statistics.get("median"),
         "timings_ms": {"unified_ms": (time.monotonic() - started) * 1000.0},
     }
@@ -835,7 +455,7 @@ async def unified_review_async(*, target_text: str, reference_text: str, synced_
         evaluation.reasons.append(reason)
         return evaluation, {
             "evaluated": True, "verification_method": "unified",
-            "verification_version": "unified-v1", "verdict": "ERROR",
+            "verification_version": "timing-v3", "verdict": "ERROR",
             "proceed": False, "served_sha": "not_served", "reasons": (reason,),
             "candidate_sha": hashlib.sha256(synced_text.encode()).hexdigest(),
         }

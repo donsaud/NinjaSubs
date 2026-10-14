@@ -916,6 +916,93 @@ def _terminal_extension(
     return best
 
 
+def dialogue_correspondences(
+    target_cues: list[Cue], reference_cues: list[Cue],
+) -> tuple[tuple[int, int, int, tuple[int, ...], tuple[int, ...]], ...]:
+    """Unique textual events for timing measurement, without fitting a clock.
+
+    Reuse bounded exact unit/concatenated-group matching. Repeated text with
+    multiple placements is excluded, never resolved by timestamp proximity.
+    Marker-only and approximate adjacent groups cannot verify a timestamp.
+    Later speaker lines have no measured start within their containing cue.
+    Exclude those boundaries rather than treating them as zero-error evidence.
+    """
+    target_scores, reference_scores = classify_all(target_cues), classify_all(reference_cues)
+    target_units, _ = _build_units(target_cues, target_scores)
+    reference_units, _ = _build_units(reference_cues, reference_scores)
+    candidates = _build_candidates(target_cues, reference_cues, target_scores, reference_scores, [])
+    placements: dict[str, set[tuple[tuple[int, ...], tuple[int, ...]]]] = {}
+    for item in candidates:
+        placements.setdefault(item.key, set()).add((item.target_units, item.reference_units))
+    used_target: set[int] = set()
+    used_reference: set[int] = set()
+    records = []
+    for item in candidates:
+        if len(placements[item.key]) != 1 or not _is_strong_candidate(item):
+            continue
+        # A unique short utterance in these two files is not necessarily unique
+        # dialogue in the film (e.g. Arabic "hello" or "stop"). Require lexical
+        # context, not a plausible clock, for such matches.
+        if len(set(item.key.split())) < 3 and "neighbour_context_match" not in item.evidence:
+            continue
+        if not any(e.startswith("exact_normalized_match:") for e in item.evidence):
+            continue
+        if item.grouped and not any(e.startswith("grouped_exact_match:") for e in item.evidence):
+            continue
+        left, right = target_units[item.target_idx], reference_units[item.reference_idx]
+        if left.line_idx not in (None, 0) or right.line_idx not in (None, 0):
+            continue
+        target_numbers = _cue_numbers(target_units, item.target_units, target_cues)
+        reference_numbers = _cue_numbers(reference_units, item.reference_units, reference_cues)
+        if used_target.intersection(target_numbers) or used_reference.intersection(reference_numbers):
+            continue
+        used_target.update(target_numbers)
+        used_reference.update(reference_numbers)
+        records.append((left.start_ms, right.start_ms, left.start_ms, target_numbers, reference_numbers))
+    # Order-consistent measurement only: dialogue is sequential, so a pairing
+    # whose reference onset runs backward against the target order is a
+    # wrong-instance match (the same sentence subtitled at two story points,
+    # with each side keeping a different one), never timing evidence. Keep
+    # the longest chronologically consistent run; the choice is residual-blind
+    # (text order only) and deterministic, so it can never manufacture a pass:
+    # whatever remains must still clear every sufficiency threshold downstream.
+    records = _longest_chronological_run(records)
+    # The verifier holds fitting endpoints out of its timing statistics. Keep
+    # the full correspondence available for output-integrity checks too.
+    return tuple(records)
+
+
+def _longest_chronological_run(
+    records: list[tuple[int, int, int, tuple[int, ...], tuple[int, ...]]],
+) -> list[tuple[int, int, int, tuple[int, ...], tuple[int, ...]]]:
+    """Longest strictly reference-increasing subsequence (target order kept).
+
+    Records arrive in target-onset order. A repeated line matched to the
+    wrong story instance is the only way a later target onset pairs with an
+    earlier-or-equal reference onset; dropping those pairings (not cues, not
+    dialogue) keeps the majority story order. Ties keep the earliest target
+    pairing; overall first-maximal reconstruction makes it deterministic.
+    Bounded O(n^2); correspondence sets are small by construction.
+    """
+    n = len(records)
+    if n < 2:
+        return records
+    best_len = [1] * n
+    prev = [-1] * n
+    for i in range(n):
+        ref_i = records[i][1]
+        for j in range(i):
+            if records[j][1] < ref_i and best_len[j] + 1 > best_len[i]:
+                best_len[i] = best_len[j] + 1
+                prev[i] = j
+    end = max(range(n), key=lambda i: best_len[i])
+    keep: list[int] = []
+    while end != -1:
+        keep.append(end)
+        end = prev[end]
+    return [records[i] for i in sorted(keep)]
+
+
 def detect_anchors(
     target_cues: list[Cue],
     reference_cues: list[Cue],
@@ -991,6 +1078,14 @@ def detect_anchors(
                 best_model = model
                 best_inliers = inliers
                 best_pair = (first, second)
+            if len(best_inliers) >= len(candidates):
+                # Exact early exit (no behavior change): full coverage cannot
+                # be beaten — no later model can hold more inliers, and no
+                # subset spans wider than the full candidate set. Without
+                # this, near-identical documents (hundreds of mutually
+                # matching units) evaluate every pair and burn minutes of CPU
+                # inside one verification call.
+                break
 
     if best_model is None or best_pair is None or len(best_inliers) < MIN_INLIERS:
         return AnchorResult(
