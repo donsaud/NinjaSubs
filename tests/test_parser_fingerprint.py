@@ -90,8 +90,11 @@ def test_comments_whitespace_and_line_endings_do_not_change_digest():
 
 
 def test_existing_real_captures_replay_without_rewriting_any_evidence(monkeypatch):
+    from tests.private_fixtures import require_many
+
     cases = [c for c in json.loads(MANIFEST.read_bytes())["cases"] if "capture_v2" in c]
     assert len(cases) == 2
+    require_many([ROOT / c["capture_v2"]["path"] / "pristine_target.srt" for c in cases])
     before = {p: p.read_bytes() for p in (ROOT / "tests/replay").rglob("*") if p.is_file()}
     for case in cases:
         spec = case["capture_v2"]

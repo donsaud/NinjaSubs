@@ -103,9 +103,13 @@ def test_legacy_chain_unverified_then_large_offset_serves() -> None:
 
 
 def test_committed_fixture_identities() -> None:
-    assert hashlib.sha256(ROVERS_CANDIDATE.read_bytes()).hexdigest() == EXPECTED_CANDIDATE_SHA256
-    assert hashlib.sha256(ROVERS_DIR.joinpath(
-        "dexter-s08e01-rovers-634.srt").read_bytes()).hexdigest() == EXPECTED_REFERENCE_SHA256
+    from tests.private_fixtures import require_many
+
+    candidate = ROVERS_DIR / "dexter-msd-rovers-alass-synced.srt"
+    reference = ROVERS_DIR / "dexter-s08e01-rovers-634.srt"
+    require_many([candidate, reference])
+    assert hashlib.sha256(candidate.read_bytes()).hexdigest() == EXPECTED_CANDIDATE_SHA256
+    assert hashlib.sha256(reference.read_bytes()).hexdigest() == EXPECTED_REFERENCE_SHA256
 
 
 def test_alass_regeneration_is_deterministic() -> None:

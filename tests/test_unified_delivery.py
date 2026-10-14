@@ -50,15 +50,21 @@ def final_record(caplog):
 @pytest.mark.parametrize("response_format", ["srt", "vtt"])
 def test_real_verified_candidate_survives_final_rendering(case, response_format, caplog):
     caplog.set_level(logging.INFO)
+    from tests.private_fixtures import require_subtitle
+
     if case == "whiplash":
-        target = WHIP_TARGET.read_bytes().decode("utf-8-sig")
-        reference = WHIP_REFERENCE.read_bytes().decode("utf-8-sig")
+        target = require_subtitle(WHIP_TARGET).read_bytes().decode("utf-8-sig")
+        reference = require_subtitle(WHIP_REFERENCE).read_bytes().decode("utf-8-sig")
         classified = router.classify_pair(target, reference)
         candidate, _ = router.build_linear_output(classified["target_cues"], classified["anchor_result"])
     else:
-        target = DEX_TARGET.read_bytes().decode("utf-8-sig")
-        reference = (DEX_FRAMESTOR if case == "framestor" else ROVERS_REFERENCE).read_bytes().decode("utf-8-sig")
-        candidate = (DEX_VERIFIED_CANDIDATE if case == "framestor" else ROVERS_CANDIDATE).read_bytes().decode("utf-8-sig")
+        target = require_subtitle(DEX_TARGET).read_bytes().decode("utf-8-sig")
+        reference = require_subtitle(
+            DEX_FRAMESTOR if case == "framestor" else ROVERS_REFERENCE
+        ).read_bytes().decode("utf-8-sig")
+        candidate = require_subtitle(
+            DEX_VERIFIED_CANDIDATE if case == "framestor" else ROVERS_CANDIDATE
+        ).read_bytes().decode("utf-8-sig")
     from app.services.sync.candidate_reconstruction import reconstruct_with_original_dialogue
     candidate = reconstruct_with_original_dialogue(target, candidate)
     assert candidate is not None

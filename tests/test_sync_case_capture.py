@@ -270,8 +270,10 @@ async def test_real_affine_output_capture_does_not_change_cache_or_result(monkey
     from app.services.sync.query import ResolvedReference
     from app.services.sync_cache import SyncCache
     fixture = Path(__file__).parent / "fixtures/whiplash"
-    target = (fixture / "target.srt").read_text(encoding="utf-8-sig")
-    reference = (fixture / "reference.srt").read_text(encoding="utf-8-sig")
+    from tests.private_fixtures import read_subtitle_text
+
+    target = read_subtitle_text(fixture / "target.srt")
+    reference = read_subtitle_text(fixture / "reference.srt")
     # Synthetic release identity isolates capture from the unchanged real timing oracle.
     release = "Whiplash.2014.1080p.BluRay.REMUX-FraMeSToR"
     resolved = ResolvedReference(reference, kind="edition", candidate=release)
