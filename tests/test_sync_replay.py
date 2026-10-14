@@ -75,7 +75,11 @@ def test_all_declared_negative_controls(corpus):
 
 
 def test_global_reference_fit_cannot_hide_wrong_fixed_artifact():
+    from tests.private_fixtures import require_many
+
     case = copy.deepcopy(json.loads(MANIFEST.read_text())["cases"][10])
+    require_many(ROOT / spec["path"] for spec in case.get("fixtures", {}).values()
+                 if "path" in spec and spec["path"].endswith((".srt", ".vtt", ".ass", ".ssa")))
     case["fixtures"]["transformed"]["operations"] = [{"kind": "shift", "ms": 17000}]
     result = replay_case(case)["evidence"]
     assert result["simpler_model"]["accepted"]
