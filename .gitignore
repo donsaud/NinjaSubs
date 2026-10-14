@@ -5,41 +5,13 @@
 
 # Persistent cache directories and subtitle payloads
 subs_cache/
+
+# Subtitle payloads are private/local-only.
+# Do not publish real subtitle files, including test fixtures.
 *.srt
 *.vtt
 *.ass
 *.ssa
-# Test fixtures for the large-offset gate ARE subtitle payloads and must be
-# committed, otherwise the regressions they guard cannot run on a fresh clone.
-# Scoped to that one directory on purpose: the golden-corpus subtitles under
-# tests/fixtures/golden_sync/ are generated artifacts and stay ignored.
-!tests/fixtures/large_offset/*.srt
-# Hybrid reachability fixtures: the real 921-cue request reproduction needs
-# the exact cached ROVERS reference bytes and the exact real ALASS output
-# bytes (see tests/fixtures/hybrid_rovers/README.md). Same rationale.
-!tests/fixtures/hybrid_rovers/*.srt
-# The real alass outputs those tests assert against, and the fx/ input bundle
-# that regenerates them (alass_out/run.sh). Same rationale as above:
-# test_real_alass_outputs_are_routed_as_measured reads out_*.srt directly and
-# fails on a fresh clone if the global *.srt rule swallows them.
-!tests/fixtures/large_offset/alass_out/*.srt
-!tests/fixtures/large_offset/alass_out/fx/*.srt
-# Whiplash Golden fixtures: the real WEBRip target, the offline REMUX
-# reference, and the byte-recovered live 926-cue FraMeSToR reference that the
-# permanent Whiplash regression asserts against. Narrowly listed: no other
-# worktree .srt is un-ignored by these lines.
-!tests/fixtures/whiplash/Whiplash (2014) WEBRip.iTunes.ar(1).srt
-!tests/fixtures/whiplash/Whiplash.2014.1080p.REMUX.BluRay.AVC.DTS.HD.MA.5.1-HDA(1).srt
-!tests/fixtures/whiplash/whiplash-live-framestor-926.srt
-# Dexter Two-Point fixtures: the real HDTV target and FraMeSToR reference
-# exercised by the genuine Two-Point and hybrid routing regressions.
-!tests/fixtures/two_point_sync/dexter/*.srt
-# Penny Dreadful verification-input fixtures: the real HDTV target (timing-
-# only cues), the Arabic and English BluRay references, and the measured ALASS
-# output pinning the leniency boundary regressions.
-!tests/fixtures/penny/*.srt
-# Exact cached E02/E04/E05 dialogue bytes used by the shared-policy regressions.
-!tests/fixtures/dialogue_alignment/**/*.srt
 
 # Python bytecode and compiler caches
 __pycache__/

@@ -73,7 +73,9 @@ SSA_V4 = (
 
 
 def _srt_text() -> str:
-    return SRT_FIXTURE.read_text(encoding="utf-8")
+    from tests.private_fixtures import read_subtitle_text
+
+    return read_subtitle_text(SRT_FIXTURE, encoding="utf-8")
 
 
 def _evolv() -> pathlib.Path:
@@ -589,8 +591,10 @@ def test_real_incident_artifact_reaches_the_verifier_with_all_cues(monkeypatch):
 
 def test_no_unnecessary_conversion_for_srt_input(monkeypatch):
     """An SRT must pass through untouched -- the router must not churn it."""
+    from tests.private_fixtures import read_subtitle_text
+
     seen = _router_orchestrator(monkeypatch)
-    srt = SRT_FIXTURE.read_bytes()
+    srt = read_subtitle_text(SRT_FIXTURE, encoding="utf-8").encode()
     out = _route(srt, convert_ass=True, auto_sync=True)
     assert seen and not seen[0]["is_ass"]
     assert out == srt, "SRT was modified by the format router"

@@ -353,7 +353,11 @@ def test_exact_alass_file_and_normalized_verifier_bytes_bound_separately(monkeyp
 async def test_service_capture_preserves_timing_proposal_and_argv(monkeypatch, tmp_path):
     from app.services import sync_service as service_module
     from app.services.sync_service import SubtitleSyncService
-    target = (Path(__file__).parent / "fixtures/large_offset/dexter_s08e04_reference.srt").read_text()
+    from tests.private_fixtures import read_subtitle_text
+
+    target = read_subtitle_text(
+        Path(__file__).parent / "fixtures/large_offset/dexter_s08e04_reference.srt",
+        encoding="utf-8")
     enable(monkeypatch, tmp_path, target=target.encode())
     cc.begin_capture(target.encode(), META, True)
     capture = cc.current_capture.get()
@@ -511,8 +515,10 @@ async def test_normal_shutdown_drains_writer_and_stops_admission(monkeypatch, tm
 @pytest.mark.parametrize("newline", ["\r\n", "\r", "\n"])
 async def test_service_return_is_identical_enabled_and_disabled(monkeypatch, tmp_path, newline):
     from app.services import sync_service as sm
+    from tests.private_fixtures import read_subtitle_text
+
     fixture = Path(__file__).parent / "fixtures/large_offset/dexter_s08e04_reference.srt"
-    text = fixture.read_text()
+    text = read_subtitle_text(fixture, encoding="utf-8")
     raw = text.replace("\n", newline).encode()
     calls = []
     def run(command, **kw):

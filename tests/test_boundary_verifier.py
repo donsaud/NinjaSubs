@@ -201,8 +201,10 @@ def test_budget_and_input_limits_fail_closed(monkeypatch):
 
 
 def test_whiplash_no_unnecessary_escalation():
+    from tests.private_fixtures import read_subtitle_text
+
     folder = Path(__file__).parent / "fixtures" / "whiplash"
-    target, reference = ((folder / name).read_text(encoding="utf-8-sig")
+    target, reference = (read_subtitle_text(folder / name)
                          for name in ("target.srt", "reference.srt"))
     affine = attempt_timeline_affine(target, reference)
     assert affine.accepted

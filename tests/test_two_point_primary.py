@@ -26,7 +26,9 @@ FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "penny"
 
 
 def _read(path: pathlib.Path) -> str:
-    return path.read_bytes().decode("utf-8-sig")
+    from tests.private_fixtures import read_subtitle_text
+
+    return read_subtitle_text(path)
 
 
 def _require(path: pathlib.Path) -> str:

@@ -32,7 +32,9 @@ ROVERS_NAME = "Penny.Dreadful.S01E01.BluRay.1080p.REMUX-FraMeSToR.srt"
 
 
 def _read(path: pathlib.Path) -> str:
-    return path.read_bytes().decode("utf-8-sig")
+    from tests.private_fixtures import read_subtitle_text
+
+    return read_subtitle_text(path)
 
 
 def _hdtv() -> str:

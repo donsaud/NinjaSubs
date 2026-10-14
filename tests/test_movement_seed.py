@@ -41,7 +41,9 @@ UNIFORM_OFFSETS_MS = [3_000, 12_000, 19_000, 30_000, 60_000, 96_500, 120_000, 17
 
 @pytest.fixture(scope="module")
 def reference() -> list[A.Cue]:
-    return parse_srt_cues(FIXTURE.read_text(encoding="utf-8"))
+    from tests.private_fixtures import read_subtitle_text
+
+    return parse_srt_cues(read_subtitle_text(FIXTURE))
 
 
 def shift(cues: list[A.Cue], offset_ms: int) -> list[A.Cue]:
@@ -302,8 +304,10 @@ def test_seed_absent_falls_back_to_the_existing_pairing(reference):
 
 
 def test_wrong_episode_is_not_verified(reference):
+    from tests.private_fixtures import read_subtitle_text
+
     wrong = parse_srt_cues(
-        (FIXTURE.parent / "negative_wrong_episode.srt").read_text(encoding="utf-8")
+        read_subtitle_text(FIXTURE.parent / "negative_wrong_episode.srt")
     )
     evaluation = analyze(wrong, reference, reference, gate.LARGE_OFFSET_MAX_MS)
     assert evaluation.sync_state not in (
@@ -313,8 +317,10 @@ def test_wrong_episode_is_not_verified(reference):
 
 
 def test_different_cut_is_not_verified(reference):
+    from tests.private_fixtures import read_subtitle_text
+
     cut = parse_srt_cues(
-        (FIXTURE.parent / "negative_different_cut.srt").read_text(encoding="utf-8")
+        read_subtitle_text(FIXTURE.parent / "negative_different_cut.srt")
     )
     evaluation = analyze(cut, reference, reference, gate.LARGE_OFFSET_MAX_MS)
     assert evaluation.sync_state not in (

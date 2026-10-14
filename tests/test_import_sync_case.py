@@ -44,10 +44,14 @@ def assert_not_admitted(root):
 
 def test_valid_real_import_reuses_whiplash_exact_fixtures(sandbox):
     root, _ = sandbox
+    from tests.private_fixtures import require_many
+
     fixtures = root / "tests/fixtures/whiplash"
     fixtures.mkdir(parents=True)
     inputs = {}
-    for role, name in (("target", "target"), ("reference", "reference"), ("transformed", "expected")):
+    names = [("target", "target"), ("reference", "reference"), ("transformed", "expected")]
+    require_many([ROOT / "tests/fixtures/whiplash" / (name + ".srt") for _, name in names])
+    for role, name in names:
         source = ROOT / "tests/fixtures/whiplash" / (name + ".srt")
         path = fixtures / source.name
         path.write_bytes(source.read_bytes())

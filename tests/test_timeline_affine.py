@@ -254,10 +254,11 @@ def test_discovery_span_hint_is_not_identity_proof():
 
 
 def test_whiplash_gold_standard():
+    from tests.private_fixtures import require_subtitle
+
     folder = Path(__file__).parent / "fixtures" / "whiplash"
-    missing = [name for name in ("target.srt", "reference.srt", "expected.srt")
-               if not (folder / name).is_file()]
-    assert not missing, f"Required real Whiplash fixtures missing: {', '.join(missing)}"
+    for name in ("target.srt", "reference.srt", "expected.srt"):
+        require_subtitle(folder / name)
     target = (folder / "target.srt").read_text(encoding="utf-8-sig")
     reference_text = (folder / "reference.srt").read_text(encoding="utf-8-sig")
     # The oracle is deliberately read only after automatic generation.

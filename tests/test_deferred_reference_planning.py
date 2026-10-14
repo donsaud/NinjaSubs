@@ -366,8 +366,10 @@ async def test_real_whiplash_cached_scheduler_preserves_oracle_and_skips_tail(mo
     from app.services.subtitle_matcher import parse_srt_cues
 
     folder = Path(__file__).parent / "fixtures" / "whiplash"
-    target = (folder / "target.srt").read_text(encoding="utf-8-sig").encode("utf-8")
-    reference = (folder / "reference.srt").read_text(encoding="utf-8-sig")
+    from tests.private_fixtures import read_subtitle_text
+
+    target = read_subtitle_text(folder / "target.srt").encode("utf-8")
+    reference = read_subtitle_text(folder / "reference.srt")
     # Synthetic same-group identity isolates scheduling from the real timing oracle.
     release = "Whiplash.2014.1080p.BluRay.REMUX-FraMeSToR"
     external = External(cached=ResolvedReference(reference, kind="edition", candidate=release))
@@ -385,7 +387,7 @@ async def test_real_whiplash_cached_scheduler_preserves_oracle_and_skips_tail(mo
     monkeypatch.setattr(orchestrator, "_try_pal_two_point_fallback", no_pal)
     output = await orchestrator.evaluate_and_sync(target, {**META, "target_filename": release}, "whiplash", auto_sync=True)
     # The oracle remains outside synchronization inputs and is read after generation.
-    expected = parse_srt_cues((folder / "expected.srt").read_text(encoding="utf-8-sig"))
+    expected = parse_srt_cues(read_subtitle_text(folder / "expected.srt"))
     original, generated = parse_srt_cues(target.decode()), parse_srt_cues(output.decode())
     assert len(original) == len(generated) == len(expected) == 825
     assert len(parse_srt_cues(reference)) == 960

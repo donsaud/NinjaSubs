@@ -11,6 +11,14 @@ from tools.sync_replay import MANIFEST, ROOT, derive, fixture_path, replay, repl
 
 @pytest.fixture(scope="module")
 def corpus():
+    from tests.private_fixtures import require_many
+
+    cases = json.loads(MANIFEST.read_text())["cases"]
+    require_many([ROOT / spec["path"] for case in cases
+                  for spec in case.get("fixtures", {}).values()
+                  if "path" in spec and spec["path"].endswith((".srt", ".vtt", ".ass", ".ssa"))]
+                 + [ROOT / case["capture_v2"]["path"] / "pristine_target.srt"
+                    for case in cases if "capture_v2" in case])
     first, second = replay(), replay()
     # Durations are observations, deliberately excluded from deterministic evidence.
     assert [r["evidence"] for r in first["cases"]] == [r["evidence"] for r in second["cases"]]

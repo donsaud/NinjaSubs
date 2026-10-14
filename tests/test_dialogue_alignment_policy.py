@@ -70,8 +70,10 @@ def test_alass_split_rejoins_pristine_content():
 
 @pytest.mark.parametrize("episode", [4, 5])
 def test_real_dexter_dialogue_verdict(episode):
+    from tests.private_fixtures import read_subtitle_text
+
     folder = Path(__file__).parent / "fixtures" / "dialogue_alignment" / f"dexter_s08e{episode:02}"
-    target, reference, candidate = ((folder / name).read_text(encoding="utf-8-sig")
+    target, reference, candidate = (read_subtitle_text(folder / name)
                                     for name in ("target.srt", "reference.srt", "candidate.srt"))
     verdict = verify_candidate(target, reference, candidate, candidate_algorithm="two_point")
     assert verdict.proposed_verdict == "VERIFIED", verdict.failure_reasons
@@ -83,8 +85,10 @@ def test_real_dexter_dialogue_verdict(episode):
 
 def test_real_e02_requires_more_than_original_or_guessed_constant_shift():
     from app.services.sync.hybrid_router import classify_pair
+    from tests.private_fixtures import read_subtitle_text
+
     folder = Path(__file__).parent / "fixtures" / "dialogue_alignment" / "dexter_s08e02"
-    target, reference = ((folder / name).read_text(encoding="utf-8-sig")
+    target, reference = (read_subtitle_text(folder / name)
                          for name in ("target.srt", "reference.srt"))
     assert classify_pair(target, reference)["route"] == "nonlinear"
     assert verify_candidate(target, reference, target).proposed_verdict != "VERIFIED"
@@ -251,9 +255,11 @@ async def test_real_e04_e05_cached_d3g_pack_delivers_without_provider_work(monke
                            episode=1, target_lang="ara", languages=("eng", "ara"))
     members = {"Dexter.S08E01.BluRay-d3g.srt": reference_seed}
     folder = Path(__file__).parent / "fixtures" / "dialogue_alignment"
+    from tests.private_fixtures import read_subtitle_text
+
     for ep in (2, 4, 5):
-        members[f"Dexter.S08E{ep:02}.BluRay-d3g.srt"] = (
-            folder / f"dexter_s08e{ep:02}" / "reference.srt").read_bytes().decode("utf-8-sig")
+        members[f"Dexter.S08E{ep:02}.BluRay-d3g.srt"] = read_subtitle_text(
+            folder / f"dexter_s08e{ep:02}" / "reference.srt")
     key = retain_season_pack(raw=_pack_zip(members), query=query, provider_label="subdl",
                              pack_candidate="Dexter.S08.BluRay-d3g.zip",
                              source_download_digest="real-members", root=root)
@@ -267,7 +273,8 @@ async def test_real_e04_e05_cached_d3g_pack_delivers_without_provider_work(monke
     seed = await orch.evaluate_and_sync(target_seed.encode(), meta(1), "seed", auto_sync=True)
     assert seed.authorization.may_serve
     for ep in (4, 5):
-        target = (folder / f"dexter_s08e{ep:02}" / "target.srt").read_bytes()
+        target = read_subtitle_text(
+            folder / f"dexter_s08e{ep:02}" / "target.srt").encode()
         orch, planned, service = _orchestrator_harness(monkeypatch, ResolvedReference(None), pack_dir=root)
         result = await orch.evaluate_and_sync(target, meta(ep), f"real-{ep}", auto_sync=True)
         assert result != target and result.authorization.may_serve

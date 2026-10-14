@@ -96,7 +96,9 @@ def test_verified_result_is_served_and_remeasurement_is_bounded():
     is served, the *input* is always the provider's own bytes and a later
     request never picks up a previous run's output as its input.
     """
-    reference_text = FIXTURE.read_text(encoding="utf-8")
+    from tests.private_fixtures import read_subtitle_text
+
+    reference_text = read_subtitle_text(FIXTURE, encoding="utf-8")
     target = _shifted(reference_text, 96_500)
     original_sha = _sha(target)
     strategy = _Strategy(reference_text)
@@ -125,7 +127,9 @@ def test_already_aligned_input_does_no_alass_work():
     This is the pre-existing shortcut, and it is what keeps the common
     already-synced case cheap.
     """
-    reference_text = FIXTURE.read_text(encoding="utf-8")
+    from tests.private_fixtures import read_subtitle_text
+
+    reference_text = read_subtitle_text(FIXTURE, encoding="utf-8")
     strategy = _Strategy(reference_text)
     orchestrator = SyncOrchestrator(
         external_strategy=strategy, sync_service=SubtitleSyncService()
@@ -153,7 +157,9 @@ def test_a_transformed_artifact_never_becomes_the_next_provider_input():
     """
     if not CACHE.is_dir():
         pytest.skip(f"no provider cache at {CACHE}")
-    reference_text = FIXTURE.read_text(encoding="utf-8")
+    from tests.private_fixtures import read_subtitle_text
+
+    reference_text = read_subtitle_text(FIXTURE, encoding="utf-8")
     before = {p.name: _sha(p.read_bytes()) for p in CACHE.glob("*") if p.is_file()}
 
     target = _shifted(reference_text, 96_500)

@@ -502,8 +502,10 @@ async def test_two_point_real_whiplash_live_reference_dialogue_aligns() -> None:
     live_ref = FIXTURES / "whiplash" / "whiplash-live-framestor-926.srt"
     if not live_ref.exists():
         pytest.skip("live reference fixture unavailable")
+    from tests.private_fixtures import read_subtitle_text
+
     target, _ = _whiplash()
-    reference = live_ref.read_bytes().decode("utf-8-sig")
+    reference = read_subtitle_text(live_ref)
 
     async def _raising_runner(t: str, r: str):
         raise AssertionError("linear must never invoke ALASS")

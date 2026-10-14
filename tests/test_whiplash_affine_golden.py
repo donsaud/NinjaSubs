@@ -48,7 +48,9 @@ LIVE_INTERCEPT_MS = 2688.544928596355
 
 
 def _read(path: pathlib.Path) -> str:
-    return path.read_bytes().decode("utf-8-sig")
+    from tests.private_fixtures import read_subtitle_text
+
+    return read_subtitle_text(path)
 
 
 @pytest.fixture

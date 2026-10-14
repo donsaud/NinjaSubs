@@ -49,7 +49,9 @@ VERIFIED_STATES = {SyncState.VERIFIED_SYNCED, SyncState.VERIFIED_RESYNCED}
 
 
 def read(name: str) -> str:
-    return (FIXTURES / name).read_text(encoding="utf-8")
+    from tests.private_fixtures import read_subtitle_text
+
+    return read_subtitle_text(FIXTURES / name)
 
 
 def cues(name: str) -> list[tuple[int, int, str]]:

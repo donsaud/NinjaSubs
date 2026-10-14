@@ -47,7 +47,9 @@ FIX = pathlib.Path(__file__).parent / "fixtures" / "large_offset"
 
 
 def _read(name: str) -> str:
-    return (FIX / name).read_text(encoding="utf-8")
+    from tests.private_fixtures import read_subtitle_text
+
+    return read_subtitle_text(FIX / name)
 
 
 def _investigation() -> LargeOffsetInvestigation:
@@ -556,8 +558,9 @@ def test_real_alass_outputs_are_routed_as_measured():
 
     for ref_name, (expected, expected_reason) in cases.items():
         ref = _read(f"{ref_name}.srt")
-        out_path = FIX / "alass_out" / f"out_{ref_name}.srt"
-        assert out_path.is_file(), f"missing alass output fixture: {out_path}"
+        from tests.private_fixtures import require_subtitle
+
+        out_path = require_subtitle(FIX / "alass_out" / f"out_{ref_name}.srt")
         output = out_path.read_text(encoding="utf-8")
 
         inv = investigate_large_offset(

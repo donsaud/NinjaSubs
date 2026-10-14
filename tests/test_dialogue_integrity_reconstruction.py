@@ -55,7 +55,9 @@ LIVE_APPROVED_SHA = "f3ff792bf014e9e59a5e17a17dfc342dffc0905aed242a0b4eee3b51a1a
 
 
 def _read(path: pathlib.Path) -> str:
-    return path.read_bytes().decode("utf-8-sig")
+    from tests.private_fixtures import read_subtitle_text
+
+    return read_subtitle_text(path)
 
 
 @pytest.fixture
@@ -474,7 +476,9 @@ async def test_framestor_second_reference_end_to_end(monkeypatch) -> None:
     if not FRAMESTOR_CANDIDATE.is_file():
         pytest.skip("fixture unavailable: dexter.alass.verified.srt")
     target = _read(TARGET_PATH)
-    reference = FRAMESTOR_REFERENCE.read_bytes().decode("utf-8-sig")
+    from tests.private_fixtures import require_subtitle
+
+    reference = require_subtitle(FRAMESTOR_REFERENCE).read_bytes().decode("utf-8-sig")
     candidate = FRAMESTOR_CANDIDATE.read_bytes().decode("utf-8-sig")
     assert len(parse_srt(target)) == len(parse_srt(candidate)) == 921
     monkeypatch.setattr(router, "_enabled", True)

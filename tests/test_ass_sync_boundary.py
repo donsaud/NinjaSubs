@@ -74,16 +74,18 @@ def test_ass_is_detected_regardless_of_extension():
     """Detection keys on content, not on the filename. An ASS document stored
     under ``.srt`` must still be recognised as ASS."""
     from app.extractor import is_ass_subtitle
+    from tests.private_fixtures import read_subtitle_text
 
     assert is_ass_subtitle(ASS_V4) is True
     assert is_ass_subtitle(ASS_V4.replace(b"\r\n", b"\n")) is True
-    assert is_ass_subtitle(FIXTURE.read_bytes()) is False
+    assert is_ass_subtitle(read_subtitle_text(FIXTURE).encode("utf-8")) is False
 
 
 def test_srt_is_not_mistaken_for_ass():
     from app.extractor import is_ass_subtitle
+    from tests.private_fixtures import read_subtitle_text
 
-    srt = FIXTURE.read_bytes()
+    srt = read_subtitle_text(FIXTURE).encode("utf-8")
     assert is_ass_subtitle(srt) is False
     # And the SRT parser must be able to read it.
     assert len(parse_srt_cues(srt.decode("utf-8"))) > 100
