@@ -347,6 +347,15 @@ class AnchorDetector:
         return AnchorSet(anchors=tuple(corroborated[: self.max_anchors]))
 
 
+def _place_on_timeline(cues) -> list[Cue]:
+    """Drop cues moved entirely before zero; clamp only a straddling start.
+
+    Same policy as ``anchor_preshift``: clamping both ends produced ``(0, 0)``
+    cues -- zero-duration entries piled at the start that the film never had.
+    """
+    return [(max(0, s), e, text) for s, e, text in cues if e > 0]
+
+
 @dataclass(frozen=True)
 class ConstantSyncModel:
     """``t' = t + offset`` with the offset being a robust cluster median."""
@@ -358,10 +367,7 @@ class ConstantSyncModel:
 
     def apply(self, cues: list[Cue]) -> list[Cue]:
         shift = int(round(self.offset_ms))
-        return [
-            (max(0, s + shift), max(0, e + shift), text)
-            for s, e, text in cues
-        ]
+        return _place_on_timeline((s + shift, e + shift, text) for s, e, text in cues)
 
     def describe(self) -> str:
         return (
@@ -381,12 +387,14 @@ class LinearSyncModel:
     model_version: str = MODEL_VERSION
 
     def apply(self, cues: list[Cue]) -> list[Cue]:
-        out = []
-        for s, e, text in cues:
-            ns = int(round(self.slope * s + self.intercept_ms))
-            ne = int(round(self.slope * e + self.intercept_ms))
-            out.append((max(0, ns), max(0, ne), text))
-        return out
+        return _place_on_timeline(
+            (
+                int(round(self.slope * s + self.intercept_ms)),
+                int(round(self.slope * e + self.intercept_ms)),
+                text,
+            )
+            for s, e, text in cues
+        )
 
     def describe(self) -> str:
         return (

@@ -40,7 +40,9 @@ def test_manifest_schema_and_cors(client):
     assert "series" in data["types"]
     assert "anime" in data["types"]
     assert "tt" in data["idPrefixes"]
-    assert "kitsu" in data["idPrefixes"]
+    # Kitsu ids are not resolved to IMDb, so every provider would get a raw
+    # "kitsu:N" id and return nothing; the manifest must not claim support.
+    assert "kitsu" not in data["idPrefixes"]
     assert "logo" in data and data["logo"].endswith("/static/icon.png")
     assert "icon" in data and data["icon"].endswith("/static/icon.png")
 

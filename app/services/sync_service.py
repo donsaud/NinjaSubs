@@ -324,7 +324,9 @@ def sanitize_subtitle(text: str) -> str:
     """
     if not text:
         return ""
-    text = text.lstrip("﻿").replace("", "")
+    # Escaped, not literal: an invisible literal NUL was once lost in an edit,
+    # leaving ``.replace("", "")`` -- a no-op that let NULs reach alass.
+    text = text.lstrip("\ufeff").replace("\x00", "")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     from app.utils.cleaners import strip_kashida
 
@@ -753,7 +755,14 @@ class SubtitleSyncService:
             except asyncio.CancelledError:
                 # to_thread cannot stop a running process. Hold its slot until
                 # subprocess.run completes or kills it at the configured timeout.
-                try:
-                    await worker
-                finally:
-                    raise
+                # Shielded and repeated: a second cancel (e.g. at shutdown) used
+                # to cancel ``worker`` itself, releasing the semaphore while
+                # alass was still running and exceeding the concurrency limit.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                raise

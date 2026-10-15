@@ -236,8 +236,8 @@ class OpenSubtitlesHashReferenceStrategy:
             )
             return ResolvedReference(None)
 
-        decoded = decode_payload(
-            raw, release_name, query.season, query.episode, self.min_bytes
+        decoded = await asyncio.to_thread(
+            decode_payload, raw, release_name, query.season, query.episode, self.min_bytes
         )
         # decode_payload only applies min_bytes when picking a member out of an
         # archive; a bare SRT comes straight through. Enforce the floor here so a

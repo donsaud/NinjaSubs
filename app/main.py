@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import html
 import json
 import logging
 import re
@@ -17,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from app import USER_AGENT, __version__
 from app.autosync_test_override import forced_transformed_bytes
 from app.cache import cache_manager
 from app.config import settings
@@ -27,6 +29,7 @@ from app.extractor import (
     is_ass_subtitle,
     is_vtt_subtitle,
     looks_like_subtitle,
+    max_archive_bytes,
     transcode_to_utf8,
 )
 from app.models import Manifest, SubtitleItem, SubtitlesResponse, UserPreferences
@@ -146,31 +149,33 @@ async def lifespan(app: FastAPI):
             keepalive_expiry=30.0,
         ),
         timeout=httpx.Timeout(settings.UPSTREAM_TIMEOUT),
-        headers={"User-Agent": "StremioArabicSubs/1.0.0"},
+        headers={"User-Agent": USER_AGENT},
         follow_redirects=True,
     )
-    _init_sync_orchestrator()
-    await _sync_cache.connect()
-
-    # Shadow audit trail. Off by default; when enabled it writes sanitized
-    # decision records for offline analysis and changes nothing about how a
-    # subtitle is ranked, served, or verified.
-    from app.services.sync.audit import configure_audit
-
-    configure_audit(
-        enabled=bool(getattr(settings, "SYNC_AUDIT_ENABLED", False)),
-        path=getattr(settings, "SYNC_AUDIT_PATH", None),
-        max_records=int(getattr(settings, "SYNC_AUDIT_MAX_RECORDS", 2000) or 2000),
-    )
-    if sync_audit.enabled:
-        logger.info(
-            "[audit] shadow audit ENABLED -> %s (records affect nothing)",
-            sync_audit.path or "in-memory only",
-        )
-    else:
-        logger.info("[audit] shadow audit disabled (default)")
-
     try:
+        _init_sync_orchestrator()
+        await _sync_cache.connect()
+
+        # Shadow audit trail. Off by default; when enabled it writes sanitized
+        # decision records for offline analysis and changes nothing about how a
+        # subtitle is ranked, served, or verified.
+        from app.services.sync.audit import configure_audit
+
+        configure_audit(
+            enabled=bool(getattr(settings, "SYNC_AUDIT_ENABLED", False)),
+            path=getattr(settings, "SYNC_AUDIT_PATH", None),
+            max_records=int(getattr(settings, "SYNC_AUDIT_MAX_RECORDS", 2000) or 2000),
+        )
+        if sync_audit.enabled:
+            logger.info(
+                "[audit] shadow audit ENABLED -> %s (records affect nothing)",
+                sync_audit.path or "in-memory only",
+            )
+        else:
+            logger.info("[audit] shadow audit disabled (default)")
+
+        # Startup above sits inside the try so a failure in it still closes
+        # the HTTP client and caches in the finally below.
         yield
     finally:
         try:
@@ -186,7 +191,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="NinjaSubs",
-    version="1.1.0",
+    version=__version__,
     description="Smart, high-accuracy subtitle aggregator for Stremio featuring advanced Arabic subtitle optimization.",
     lifespan=lifespan,
 )
@@ -255,13 +260,13 @@ def _build_manifest(config_str: str | None = None, request: Request | None = Non
     return Manifest(
         id="org.ninjasubs.addon",
         name="NinjaSubs",
-        version="1.1.0",
+        version=__version__,
         description=desc,
         logo=logo_url,
         icon=icon_url,
         resources=["subtitles"],
         types=["movie", "series", "anime"],
-        idPrefixes=["tt", "kitsu"],
+        idPrefixes=["tt"],
         catalogs=[],
         behaviorHints={
             "configurable": True,
@@ -337,27 +342,40 @@ def render_configure_html(request: Request, prefill_config: str | None = None) -
         name = lang["name"]
         seen_codes.add(code)
         selected = "selected" if code in pref_langs else ""
-        options_html.append(f'<option value="{code}" {selected}>{name} ({code})</option>')
+        options_html.append(
+            f'<option value="{html.escape(code)}" {selected}>'
+            f"{html.escape(name)} ({html.escape(code)})</option>"
+        )
     for p_code in pref_langs:
         if p_code not in seen_codes:
+            safe_code = html.escape(p_code)
             options_html.append(
-                f'<option value="{p_code}" selected>{p_code.upper()} ({p_code})</option>'
+                f'<option value="{safe_code}" selected>{safe_code.upper()} ({safe_code})</option>'
             )
     language_options_html = "\n                    ".join(options_html)
 
     template_path = Path(__file__).parent / "templates" / "configure.html"
     if template_path.is_file():
         raw_html = template_path.read_text(encoding="utf-8")
+        # Every value below is attacker-influenced (the prefill token, the Host
+        # header), so it is escaped for the HTML/attribute context it lands in.
+        # The JSON blob sits inside <script>; escaping <, > and & keeps a
+        # "</script>" in any string value from closing the element.
+        safe_json = (
+            initial_phase2_json.replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
         return (
-            raw_html.replace("{{base_url}}", base_url)
-            .replace("{{lan_ip}}", lan_ip)
-            .replace("{{lan_url}}", lan_url)
-            .replace("{{port}}", str(port))
-            .replace("{{initial_subdl}}", initial_subdl)
-            .replace("{{initial_subsource}}", initial_subsource)
-            .replace("{{initial_opensubtitles}}", initial_opensubtitles)
+            raw_html.replace("{{base_url}}", html.escape(base_url))
+            .replace("{{lan_ip}}", html.escape(lan_ip))
+            .replace("{{lan_url}}", html.escape(lan_url))
+            .replace("{{port}}", html.escape(str(port)))
+            .replace("{{initial_subdl}}", html.escape(initial_subdl))
+            .replace("{{initial_subsource}}", html.escape(initial_subsource))
+            .replace("{{initial_opensubtitles}}", html.escape(initial_opensubtitles))
             .replace("{{initial_exclude_hi}}", initial_exclude_hi)
-            .replace("{{initial_phase2_json}}", initial_phase2_json)
+            .replace("{{initial_phase2_json}}", safe_json)
             .replace("{{language_options_html}}", language_options_html)
         )
 
@@ -383,7 +401,7 @@ async def verify_subdl_endpoint(api_key: str | None = None):
         resp = await client.get(
             "https://api.subdl.com/api/v1/subtitles",
             params={"api_key": key, "imdb_id": "tt0111161", "type": "movie"},
-            headers={"Accept": "application/json", "User-Agent": "StremioArabicSubs/1.0.0"},
+            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
             timeout=settings.UPSTREAM_TIMEOUT,
         )
         if resp.status_code == 200:
@@ -1819,8 +1837,17 @@ async def _fallback_download_subsource(
             logger.warning("[Subsource Fallback] Downloaded archive content is empty")
             return None
 
+        if len(raw_data) > max_archive_bytes():
+            logger.warning(
+                "[Subsource Fallback] Download is %d bytes, above the size limit; refusing",
+                len(raw_data),
+            )
+            return None
+
         if detect_archive_kind(raw_data):
-            srt_bytes = extract_subtitle_from_archive(
+            # bsdtar/inflate are blocking; keep them off the event loop.
+            srt_bytes = await asyncio.to_thread(
+                extract_subtitle_from_archive,
                 raw_data,
                 target_filename=target_filename or best_release.release_name,
                 season=season,
@@ -2591,6 +2618,13 @@ async def _serve_subtitle_handler(
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider_name}")
 
+    if raw_archive and len(raw_archive) > max_archive_bytes():
+        logger.warning(
+            "Download for #%s is %d bytes, above the %d byte limit; treating as failed",
+            target_id, len(raw_archive), max_archive_bytes(),
+        )
+        raw_archive = None
+
     async def _fallback_or_none() -> Response | None:
         """Serve an exact-equivalent SubSource substitute, or ``None`` on a miss.
 
@@ -2696,7 +2730,9 @@ async def _serve_subtitle_handler(
     # cached: fall back to SubSource, else return a clean 502.
     try:
         if detect_archive_kind(raw_archive):
-            srt_bytes = extract_subtitle_from_archive(
+            # bsdtar/inflate are blocking; keep them off the event loop.
+            srt_bytes = await asyncio.to_thread(
+                extract_subtitle_from_archive,
                 raw_archive,
                 target_filename=release_name,
                 season=season,
@@ -2958,7 +2994,20 @@ async def proxy_opensubtitles_stream(file_id: int, request: Request, config: str
             should_close = True
         try:
             dl_resp = await dl_client.get(download_url, follow_redirects=True)
-            if dl_resp.status_code == 200 and dl_resp.content:
+            payload_ok = (
+                dl_resp.status_code == 200
+                and bool(dl_resp.content)
+                and len(dl_resp.content) <= max_archive_bytes()
+                and looks_like_subtitle(dl_resp.content)
+            )
+            if dl_resp.status_code == 200 and dl_resp.content and not payload_ok:
+                # A quota wall or gateway error can arrive as HTTP 200 HTML or
+                # JSON; it must not be cached as this file's subtitle.
+                logger.warning(
+                    "[OpenSubtitles Direct Fetch] Payload for %s is not a usable subtitle "
+                    "(%d bytes); falling back", file_id, len(dl_resp.content),
+                )
+            elif payload_ok:
                 meta = cache_manager.get_metadata(str(file_id))
                 release_name = meta.get("release_name", file_id) if meta else file_id
                 sub_bytes = transcode_to_utf8(
@@ -3123,9 +3172,13 @@ async def health():
     }
 
 
-@app.api_route("/cache/clear", methods=["GET", "POST"])
+@app.post("/cache/clear")
 async def clear_cache_route():
-    """Explicit endpoint to invalidate and clear in-memory TTLCache."""
+    """Explicit endpoint to invalidate and clear in-memory TTLCache.
+
+    POST only: a state-changing GET can be triggered by any crawler, link
+    prefetcher or embedded image, forcing a burst of provider calls.
+    """
     clear_subtitle_cache()
     return {"status": "ok", "message": "In-memory TTLCache successfully cleared."}
 

@@ -164,9 +164,11 @@ def decode_payload(
 ) -> bytes | None:
     """Return subtitle bytes from a raw download, extracting ZIP/RAR/7z/tar archives."""
     from app.extractor import (
+        _ZIP_READ_ERRORS,
         SubtitleExtractionError,
         detect_archive_kind,
         extract_subtitle_from_archive,
+        max_archive_bytes,
         transcode_to_utf8,
     )
 
@@ -175,6 +177,12 @@ def decode_payload(
         from app.utils.ass_converter import convert_ass_to_srt_bytes
 
         return convert_ass_to_srt_bytes(transcode_to_utf8(payload), apply_rtl=False)
+
+    if len(raw) > max_archive_bytes():
+        logger.warning(
+            "[reference] download for %r is %d bytes, above the size limit", release_name, len(raw)
+        )
+        return None
 
     kind = detect_archive_kind(raw)
     if kind in ("rar", "7z", "tar", "gzip"):
@@ -189,28 +197,48 @@ def decode_payload(
             return None
 
     if zipfile.is_zipfile(io.BytesIO(raw)):
-        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            infos = [info for info in archive.infolist() if not info.is_dir()]
-            if not infos:
-                logger.warning("[reference] ZIP for %r is empty", release_name)
-                return None
-            members = [(info.filename, info.file_size) for info in infos]
-            chosen = select_zip_member(members, season, episode, min_bytes)
-            if chosen is None:
-                logger.warning(
-                    "[reference] ZIP for %r has no usable subtitle member: %s",
-                    release_name,
-                    [name for name, _ in members],
-                )
-                return None
-            logger.info(
-                "[reference] selected %r from %d ZIP member(s) (S%sE%s)",
-                chosen,
-                len(members),
-                season,
-                episode,
-            )
-            release_scoring.member_selected(chosen)
-            payload = archive.read(chosen)
-        return normalize_reference(payload)
+        try:
+            return _decode_zip_reference(raw, release_name, season, episode, min_bytes)
+        except (SubtitleExtractionError, *_ZIP_READ_ERRORS) as exc:
+            # A corrupt, encrypted or oversized ZIP is one unusable candidate,
+            # not a reason to abandon the remaining ranked candidates.
+            logger.warning("[reference] ZIP for %r unusable: %s", release_name, exc)
+            return None
     return normalize_reference(raw)
+
+
+def _decode_zip_reference(
+    raw: bytes,
+    release_name: str,
+    season: int | None,
+    episode: int | None,
+    min_bytes: int,
+) -> bytes | None:
+    """Pick and normalize the ZIP member to use as a reference, if any."""
+    from app.extractor import _read_zip_member, transcode_to_utf8
+    from app.utils.ass_converter import convert_ass_to_srt_bytes
+
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        infos = [info for info in archive.infolist() if not info.is_dir()]
+        if not infos:
+            logger.warning("[reference] ZIP for %r is empty", release_name)
+            return None
+        members = [(info.filename, info.file_size) for info in infos]
+        chosen = select_zip_member(members, season, episode, min_bytes)
+        if chosen is None:
+            logger.warning(
+                "[reference] ZIP for %r has no usable subtitle member: %s",
+                release_name,
+                [name for name, _ in members],
+            )
+            return None
+        logger.info(
+            "[reference] selected %r from %d ZIP member(s) (S%sE%s)",
+            chosen,
+            len(members),
+            season,
+            episode,
+        )
+        release_scoring.member_selected(chosen)
+        payload = _read_zip_member(archive, archive.getinfo(chosen))
+    return convert_ass_to_srt_bytes(transcode_to_utf8(payload), apply_rtl=False)

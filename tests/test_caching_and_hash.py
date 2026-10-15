@@ -386,7 +386,7 @@ def test_cache_clear_endpoint(client):
     )
     assert get_cached_subtitles("test_key") is not None
 
-    resp = client.get("/cache/clear")
+    resp = client.post("/cache/clear")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
     assert get_cached_subtitles("test_key") is None

@@ -30,9 +30,17 @@ _AD_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"corrected\s+by", re.IGNORECASE),
     re.compile(r"encoded\s+by", re.IGNORECASE),
     re.compile(r"translated\s+by", re.IGNORECASE),
-    re.compile(r"قناة"),
+    # "قناة" (channel) and "تويتر" (Twitter) are ordinary words in dialogue
+    # ("مرحبا بكم في قناة الجزيرة"), so they count only in a promotional
+    # construction: next to a platform, a handle or link, or a follow/join verb.
+    re.compile(
+        r"قنا(?:ة|تنا)[^\n]{0,30}(?:تيليجرام|تلغرام|تليجرام|تلجرام|يوتيوب|الترجمة"
+        r"|telegram|youtube|@|t\.me)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:اشترك|انضم|تابع|زور)\w*[^\n]{0,30}(?:قنا(?:ة|تنا)|تويتر|انستغرام|انستقرام)"),
+    re.compile(r"تويتر[^\n]{0,20}@"),
     re.compile(r"تيليجرام"),
-    re.compile(r"تويتر"),
     re.compile(r"downloaded\s+from", re.IGNORECASE),
     re.compile(r"rarbg", re.IGNORECASE),
     re.compile(r"yts\.(?:mx|lt|ag)", re.IGNORECASE),
@@ -43,14 +51,15 @@ _AD_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 # Direct translation credits that are whitelisted when keep_translator_credits is on.
+# The Arabic credit nouns are common words ("سأقوم بتقديم طلب", "أسباب الترجمة"),
+# so they count only as a credit construction: opening the line, or followed
+# by a credit separator (":", "-", "/", "|") or a conjunction ("ترجمة وتعديل").
+_ARABIC_CREDIT_NOUNS = r"(?:ترجمة|تعريب|تقديم|دمج|إعداد)"
 _CREDIT_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"ترجمة"),
-    re.compile(r"تعريب"),
+    re.compile(rf"^[\W_]*{_ARABIC_CREDIT_NOUNS}(?!\w)"),
+    re.compile(rf"(?<!\w){_ARABIC_CREDIT_NOUNS}\s*(?:[:\uff1a\u061b|/\-\u2013\u2014]|و(?=\w))"),
     re.compile(r"تعديل التوقيت"),
     re.compile(r"ضبط التوقيت"),
-    re.compile(r"تقديم"),
-    re.compile(r"دمج"),
-    re.compile(r"إعداد"),
     re.compile(r"translated\s+by", re.IGNORECASE),
     re.compile(r"translation\s+by", re.IGNORECASE),
     re.compile(r"synced\s+by", re.IGNORECASE),
@@ -120,7 +129,7 @@ _LOOSE_DOUBLE_DASH_REGEX = re.compile(r"(?<!-)--(?!-)")
 # Latin comma sitting right after an Arabic letter (optionally spaced) -> Arabic comma.
 # Requires an Arabic character before the comma, so digit groups ("1,000") and
 # timestamp fragments ("00:01:23,456") are never touched.
-_ARABIC_RANGE = "\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF"
+_ARABIC_RANGE = "\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFC"
 _LATIN_COMMA_IN_ARABIC_REGEX = re.compile(rf"([{_ARABIC_RANGE}])\s*,\s*")
 _TIMESTAMP_LINE_REGEX = re.compile(
     r"^(?P<start>\d{1,3}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*"
@@ -215,9 +224,13 @@ _HI_ARABIC_KEYWORDS: tuple[str, ...] = (
     "صرير",
     "زفير",
     "شهيق",
-    "باب",
     "هاتف",
     "قفل",
+)
+# Keywords too short to match as substrings ("باب" sits inside "أسباب"):
+# whole words only, allowing the usual attached prefixes (و/ف/ب/ل/ك, ال).
+_HI_ARABIC_WHOLE_WORD_REGEX = re.compile(
+    r"(?<![\u0621-\u064A])(?:[وف]?[بلك]?ال|[وف]?[بلك])?باب(?![\u0621-\u064A])"
 )
 _LATIN_UPPERCASE_REGEX = re.compile(r"^[A-Z0-9\s'’\-\.!?…&/]+$")
 _HAS_LATIN_LETTER_REGEX = re.compile(r"[A-Za-z]")
@@ -226,7 +239,7 @@ _HAS_ARABIC_REGEX = re.compile(rf"[{_ARABIC_RANGE}]")
 # Leading speaker labels: "JOHN: ", "سارة: ", optionally preceded by a dash.
 # Restricted to a single token so normal dialogue ("Wait a minute: ...") is untouched.
 _SPEAKER_LABEL_REGEX = re.compile(
-    rf"^\s*[-–—]?\s*[A-Za-z{_ARABIC_RANGE}][A-Za-z0-9{_ARABIC_RANGE}_'’\-]{{0,30}}:\s*"
+    rf"^(?P<dash>\s*[-–—]\s*)?\s*[A-Za-z{_ARABIC_RANGE}][A-Za-z0-9{_ARABIC_RANGE}_'’\-]{{0,30}}:\s*"
 )
 
 
@@ -372,14 +385,39 @@ def _parse_seconds(timestamp_line: str) -> tuple[float, float] | None:
     return _to_seconds(matches[0]), _to_seconds(matches[1])
 
 
+_VTT_NON_CUE_BLOCK_REGEX = re.compile(r"^(?:NOTE|STYLE|REGION)(?:[ \t]|$)")
+
+
+def _continuation_lines(block: str) -> list[str]:
+    """Lines of a timestamp-less block that follows a cue.
+
+    A blank line inside a cue's text splits it into a second block with no
+    timestamp. That text is still the cue's dialogue, so it is folded back into
+    the preceding cue instead of being silently dropped. WebVTT ``NOTE`` /
+    ``STYLE`` / ``REGION`` blocks and orphan cue indexes carry no dialogue and
+    are not folded.
+    """
+    stripped = block.strip("\n")
+    if _VTT_NON_CUE_BLOCK_REGEX.match(stripped) or stripped.strip().isdigit():
+        return []
+    return stripped.split("\n")
+
+
 def _has_ad(text: str) -> bool:
     norm = text.replace("\u0640", "")
     return any(pattern.search(text) for pattern in _AD_PATTERNS) or any(pattern.search(norm) for pattern in _AD_PATTERNS)
 
 
+_BARE_ARABIC_CREDIT_NOUN_REGEX = re.compile(_ARABIC_CREDIT_NOUNS)
+
+
 def _has_credit(text: str) -> bool:
     norm = text.replace("\u0640", "")
-    return any(pattern.search(text) for pattern in _CREDIT_PATTERNS) or any(pattern.search(norm) for pattern in _CREDIT_PATTERNS)
+    if any(pattern.search(text) for pattern in _CREDIT_PATTERNS) or any(pattern.search(norm) for pattern in _CREDIT_PATTERNS):
+        return True
+    # A bare credit noun inside a promotional line ("قناة الترجمة تيليجرام") is
+    # still attribution; in plain dialogue it is just a word.
+    return bool(_BARE_ARABIC_CREDIT_NOUN_REGEX.search(norm)) and _has_ad(text)
 
 
 def _translator_protected_handle_spans(line: str) -> list[tuple[int, int]]:
@@ -500,7 +538,7 @@ def strip_advertisements(content: str, keep_translator_credits: bool = True) -> 
     normalised = content.replace("\r\n", "\n")
     had_trailing_newline = normalised.endswith("\n")
 
-    is_vtt = normalised.lstrip()[:6].upper().startswith("WEBVTT")
+    is_vtt = normalised.lstrip("\ufeff \t\r\n")[:6].upper().startswith("WEBVTT")
 
     header_blocks: list[str] = []
     cues: list[dict] = []
@@ -513,9 +551,12 @@ def strip_advertisements(content: str, keep_translator_credits: bool = True) -> 
         timestamp_index = next((i for i, line in enumerate(lines) if "-->" in line), None)
 
         if timestamp_index is None:
-            # Keep header/metadata blocks (WEBVTT, Kind:, Language:, ...) only.
+            # Keep header/metadata blocks (WEBVTT, Kind:, Language:, ...);
+            # after the first cue, a timestamp-less block continues the cue.
             if not seen_cue:
                 header_blocks.append(block.strip("\n"))
+            else:
+                cues[-1]["text"].extend(_continuation_lines(block))
             continue
 
         seen_cue = True
@@ -806,7 +847,7 @@ def clean_subtitle(content: str, options: CleanOptions | None = None) -> str:
     normalised = kashida_stripped
     had_trailing_newline = normalised.endswith("\n")
 
-    is_vtt = normalised.lstrip()[:6].upper().startswith("WEBVTT")
+    is_vtt = normalised.lstrip("\ufeff \t\r\n")[:6].upper().startswith("WEBVTT")
 
     header_blocks: list[str] = []
     cues: list[dict] = []
@@ -824,6 +865,8 @@ def clean_subtitle(content: str, options: CleanOptions | None = None) -> str:
         if timestamp_index is None:
             if not seen_cue:
                 header_blocks.append(block.strip("\n"))
+            else:
+                cues[-1]["text"].extend(_continuation_lines(block))
             continue
 
         seen_cue = True
@@ -926,7 +969,9 @@ def _is_hi_segment(inner: str) -> bool:
     if not stripped:
         return False
     if _HAS_ARABIC_REGEX.search(stripped):
-        return any(keyword in stripped for keyword in _HI_ARABIC_KEYWORDS)
+        return any(keyword in stripped for keyword in _HI_ARABIC_KEYWORDS) or bool(
+            _HI_ARABIC_WHOLE_WORD_REGEX.search(stripped)
+        )
     if not _HAS_LATIN_LETTER_REGEX.search(stripped):
         return False
     # Latin descriptions are written in ALL CAPS (e.g. "MUSIC PLAYING", "GUNSHOT").
@@ -940,7 +985,10 @@ def _strip_hi_from_line(line: str) -> str:
         return "" if _is_hi_segment(match.group(0)[1:-1]) else match.group(0)
 
     line = _BRACKET_REGEX.sub(_replace, line)
-    line = _SPEAKER_LABEL_REGEX.sub("", line)
+    # A leading dialogue dash marks a speaker change; it survives the label.
+    line = _SPEAKER_LABEL_REGEX.sub(
+        lambda m: "- " if m.group("dash") else "", line
+    )
     return _MULTISPACE_REGEX.sub(" ", line).strip()
 
 
@@ -964,6 +1012,7 @@ def strip_hi_artifacts(content: str) -> str:
 
     header_blocks: list[str] = []
     cue_blocks: list[str] = []
+    parsed_cues: list[tuple[list[str], list[str]]] = []
     seen_cue = False
     changed = False
 
@@ -979,10 +1028,14 @@ def strip_hi_artifacts(content: str) -> str:
         if timestamp_index is None:
             if not seen_cue:
                 header_blocks.append(block.strip("\n"))
+            else:
+                parsed_cues[-1][1].extend(_continuation_lines(block))
             continue
 
         seen_cue = True
-        original_text = lines[timestamp_index + 1 :]
+        parsed_cues.append((lines[: timestamp_index + 1], lines[timestamp_index + 1 :]))
+
+    for head, original_text in parsed_cues:
         cleaned_text = [_strip_hi_from_line(line) for line in original_text]
         cleaned_text = [line for line in cleaned_text if line]
 
@@ -992,7 +1045,7 @@ def strip_hi_artifacts(content: str) -> str:
             # Cue held only HI artifacts -> drop it entirely.
             continue
 
-        cue_blocks.append("\n".join(lines[: timestamp_index + 1] + cleaned_text))
+        cue_blocks.append("\n".join(head + cleaned_text))
 
     if not changed:
         return content

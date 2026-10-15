@@ -120,8 +120,12 @@ def _matches_series_episode(item: dict[str, Any], season: int, episode: int, raw
             continue
 
         # b) Episode range: e.g. 001-025, 001-148, 01-12
-        m_range = re.search(r"(?:ep|e|episode)?\s*0*(\d{1,4})\s*[-~–—]\s*0*(\d{1,4})", r_lower)
-        if m_range:
+        # The range must end the token (``-2hd`` is a release group, not
+        # episode 2) and neither end may be a year (``2005 - 05``).
+        m_range = re.search(
+            r"(?:ep|e|episode)?\s*0*(\d{1,4})\s*[-~–—]\s*0*(\d{1,4})(?![\da-z])", r_lower
+        )
+        if m_range and not any(1900 <= int(g) <= 2099 for g in m_range.groups()):
             s_ep, e_ep = int(m_range.group(1)), int(m_range.group(2))
             if s_ep not in (2160, 1080, 720, 576, 480, 264, 265) and e_ep not in (
                 2160,
@@ -158,7 +162,7 @@ def _matches_series_episode(item: dict[str, Any], season: int, episode: int, raw
                 continue
 
         # e) Dash episode numbering: e.g. Hunter X Hunter-91, Show - 02
-        m_dash = re.search(r"[-–—]\s*0*(\d{1,4})(?:[^\d]|$)", r_lower)
+        m_dash = re.search(r"[-–—]\s*0*(\d{1,4})(?![\da-z])", r_lower)
         if m_dash:
             ep_val = int(m_dash.group(1))
             if ep_val not in (2160, 1080, 720, 576, 480, 264, 265) and not (1900 <= ep_val <= 2099):
@@ -287,6 +291,10 @@ class SubSourceService:
                     f"[SubSource Movie Search] Authentication failed (HTTP {resp.status_code}). Check SUBSOURCE_API_KEY."
                 )
                 return None
+            elif resp.status_code == 429:
+                # Rate limited: the text-search fallback would be refused too.
+                SUBSOURCE_BREAKER.trip()
+                return None
         except Exception as e:
             logger.warning(f"[SubSource Movie Search] IMDb lookup error: {e}")
 
@@ -398,6 +406,8 @@ class SubSourceService:
                             logger.warning(
                                 f"[SubSource] HTTP {resp.status_code} on page {page} for {imdb_id}: {resp.text[:300]}"
                             )
+                            if resp.status_code == 429:
+                                SUBSOURCE_BREAKER.trip()
                             break
 
                         try:
@@ -507,21 +517,27 @@ class SubSourceService:
 
             # Step 3: Filter & Parse results locally by season, episode, and language
             target_langs_list = list(languages) if languages else [language]
-            target_lang_tokens = set()
+            # Map each accepted language token to the requested ISO code, so an
+            # item is labelled with the language it matched (e.g. SubSource's
+            # "farsi_persian" -> fas) instead of an Arabic default.
+            token_to_iso: dict[str, str] = {}
             for tl in target_langs_list:
                 tl_clean = str(tl).strip().lower()
-                target_lang_tokens.add(tl_clean)
-                target_lang_tokens.add(get_subsource_lang_name(tl_clean).lower())
+                iso = normalize_to_iso639_2(tl_clean)
+                token_to_iso.setdefault(tl_clean, iso)
+                token_to_iso.setdefault(get_subsource_lang_name(tl_clean).lower(), iso)
 
-            raw_items = [
-                it
-                for it in items
-                if isinstance(it, dict)
-                and any(
-                    tok in str(it.get("lang") or it.get("language") or "").lower()
-                    for tok in target_lang_tokens
-                )
-            ]
+            def _matched_iso(it: dict) -> str | None:
+                # Whole-token comparison: a substring test let "malay" match
+                # "malayalam".
+                raw = str(it.get("lang") or it.get("language") or "").strip().lower()
+                parts = {raw, *re.split(r"[_\s\-/]+", raw)}
+                for tok, iso in token_to_iso.items():
+                    if tok in parts:
+                        return iso
+                return None
+
+            raw_items = [it for it in items if isinstance(it, dict) and _matched_iso(it)]
 
             total_fetched = len(raw_items)
             dropped_by_hi = 0
@@ -575,6 +591,7 @@ class SubSourceService:
                             "id": str(sub_id),
                             "raw_name": raw_name,
                             "lang": item.get("lang_code")
+                            or _matched_iso(item)
                             or normalize_to_iso639_2(item_lang, default="ara"),
                             "download_path": item.get("download_path")
                             or item.get("downloadUrl")
@@ -614,7 +631,9 @@ class SubsourceCircuitBreaker:
 
     def trip(self, cooldown: float | None = None) -> None:
         duration = cooldown if cooldown is not None else self.cooldown
-        self._open_until = time.monotonic() + duration
+        # Never shorten an already-open window (e.g. a short Retry-After on
+        # top of a long quota trip).
+        self._open_until = max(self._open_until, time.monotonic() + duration)
         logger.warning(
             "[SubSource] Circuit breaker tripped (HTTP 429); skipping SubSource for %.0fs",
             duration,
@@ -679,6 +698,14 @@ class SubsourceProvider(BaseSubtitleProvider):
             logger.warning(
                 "Subsource API key is not configured. Subsource requires an API key for queries. "
                 "Configure SUBSOURCE_API_KEY via environment variable or user config link."
+            )
+            return []
+        if SUBSOURCE_BREAKER.is_open():
+            # Rate limited recently: a search would burn more of the window
+            # (movie lookup plus up to ten result pages) for a certain refusal.
+            logger.info(
+                "[SubSource] Circuit breaker open (%.0fs left); skipping search",
+                SUBSOURCE_BREAKER.remaining,
             )
             return []
 

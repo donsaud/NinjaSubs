@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, StrictBool, model_validator
 
+from app import __version__
+
 
 class MatchTier(IntEnum):
     """
@@ -39,7 +41,7 @@ class Manifest(BaseModel):
 
     id: str = "org.ninjasubs.addon"
     name: str = "NinjaSubs"
-    version: str = "1.1.0"
+    version: str = __version__
     description: str = (
         "A fast pass-through proxy that fetches, extracts, and streams native subtitles directly to Stremio."
     )
@@ -47,7 +49,7 @@ class Manifest(BaseModel):
     icon: str | None = None
     resources: list[str | dict[str, Any]] = Field(default_factory=lambda: list[str | dict[str, Any]](["subtitles"]))
     types: list[str] = ["movie", "series", "anime"]
-    idPrefixes: list[str] = ["tt", "kitsu"]
+    idPrefixes: list[str] = ["tt"]
     catalogs: list[dict[str, Any]] = Field(default_factory=list)
     behaviorHints: dict[str, Any] | None = Field(
         default_factory=lambda: {"configurable": True, "configurationRequired": False}

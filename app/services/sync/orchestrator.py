@@ -127,6 +127,17 @@ TWO_POINT_MODEL_VERSION = "two-point-v1"
 TWO_POINT_DETECTION_TIMEOUT_SECONDS = 8.0
 
 
+def _add_known_source(query: Any, digest: str) -> tuple[str, ...]:
+    """Append a source-download digest to the query's exclusions.
+
+    The sticky, season-pack and video-cache tiers each contribute one; an
+    assignment from a later tier used to drop the earlier exclusion, letting
+    planning re-download (and spend provider quota on) an archive already used.
+    """
+    existing = tuple(getattr(query, "known_source_digests", ()) or ())
+    return existing if digest in existing else existing + (digest,)
+
+
 class _PreResolvedReference:
     """Replays one already-resolved reference through the existing loop.
 
@@ -289,6 +300,19 @@ def _normalize_fingerprint(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+def _stable_stream_identity(url: str) -> str:
+    """Scheme, host and path of a stream URL; query and fragment dropped."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return url
+    if not parts.netloc:
+        return url.split("?", 1)[0].split("#", 1)[0]
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+
 def build_synced_cache_key(
     meta: dict,
     target_id: str,
@@ -311,7 +335,13 @@ def build_synced_cache_key(
     fingerprint = _normalize_fingerprint(meta.get("video_hash"))
     if meta.get("stream_url"):
         # URLs are case-sensitive and can expose credentials: use a digest.
-        stream_digest = hashlib.sha256(str(meta["stream_url"]).encode()).hexdigest()[:16]
+        # Only the stable part identifies the video: debrid/AIOStreams sign each
+        # request with a fresh query token, which would otherwise give every
+        # request its own key and defeat both the payload cache and in-flight
+        # coalescing (see the same exclusion in ``query.py``).
+        stream_digest = hashlib.sha256(
+            _stable_stream_identity(str(meta["stream_url"])).encode()
+        ).hexdigest()[:16]
         fingerprint = f"{fingerprint}:stream-{stream_digest}"
     if not fingerprint:
         fingerprint = _normalize_fingerprint(meta.get("target_filename")) or _normalize_fingerprint(
@@ -610,7 +640,12 @@ class SyncOrchestrator:
             str(meta.get("video_size") or ""), meta.get("lang"),
         ], ensure_ascii=False).encode()).hexdigest()[:16]
         strict = bool(getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True))
-        return f"{key}:{SYNC_PAYLOAD_VERSION}:{strict}:{context_digest}:{auth_digest}"
+        # An explicit sync request bypasses the metadata gate; joining an
+        # identical non-explicit job in flight would hand it that job's
+        # gate-skipped original instead.
+        explicit = bool(meta.get("force_sync") or meta.get("explicit_sync_request"))
+        flight = f"{key}:{SYNC_PAYLOAD_VERSION}:{strict}:{context_digest}:{auth_digest}"
+        return f"{flight}:explicit" if explicit else flight
 
     @staticmethod
     def _verdict_key(meta: dict, subtitle_hash: str) -> str | None:
@@ -1015,7 +1050,7 @@ class SyncOrchestrator:
             yield "retained-reference#sticky", _PreResolvedReference(_sticky_hit)
             sticky_source = getattr(_sticky_hit, "source_download_digest", None)
             if sticky_source:
-                query.known_source_digests = (sticky_source,)
+                query.known_source_digests = _add_known_source(query, sticky_source)
         # Season-pack tier (once per request): a member retained from
         # an earlier same-lineage episode serves locally with no
         # provider search and no download. Episode-specific bytes
@@ -1033,7 +1068,7 @@ class SyncOrchestrator:
             yield "retained-reference#season_pack", _PreResolvedReference(_pack_hit)
             pack_digest = getattr(_pack_hit, "source_download_digest", None)
             if pack_digest:
-                query.known_source_digests = (pack_digest,)
+                query.known_source_digests = _add_known_source(query, pack_digest)
         for _name, _obj in attempts:
             _plan = getattr(_obj, "plan_candidates", None)
             _multi = getattr(_obj, "resolve_all_with_provenance", None)
@@ -1119,7 +1154,7 @@ class SyncOrchestrator:
                     # Do not spend a bounded plan slot fetching the same archive
                     # again if this artifact cannot serve the request. The raw
                     # address is never stored or logged; only its digest is used.
-                    query.known_source_digests = (source_digest,)
+                    query.known_source_digests = _add_known_source(query, source_digest)
             if has_plan:
                 timing.external_plan_started = True
                 started = time.monotonic()
@@ -1646,6 +1681,10 @@ class SyncOrchestrator:
         # and overloading it with "the reference did not verify" would
         # suppress the very retry this multi-candidate loop exists to perform.
         rejected_candidates_seen = False
+        # Likewise, a candidate left untried because the per-request alass
+        # budget ran out is not evidence that no usable reference exists; a
+        # later request may well verify it, so it must not be suppressed.
+        candidates_deferred = False
 
         # Pristine inputs for the two-point PAL fallback at the tail. The loop
         # below mutates ``target_text`` (intro stripping, anchor pre-shift),
@@ -1667,6 +1706,14 @@ class SyncOrchestrator:
         async for strategy_name, strategy_obj in self._reference_attempts(
             attempts, query, _passes_cue_sanity, timing
         ):
+            # Every candidate starts from the subtitle as requested. Intro
+            # stripping and the anchor pre-shift below are prepared against
+            # *one* reference; carried into the next iteration, a pre-shift
+            # rejected for candidate 1 made candidate 2 measure the shifted
+            # text as "already aligned" and then serve the unshifted original
+            # as verified. The cue-sanity validator reads this same name, so
+            # it too now judges each download against the pristine target.
+            target_text = pristine_shadow_target
             timing.candidates_considered += 1
             try:
                 if getattr(strategy_obj, "validates_target", False):
@@ -2017,9 +2064,12 @@ class SyncOrchestrator:
                 return self._delivery_payload(sub_bytes, sub_bytes, evaluation, meta, target_id,
                     hashlib.sha256(reference.encode("utf-8")).hexdigest())
 
-            # "Relaxed" means the target name carries no edition signal, so the
-            # timeline gate must be tighter. An absent target_filename is the
-            # strongest form of that: it is never borrowed from the subtitle.
+            # "Relaxed" means the target name carries no edition signal. It is
+            # passed through to ``sync_async`` for call compatibility only:
+            # ``SyncService.sync`` no longer applies a timeline gate (its
+            # ``_timeline_rejection`` helper is unused), so acceptance is
+            # decided by the independent verifier below. An absent
+            # target_filename is never borrowed from the subtitle.
             relaxed = decision_kind == "edition" and not is_informative_release_name(
                 meta.get("target_filename")
             )
@@ -2053,6 +2103,7 @@ class SyncOrchestrator:
                     "[sync] alass candidate limit reached (%d) -> deferring remaining candidates",
                     self._alass_candidate_limit,
                 )
+                candidates_deferred = True
                 continue
 
             # Two-Point primary: ordinary constant-offset and linear-drift
@@ -2186,12 +2237,11 @@ class SyncOrchestrator:
                 # synchronization. Measure what it actually produced and record
                 # an explainable verdict.
                 #
-                # This is deliberately OBSERVATIONAL in this phase. The existing
-                # gates (_validate_synced_output, validate_cue_sanity, the
-                # timeline band) remain authoritative for accept/reject; the
-                # analyzer classifies and explains rather than overruling them.
-                # Otherwise a stricter new metric would silently change which
-                # subtitles are served, which is exactly the coupling to avoid.
+                # NOTE: this comment once named ``_validate_synced_output`` and
+                # a "timeline band" as the authoritative accept/reject gates.
+                # Neither is called on this path any more; cue sanity (before
+                # alass) and the verifier evaluation below decide what is
+                # served.
                 #
                 # The target cues are parsed HERE, from the exact text alass was
                 # given, and handed over as a collection. The analyzer accepts
@@ -2422,36 +2472,13 @@ class SyncOrchestrator:
                             evaluation.verification.value,
                         )
                     serve_synchronized = True
-                if serve_synchronized and not unified_authority_enabled(meta) and (
-                    serving_state
-                    is LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET
-                    or constant_shift_state
-                    is ConstantShiftExemptionState.EXEMPT_CONSTANT_SHIFT
-                ):
-                    # Hybrid correspondence verification before delivery.
-                    # Gate off / out of scope: no-op, legacy behavior
-                    # byte-identical. When enabled and in scope, an
-                    # exemption-driven serve additionally requires V2
-                    # concurrence; a V2 rejection downgrades THIS candidate
-                    # to fallback and the loop continues below.
-                    exemption_label = (
-                        "large_offset"
-                        if serving_state
-                        is LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET
-                        else "constant_shift"
-                    )
-                    if not await self._hybrid_predelivery_gate(
-                        target_id=target_id,
-                        target_text=target_text,
-                        reference_text=reference,
-                        synced_text=synced,
-                        meta=meta,
-                        exemption=exemption_label,
-                        legacy_unverified=not may_serve_synchronized(
-                            evaluation.sync_state, evaluation.verification
-                        ),
-                    ):
-                        serve_synchronized = False
+                # No pre-delivery V2 review here. A hybrid gate used to be
+                # called at this point for exemption-driven serves, but only
+                # when Unified authority was OFF -- and the gate itself returns
+                # "proceed" whenever Unified is off -- so it could never block
+                # and gave legacy mode a safeguard it did not have. Under
+                # Unified authority the exemptions are judged by the Unified
+                # verifier itself.
                 if serve_synchronized:
                     served = synced.encode("utf-8")
                 else:
@@ -2578,7 +2605,11 @@ class SyncOrchestrator:
             )
             if pal_served is not None:
                 return pal_served
-        if self._sync_cache is not None and not rejected_candidates_seen:
+        if (
+            self._sync_cache is not None
+            and not rejected_candidates_seen
+            and not candidates_deferred
+        ):
             await self._sync_cache.mark_failed(resolution_key)
         self._record_outcome(
             meta, classify_outcome(False, None, rejected_candidates_seen)
@@ -3257,6 +3288,10 @@ class SyncOrchestrator:
         legacy_unverified: bool = True,
     ) -> bool:
         """Correspondence V2 review before an exemption-driven delivery.
+
+        Not currently called from the serving loop (see the note there): the
+        only call site sat on a path where this review is a guaranteed no-op.
+        Kept, with its tests, for wiring into a path where it can decide.
 
         Returns True to proceed or False to downgrade this candidate to
         fallback (loop continues; nothing is served or cached as verified).

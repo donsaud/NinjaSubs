@@ -79,7 +79,35 @@ def redact_path(path: str) -> str:
     boundary = min(positions) if positions else -1
     if boundary > 0:
         head = "/{cfg}" + head[boundary:]
+    elif _looks_like_token_prefix(head):
+        # No known route follows the token (``/<token>/``, ``/<token>/favicon.ico``,
+        # a mistyped route). Keep only a final segment that cannot be part of
+        # the token -- it holds a non-base64 character such as the "." of a
+        # filename -- so no fragment of the token survives in the line.
+        last = head.rstrip("/").rsplit("/", 1)[-1]
+        keep = "/" in head[1:] and len(last) < 64 and not set(last) <= _TOKEN_CHARS
+        head = "/{cfg}" + (f"/{last}" if keep else "")
     return head + (sep + "<query redacted>" if sep and tail else "")
+
+
+_TOKEN_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-"
+)
+
+
+def _looks_like_token_prefix(head: str) -> bool:
+    """True when the path starts with a long base64-alphabet run.
+
+    Deliberately conservative in the redacting direction: a config token is
+    at least 40 base64 characters, and over-redacting an unusual path in a log
+    costs nothing, while under-redacting leaks credentials.
+    """
+    run = 0
+    for ch in head[1:]:
+        if ch not in _TOKEN_CHARS:
+            break
+        run += 1
+    return run >= 40
 
 
 def looks_like_config_segment(segment: str) -> bool:

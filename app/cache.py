@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,31 @@ logger = logging.getLogger(__name__)
 # A failed download/extraction is retried by Stremio; remember it briefly so a
 # broken upstream entry cannot trigger a full provider fan-out on every retry.
 _FAILURE_TTL_SECONDS = 600
+
+# Listing metadata with no cached subtitle beside it is kept this long after
+# its last write (every listing rewrites it), then pruned so ``_meta`` cannot
+# grow with every title ever browsed.
+_ORPHAN_METADATA_MAX_AGE_SECONDS = 7 * 24 * 3600
+_METADATA_PRUNE_INTERVAL_SECONDS = 3600
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via a same-directory temp file and ``os.replace``.
+
+    A concurrent reader then sees either the old or the new file, never a
+    truncated one that fails to parse.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 #: Metadata fields that hold a provider credential verbatim. These are stripped
 #: before anything is written to ``_meta/*.json`` and again on read, so a
@@ -134,6 +160,7 @@ class LRUCacheManager:
         self.max_files = max_files
         self.meta_dir = self.cache_dir / "_meta"
         self._lock = asyncio.Lock()
+        self._last_meta_prune = 0.0
         # Short-TTL negative cache for sub_ids whose upstream archive proved
         # unusable (all providers failed), keyed by sub_id.
         self._failed: TTLCache[str, str] = TTLCache(maxsize=4096, ttl=_FAILURE_TTL_SECONDS)
@@ -232,9 +259,35 @@ class LRUCacheManager:
             # A fresh/re-mounted cache volume can be missing ``_meta``; recreate
             # it so metadata writes never fail with ENOENT.
             meta_path.parent.mkdir(parents=True, exist_ok=True)
-            meta_path.write_text(json.dumps(safe), encoding="utf-8")
+            _atomic_write_text(meta_path, json.dumps(safe))
         except OSError as e:
             logger.warning(f"Failed to store metadata for {sub_id}: {e}")
+        self._maybe_prune_metadata()
+
+    def _maybe_prune_metadata(self) -> None:
+        """Delete stale orphan metadata, at most once per prune interval."""
+        now = time.time()
+        if now - self._last_meta_prune < _METADATA_PRUNE_INTERVAL_SECONDS:
+            return
+        self._last_meta_prune = now
+        cutoff = now - _ORPHAN_METADATA_MAX_AGE_SECONDS
+        try:
+            candidates = list(self.meta_dir.glob("*.json"))
+        except OSError:
+            return
+        removed = 0
+        for meta_p in candidates:
+            try:
+                if meta_p.stat().st_mtime >= cutoff:
+                    continue
+                if self.get_subtitle_path(meta_p.stem).exists():
+                    continue  # still backs a cached subtitle; evicted with it
+                meta_p.unlink()
+                removed += 1
+            except OSError:
+                continue
+        if removed:
+            logger.info("Pruned %d stale orphan metadata file(s)", removed)
 
     def get_metadata(self, sub_id: str) -> dict[str, Any] | None:
         """Retrieve stored download metadata.
@@ -256,7 +309,7 @@ class LRUCacheManager:
             # Best-effort in-place repair of the metadata only. A failure here
             # must not break the request, and the payload is left untouched.
             try:
-                meta_path.write_text(json.dumps(safe), encoding="utf-8")
+                _atomic_write_text(meta_path, json.dumps(safe))
             except OSError as e:
                 logger.warning(f"Failed to sanitize metadata for {sub_id}: {e}")
         return safe

@@ -24,23 +24,21 @@ services:
       #
       # Distinct from the witness mount: /witness goes to the witness service
       # only, /test-fixtures here, and neither is the provider cache.
+      #
+      # The default folder is not in the repository, and long-syntax binds do
+      # not create a missing source by default, so a fresh clone failed to
+      # start. Creating an empty folder is harmless: the override is inert.
       - type: bind
         source: ${NINJASUBS_TEST_OVERRIDE_FIXTURE_DIR:-./autosync-diagnostics}
         target: /test-fixtures
         read_only: true
+        bind:
+          create_host_path: true
     environment:
       - LOCAL_MEDIA_DIRS=
       - SUBDL_API_KEY=${SUBDL_API_KEY:-}
       - SUBSOURCE_API_KEY=${SUBSOURCE_API_KEY:-}
       - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:-}
-      # /download requires Api-Key *and* a Bearer token, and the token only exists
-      # after POST /login with an account. Without these two the container silently
-      # falls back to the anonymous per-IP quota (5 downloads / 24h) instead of the
-      # account's, so authenticated downloads fail or run dry.
-      - OPENSUBTITLES_USERNAME=${OPENSUBTITLES_USERNAME:-}
-      - OPENSUBTITLES_PASSWORD=${OPENSUBTITLES_PASSWORD:-}
-      - ENABLE_YIFYSUBTITLES=${ENABLE_YIFYSUBTITLES:-true}
-      - ENABLE_SUBTITLECAT=${ENABLE_SUBTITLECAT:-true}
       - BASE_URL=${BASE_URL:-}
       - ADDON_BASE_URL=${ADDON_BASE_URL:-}
       - LAN_IP=${LAN_IP:-}
@@ -110,11 +108,11 @@ services:
       #
       # WITNESS_FIXTURE_DIR is a development/test value and must be set in .env
       # to the folder that actually holds 02_EVOLV_alass_output.srt and
-      # 04_ASAP_alass_output.srt. It intentionally has NO working default:
-      # Docker silently creates a missing bind-mount source, so a wrong value
-      # would mount an empty directory and the witness would serve nothing
-      # without saying why. Run tools/check_witness_mount.py to verify it
-      # resolves to the real fixtures before using it.
+      # 04_ASAP_alass_output.srt. It intentionally has NO working default.
+      # (A long-syntax bind does not create a missing source unless
+      # ``create_host_path`` is set, so a wrong value fails at startup rather
+      # than mounting an empty directory.) Run tools/check_witness_mount.py to
+      # verify it resolves to the real fixtures before using it.
       - type: bind
         source: ${WITNESS_FIXTURE_DIR:-./autosync-diagnostics}
         target: /witness

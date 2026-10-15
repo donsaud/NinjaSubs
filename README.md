@@ -188,30 +188,20 @@ The web UI is a 3-step wizard and a stateless token:
 #### A note on credentials in the install URL
 
 The manifest token is **base64-encoded, not encrypted**. Anything that can read
-the install URL can recover every credential in it. API keys are scoped to one
-provider; an OpenSubtitles account password is the kind of secret people reuse,
-so the configure page says so plainly and the value is never echoed back into
-the page or written to the on-disk cache.
+the install URL can recover every API key in it, so treat the URL like the keys
+themselves. Keys are never echoed back into the configure page's HTML unescaped,
+never written to the on-disk cache, and redacted from the access log.
 
-For the same reason, prefer `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` in
-`.env` on an instance you run alone, rather than entering an account on the
-configuration page of a shared instance.
+On an instance you run alone you can instead set server-wide keys in `.env`
+(`SUBDL_API_KEY`, `SUBSOURCE_API_KEY`, `OPENSUBTITLES_API_KEY`). Leave them empty
+on a shared instance: any non-empty value is used for every user who has not
+entered their own key.
 
-#### OpenSubtitles: what an account actually does
+#### OpenSubtitles access
 
-An account is **not** required for MovieHash matching. OpenSubtitles documents
-search as unlimited and requires user authentication only for `/infos/user` and
-`/download`, so `moviehash` + `moviebytesize` matching works with the API key
-alone.
-
-What the account buys is the download quota: 5/day anonymous, 20/day for a free
-account, more for VIP. Without it the provider was calling `/download`
-unauthenticated, which is the one of those two endpoints that does require a
-login. A VIP login also returns a different API host (`vip-api.`), which the
-provider then uses for subsequent requests.
-
-Tokens last 24 hours and `/login` is rate-limited to 30 calls an hour, so logins
-are cached in-process and shared between concurrent requests.
+NinjaSubs uses OpenSubtitles with an **API key only**; it performs no account
+login. MovieHash matching (`moviehash` + `moviebytesize`) works with the key
+alone. Downloads count against the API key's anonymous quota.
 
 ### API Endpoints
 
@@ -225,6 +215,7 @@ are cached in-process and shared between concurrent requests.
 | `/{config}/subtitles/{type}/{id}.json` | `GET` | Subtitle search (user keys) |
 | `/sub/{sub_id}.srt` | `GET` | Serve UTF-8 subtitle |
 | `/health` | `GET` | Health + cache statistics |
+| `/cache/clear` | `POST` | Clear the in-memory listing cache |
 
 ### Local Development
 

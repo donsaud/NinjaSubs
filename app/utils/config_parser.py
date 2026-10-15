@@ -186,6 +186,18 @@ def parse_user_config(
             return value
         return str(value).strip().lower() not in ("0", "false", "no", "off", "")
 
+    def _as_str(*values: Any) -> str | None:
+        """First non-empty string among ``values``; non-strings are ignored.
+
+        Tokens are user-controlled JSON, so a key may arrive as a number, list
+        or object. Treating those as absent keeps a malformed token from
+        crashing the request at the ``.strip()`` below.
+        """
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
     if config_str:
         clean_config = config_str.strip()
 
@@ -196,19 +208,21 @@ def parse_user_config(
             data = json.loads(decoded_bytes.decode("utf-8"))
             if isinstance(data, dict):
                 if not user_subdl:
-                    user_subdl = data.get("subdl_key") or data.get("subdl") or data.get("subdlKey")
+                    user_subdl = _as_str(
+                        data.get("subdl_key"), data.get("subdl"), data.get("subdlKey")
+                    )
                 if not user_subsource:
-                    user_subsource = (
-                        data.get("subsource_key")
-                        or data.get("subsource")
-                        or data.get("subsourceKey")
+                    user_subsource = _as_str(
+                        data.get("subsource_key"),
+                        data.get("subsource"),
+                        data.get("subsourceKey"),
                     )
                 if not user_opensubtitles:
-                    user_opensubtitles = (
-                        data.get("opensubtitles_key")
-                        or data.get("opensubtitles_api_key")
-                        or data.get("opensubtitles")
-                        or data.get("opensubtitlesKey")
+                    user_opensubtitles = _as_str(
+                        data.get("opensubtitles_key"),
+                        data.get("opensubtitles_api_key"),
+                        data.get("opensubtitles"),
+                        data.get("opensubtitlesKey"),
                     )
                 cfg_langs = data.get("languages") or data.get("langs")
                 if isinstance(cfg_langs, list):
@@ -224,8 +238,9 @@ def parse_user_config(
                         if language.strip()
                     ]
 
-                exclude_hi = bool(
-                    data.get("exclude_hi") or data.get("excludeHI") or data.get("no_hi")
+                exclude_hi = any(
+                    _as_bool(data.get(k), default=False)
+                    for k in ("exclude_hi", "excludeHI", "no_hi")
                 )
                 if "nuvio_mode" in data:
                     nuvio_mode = bool(data["nuvio_mode"])

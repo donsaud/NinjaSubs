@@ -58,7 +58,7 @@ AVAILABLE_LANGUAGES: list[dict[str, Any]] = [
         "name": "Portuguese",
         "subdl": "PT",
         "subsource": "Portuguese",
-        "aliases": ["portuguese", "pt", "pt-br"],
+        "aliases": ["portuguese", "pt", "pt-br", "brazillian_portuguese", "brazilian_portuguese"],
     },
     {
         "code": "tur",
@@ -74,7 +74,7 @@ AVAILABLE_LANGUAGES: list[dict[str, Any]] = [
         "name": "Persian (Farsi)",
         "subdl": "FA",
         "subsource": "Farsi",
-        "aliases": ["persian", "farsi", "fa", "per"],
+        "aliases": ["persian", "farsi", "fa", "per", "farsi_persian"],
     },
     {
         "code": "ind",
@@ -383,36 +383,6 @@ def get_opensubtitles_lang_code(iso_code: str) -> str:
         raw = (iso_code or "").strip().lower()
         return raw or "und"
     return _OPENSUBTITLES_LANG_MAP.get(iso_norm, iso_norm[:2])
-
-
-# SubtitleCat uses ISO-639-1-ish codes in its .srt filenames, with a few legacy
-# (ISO-639-2/B) variants such as 'iw' for Hebrew and regional suffixes like 'pt-BR'.
-_SUBTITLECAT_LANG_OVERRIDES: dict[str, set[str]] = {
-    "heb": {"he", "iw"},
-    "por": {"pt", "pt-br", "pt-pt"},
-    "zho": {"zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant"},
-    "srp": {"sr", "scc"},
-    "ron": {"ro", "rum"},
-    "fas": {"fa", "per"},
-    "msa": {"ms", "may"},
-    "nld": {"nl", "dut"},
-    "ces": {"cs", "cze"},
-    "ell": {"el", "gre"},
-    "fra": {"fr", "fre"},
-    "deu": {"de", "ger"},
-}
-
-
-def get_subtitlecat_lang_codes(iso_code: str) -> set[str]:
-    """
-    Get the set of lowercase SubtitleCat language codes for an ISO-639-2 language.
-    Includes ISO-639-1 code plus known regional/legacy variants (e.g. ``pt-BR``, ``iw``).
-    """
-    iso_norm = normalize_to_iso639_2(iso_code)
-    base = get_opensubtitles_lang_code(iso_norm)
-    codes = {base.lower()} if base else set()
-    codes |= _SUBTITLECAT_LANG_OVERRIDES.get(iso_norm, set())
-    return {code.lower() for code in codes if code}
 
 
 def get_language_name(code: str, default: str = "Arabic") -> str:

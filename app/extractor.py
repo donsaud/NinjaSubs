@@ -9,8 +9,10 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 
+from app.config import settings
 from app.services import release_scoring_integration as release_scoring
 
 logger = logging.getLogger(__name__)
@@ -27,8 +29,34 @@ _TAR_MAGIC = b"ustar"
 # Subtitle file extensions accepted from an archive.
 _SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt")
 
-# Markers that prove a decoded payload is a real subtitle (never binary/HTML).
-_SUBTITLE_MARKERS = ("-->", "WEBVTT", "[Script Info]", "Dialogue:")
+# Evidence that a decoded payload is a real subtitle (never binary/HTML). A bare
+# "-->" is not enough: every HTML comment contains one.
+_SRT_TIMESTAMP_REGEX = re.compile(r"\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3}[ \t]*-->")
+_TEXT_MARKERS = ("WEBVTT", "[Script Info]", "Dialogue:")
+_MICRODVD_REGEX = re.compile(r"(?m)^\{\d+\}\{\d*\}")
+_SAMI_SYNC_REGEX = re.compile(r"(?i)<sync\s+start\s*=")
+
+# Errors zipfile can raise while inflating a member: corrupt data, an
+# encrypted member, or an unsupported compression method.
+_ZIP_READ_ERRORS = (
+    zipfile.BadZipFile,
+    zipfile.LargeZipFile,
+    RuntimeError,
+    NotImplementedError,
+    zlib.error,
+    EOFError,
+    OSError,
+)
+
+
+def max_subtitle_bytes() -> int:
+    """Ceiling for one decompressed subtitle file."""
+    return int(getattr(settings, "MAX_SUBTITLE_BYTES", 10 * 1024 * 1024))
+
+
+def max_archive_bytes() -> int:
+    """Ceiling for one downloaded payload and for an archive's extracted total."""
+    return int(getattr(settings, "MAX_ARCHIVE_BYTES", 50 * 1024 * 1024))
 
 
 class SubtitleExtractionError(Exception):
@@ -77,7 +105,7 @@ def is_vtt_subtitle(raw_bytes: bytes) -> bool:
 
 # Arabic script ranges used to validate a candidate decoding.
 _ARABIC_SCRIPT_REGEX = re.compile(
-    r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]"
+    r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFC]"
 )
 
 # Maximum share of replacement characters tolerated before a UTF-8 repair
@@ -89,11 +117,31 @@ def _is_arabic_lang(lang: str | None) -> bool:
     return (lang or "").strip().lower().startswith("ar")
 
 
+# Languages whose legacy (pre-Unicode) subtitles are overwhelmingly Windows
+# Arabic (cp1256): Arabic, Persian and Urdu.
+_CP1256_LANGS = frozenset({"ar", "ara", "fa", "fas", "per", "ur", "urd"})
+
+
+def _legacy_codecs(lang: str | None) -> tuple[str, ...]:
+    """Single-byte codecs to try, most likely first, for a request language.
+
+    cp1256 decodes every byte value, so whichever codec is first always wins.
+    It must only lead for Arabic-script languages (or an unknown language,
+    which keeps the historical Arabic-first default); for a Latin-script
+    language it turns ``ñ``/``ß``/``ö`` into Arabic letters.
+    """
+    code = re.split(r"[-_]", (lang or "").strip().lower(), maxsplit=1)[0]
+    if not code or code in _CP1256_LANGS:
+        return ("cp1256",)
+    return ("cp1252", "cp1256")
+
+
 def decode_subtitle_bytes(raw_bytes: bytes, lang: str | None = None) -> str:
     """Decode downloaded subtitle bytes to text. Never raises.
 
     Priority order: ``utf-8-sig``/``utf-8`` (must be valid), UTF-16 (BOM only),
-    ``cp1256`` (Windows Arabic), ``iso-8859-6``, and finally a ``replace``
+    a language-appropriate legacy codepage (``cp1256`` for Arabic-script or
+    unknown languages, ``cp1252`` otherwise), and finally a ``replace``
     fallback. For Arabic subtitles an extra repair step runs first: if strict
     UTF-8 fails but a ``replace`` decode yields real Arabic script with only a
     few damaged bytes, that repair wins — otherwise a single corrupt byte
@@ -127,8 +175,8 @@ def decode_subtitle_bytes(raw_bytes: bytes, lang: str | None = None) -> str:
         if damage < _UTF8_REPAIR_TOLERANCE and _ARABIC_SCRIPT_REGEX.search(repaired):
             return repaired
 
-    # 3. Legacy single-byte Arabic encodings, cp1256 first.
-    for encoding in ("cp1256", "iso-8859-6"):
+    # 3. Legacy single-byte encodings, chosen by language (see _legacy_codecs).
+    for encoding in _legacy_codecs(lang):
         try:
             return raw_bytes.decode(encoding)
         except UnicodeDecodeError:
@@ -142,7 +190,7 @@ def decode_subtitle_bytes(raw_bytes: bytes, lang: str | None = None) -> str:
 def transcode_to_utf8(raw_bytes: bytes, lang: str | None = None) -> bytes:
     """
     Transcode subtitle content to clean UTF-8.
-    Handles standard UTF-8, UTF-8-BOM, Arabic legacy encodings (CP1256, ISO-8859-6).
+    Handles standard UTF-8, UTF-8-BOM, UTF-16 (BOM) and legacy codepages (CP1256, CP1252).
     Preserves ASS/SSA, SRT, and VTT subtitles in their native format without conversion.
 
     The optional RTL normalization pass (``fix_rtl_punctuation``) is intentionally
@@ -210,6 +258,14 @@ def extract_srt_from_zip(
         ):
             continue
 
+        # Zip-bomb protection: a member whose declared size is beyond any real
+        # subtitle is never inflated.
+        if entry.file_size > max_subtitle_bytes():
+            logger.warning(
+                "Skipping oversized archive member %r (%d bytes)", filename, entry.file_size
+            )
+            continue
+
         valid_entries.append(entry)
 
     if not valid_entries:
@@ -222,7 +278,7 @@ def extract_srt_from_zip(
     # If single entry, extract and transcode directly
     if len(valid_entries) == 1:
         release_scoring.member_selected(valid_entries[0].filename)
-        raw_sub = zf.read(valid_entries[0])
+        raw_sub = _read_zip_member(zf, valid_entries[0])
         return transcode_to_utf8(raw_sub, lang=lang)
 
     # If multiple entries exist, select the best candidate
@@ -233,8 +289,31 @@ def extract_srt_from_zip(
         episode=episode,
     )
     release_scoring.member_selected(best_entry.filename)
-    raw_sub = zf.read(best_entry)
+    raw_sub = _read_zip_member(zf, best_entry)
     return transcode_to_utf8(raw_sub, lang=lang)
+
+
+def _read_zip_member(zf: zipfile.ZipFile, entry: zipfile.ZipInfo) -> bytes:
+    """Inflate one member, bounded by :func:`max_subtitle_bytes`.
+
+    The declared ``file_size`` was already checked, but a crafted header can
+    lie about it, so the read itself is capped too. Every inflate failure is
+    reported as :class:`SubtitleExtractionError` so callers can fall back
+    instead of failing the whole request.
+    """
+    limit = max_subtitle_bytes()
+    try:
+        with zf.open(entry) as handle:
+            data = handle.read(limit + 1)
+    except _ZIP_READ_ERRORS as exc:
+        raise SubtitleExtractionError(
+            f"Could not read archive member {entry.filename!r}: {exc}"
+        ) from exc
+    if len(data) > limit:
+        raise SubtitleExtractionError(
+            f"Archive member {entry.filename!r} exceeds {limit} bytes when decompressed"
+        )
+    return data
 
 
 def detect_archive_kind(data: bytes) -> str | None:
@@ -258,16 +337,36 @@ def detect_archive_kind(data: bytes) -> str | None:
 
 
 def looks_like_subtitle(data: bytes) -> bool:
-    """True when a decoded payload contains real subtitle markup.
+    """True when a payload contains real subtitle markup.
 
-    Guards the non-archive path: a binary archive, an HTML error page, a
-    provider notice (.txt), or an image must never be cached or served as a
-    subtitle.
+    Guards the non-archive path: a binary archive, an HTML error page, a JSON
+    quota notice, a provider notice (.txt), or an image must never be cached or
+    served as a subtitle. Accepts SRT, WebVTT, ASS/SSA, SAMI and MicroDVD, in
+    UTF-8 or UTF-16 (BOM or BOM-less).
     """
     if not data or not data.strip():
         return False
-    text = data.decode("utf-8", "replace")
-    return any(marker in text for marker in _SUBTITLE_MARKERS)
+    sample = data[:65536]
+    if sample.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = sample.decode("utf-16", "replace")
+    elif sample[1:400:2].count(0) > 50 or sample[0:400:2].count(0) > 50:
+        # BOM-less UTF-16: every other byte of ASCII-range text is NUL.
+        codec = "utf-16-le" if sample[1:400:2].count(0) > 50 else "utf-16-be"
+        text = sample.decode(codec, "replace")
+    else:
+        text = sample.decode("utf-8", "replace")
+    head = text.lstrip("\ufeff \t\r\n")
+    if head.startswith("<"):
+        # HTML / XML error pages. SAMI is the one markup subtitle format.
+        return head[:5].lower() == "<sami" and bool(_SAMI_SYNC_REGEX.search(text))
+    if head.startswith(("{", "[")) and not head.startswith("[Script Info]"):
+        if not _MICRODVD_REGEX.search(head) and "Dialogue:" not in text:
+            return False  # JSON notice such as a download-quota message
+    if _SRT_TIMESTAMP_REGEX.search(text):
+        return True
+    if any(marker in text for marker in _TEXT_MARKERS):
+        return True
+    return bool(_MICRODVD_REGEX.search(text))
 
 
 def extract_subtitle_from_archive(
@@ -283,6 +382,10 @@ def extract_subtitle_from_archive(
     Raises :class:`SubtitleExtractionError` for an unknown format, an
     unextractable archive, or one with no recognized subtitle file.
     """
+    if len(raw_bytes) > max_archive_bytes():
+        raise SubtitleExtractionError(
+            f"Archive is {len(raw_bytes)} bytes, above the {max_archive_bytes()} byte limit"
+        )
     kind = detect_archive_kind(raw_bytes)
     if kind == "zip":
         return extract_srt_from_zip(
@@ -340,9 +443,32 @@ def _extract_nonzip_members(raw_bytes: bytes, kind: str) -> list[tuple[str, byte
                 f"Failed to extract {kind} archive (exit {proc.returncode}): {detail}"
             )
         members: list[tuple[str, bytes]] = []
+        member_limit = max_subtitle_bytes()
+        total_limit = max_archive_bytes()
+        total = 0
+        root = out_dir.resolve()
         for path in out_dir.rglob("*"):
-            if path.is_file() and path.suffix.lower() in _SUBTITLE_EXTENSIONS:
-                members.append((str(path.relative_to(out_dir)), path.read_bytes()))
+            # Never follow a link: an archive can carry ``x.srt -> /etc/...``
+            # and reading through it would serve an arbitrary host file.
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.suffix.lower() not in _SUBTITLE_EXTENSIONS:
+                continue
+            if not path.resolve().is_relative_to(root):
+                continue
+            size = path.lstat().st_size
+            if size > member_limit:
+                logger.warning(
+                    "Skipping oversized %s archive member %s (%d bytes)",
+                    kind, path.name, size,
+                )
+                continue
+            total += size
+            if total > total_limit:
+                raise SubtitleExtractionError(
+                    f"{kind} archive subtitles exceed {total_limit} bytes in total"
+                )
+            members.append((str(path.relative_to(out_dir)), path.read_bytes()))
         return members
 
 

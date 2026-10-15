@@ -154,6 +154,20 @@ KNOWN_GROUPS = {
     "BLUTORRENT",
 }
 
+# Group names that are also ordinary title words; matching them anywhere in a
+# name labels "Mad.Max.Fury.Road" or "Lost.S01" with a release group.
+_AMBIGUOUS_GROUP_WORDS = frozenset({"LOST", "MAX", "DON", "LOL"})
+
+
+def _scan_order(groups) -> tuple[str, ...]:
+    """Deterministic, longest-first scan order for substring group detection."""
+    return tuple(sorted(groups, key=lambda g: (-len(g), g.upper())))
+
+
+KNOWN_GROUPS_SCAN_ORDER = _scan_order(
+    g for g in KNOWN_GROUPS if g.upper() not in _AMBIGUOUS_GROUP_WORDS
+)
+
 # Regex patterns for junk token stripping
 _DOMAIN_BRACKETS = re.compile(
     r"\[[^\]]*?\.(?:com|net|org|blog|site|tv|me|to|is|io|cc|co|xyz|online|top|info|biz)[^\]]*?\]",
@@ -400,9 +414,12 @@ def parse_release_metadata(filename: str) -> dict[str, str | None]:
             if candidate and candidate.lower() not in _INVALID_GROUPS and len(candidate) >= 2:
                 group = candidate
 
-    # Step C: Match known release groups (case-insensitive word boundaries)
+    # Step C: Match known release groups (case-insensitive word boundaries).
+    # Scanned in a fixed order (longest first) so the winner never depends on
+    # set hash order; ordinary words ("Lost", "Max") are only trusted as the
+    # ``-GROUP`` tail handled above, never anywhere in a title.
     if not group:
-        for kg in KNOWN_GROUPS:
+        for kg in KNOWN_GROUPS_SCAN_ORDER:
             if re.search(rf"\b{re.escape(kg)}\b", name, re.IGNORECASE):
                 group = kg
                 break

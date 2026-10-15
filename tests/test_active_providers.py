@@ -54,9 +54,11 @@ def test_registry_exports_only_the_three_subtitle_provider_classes():
     assert classes == {"BaseSubtitleProvider", "SubdlProvider", "SubsourceProvider", "OpenSubtitlesProvider"}
     assert not hasattr(registry, "GestdownProvider")
     assert not hasattr(registry, "IsubtitlesProvider")
+    assert not hasattr(registry, "YifysubtitlesProvider")
+    assert not hasattr(registry, "SubtitlecatProvider")
 
 
-@pytest.mark.parametrize("provider", ["gestdown", "isubtitles"])
+@pytest.mark.parametrize("provider", RETIRED)
 def test_removed_cache_dimensions_are_ignored(provider):
     args = {"media_type": "series", "imdb_id": "tt1234567", "season": 1, "episode": 2}
     assert build_cache_key(**args) == build_cache_key(**args, **{"enable_" + provider: True}, tvdb_id=123)

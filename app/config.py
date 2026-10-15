@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,14 +22,17 @@ class Settings(BaseSettings):
     SUBDL_API_KEY: str = ""
     SUBSOURCE_API_KEY: str = ""
     OPENSUBTITLES_API_KEY: str = ""
-    # Keyless scraper providers (no API key required)
-    ENABLE_YIFYSUBTITLES: bool = True
-    ENABLE_SUBTITLECAT: bool = True
 
     # Disk Cache limits
     CACHE_DIR: str = os.getenv("CACHE_DIR", str(Path.cwd() / "subs_cache"))
     CACHE_MAX_BYTES: int = 1 * 1024 * 1024 * 1024  # 1 GB
     CACHE_MAX_FILES: int = 500
+
+    # Download / archive size ceilings. Subtitles are user-uploaded to the
+    # providers, so a tiny archive can inflate to gigabytes (a "zip bomb").
+    # Anything beyond these limits is refused rather than read into memory.
+    MAX_SUBTITLE_BYTES: int = 10 * 1024 * 1024  # one decompressed subtitle file
+    MAX_ARCHIVE_BYTES: int = 50 * 1024 * 1024  # one download / extracted archive total
 
     # Networking & Resource Constraints (<100MB RAM, strict 6s timeout)
     UPSTREAM_TIMEOUT: float = 6.0
@@ -148,6 +152,18 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @field_validator("SUBDL_API_KEY", "SUBSOURCE_API_KEY", "OPENSUBTITLES_API_KEY", mode="before")
+    @classmethod
+    def _placeholder_key_is_unset(cls, value: object) -> object:
+        """Treat an unedited ``YOUR_..._HERE`` placeholder as no key.
+
+        Older ``.env.example`` files shipped those placeholders; copied as-is
+        they became a real server-wide key sent upstream for every keyless user.
+        """
+        if isinstance(value, str) and value.strip().upper().startswith("YOUR_"):
+            return ""
+        return value
 
 
 settings = Settings()

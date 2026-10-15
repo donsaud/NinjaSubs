@@ -612,19 +612,6 @@ def test_configure_page_prefills_badge_parts(client):
     assert '"badge_parts": ["filename"]' in body
 
 
-def test_cache_key_includes_keyless_provider_toggles():
-    """Cache key must vary with the keyless provider toggles to avoid cross-user leakage."""
-    from app.services.cache import build_cache_key
-
-    base = dict(media_type="movie", imdb_id="tt0111161")
-    on = build_cache_key(**base, enable_yifysubtitles=True, enable_subtitlecat=True)
-    yify_off = build_cache_key(**base, enable_yifysubtitles=False, enable_subtitlecat=True)
-    cat_off = build_cache_key(**base, enable_yifysubtitles=True, enable_subtitlecat=False)
-    assert on != yify_off
-    assert on != cat_off
-    assert yify_off != cat_off
-
-
 def test_configure_page_shows_provider_icons(client):
     """Each provider label is preceded by its locally-served icon."""
     body = client.get("/configure").text
@@ -658,46 +645,6 @@ def test_configure_page_shows_unified_provider_rows(client):
     assert 'id="opensubtitlesKey"' in body
     # Semantic badge colors
     assert "bg-amber-500/10 text-amber-400 border-amber-500/20" in body
-
-
-@pytest.mark.asyncio
-async def test_disabled_scraper_pref_skips_provider(monkeypatch):
-    """A per-user disabled keyless provider must not be queried."""
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "ENABLE_YIFYSUBTITLES", True, raising=False)
-    monkeypatch.setattr(settings, "ENABLE_SUBTITLECAT", True, raising=False)
-
-    p_subdl = AsyncMock()
-    p_subdl.search_subtitles = AsyncMock(return_value=[])
-    p_subsource = AsyncMock()
-    p_subsource.search_subtitles = AsyncMock(return_value=[])
-
-    yify_mock = AsyncMock(return_value=[])
-    cat_mock = AsyncMock(return_value=[])
-
-    prefs = UserPreferences(enable_yifysubtitles=False, enable_subtitlecat=True)
-
-    with (
-        patch(
-            "app.providers.yifysubtitles.YifysubtitlesProvider.search_subtitles", new=yify_mock
-        ),
-        patch("app.providers.subtitlecat.SubtitlecatProvider.search_subtitles", new=cat_mock),
-    ):
-        await aggregate_subtitles(
-            imdb_id="tt0111161",
-            media_type="movie",
-            title="Gladiator",
-            year=2000,
-            user_preferences=prefs,
-            http_client=AsyncMock(),
-            subdl_provider=p_subdl,
-            subsource_provider=p_subsource,
-            use_cache=False,
-        )
-
-    assert yify_mock.await_count == 0
-    assert cat_mock.await_count == 0
 
 
 def test_configure_page_contains_phase2_controls(client):

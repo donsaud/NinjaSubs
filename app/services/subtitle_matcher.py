@@ -225,6 +225,14 @@ _CLEANED_KNOWN_GROUPS = {
     if g.upper() not in {"AMZN", "MAX", "NF", "HMAX", "DSNP", "ATVP", "HULU", "ARABIC", "ENGLISH"}
     and g.lower() not in _SUBTITLE_PROVIDERS
 }
+# Fixed scan order (see ranking.KNOWN_GROUPS_SCAN_ORDER): longest first, and
+# title words such as "Lost" are only trusted as the trailing "-GROUP" token.
+_CLEANED_KNOWN_GROUPS_SCAN_ORDER = tuple(
+    sorted(
+        (g for g in _CLEANED_KNOWN_GROUPS if g.upper() not in {"LOST", "DON", "LOL"}),
+        key=lambda g: (-len(g), g.upper()),
+    )
+)
 
 # Source hierarchy and family classification
 SOURCE_FAMILIES: dict[str, str] = {
@@ -404,16 +412,18 @@ _COMPLETE_BATCH_REGEX = re.compile(
 )
 
 _SE_EP_REGEX = re.compile(
-    r"(?i)\b(?:se|season)[-._ ]?(\d{1,2})[-._ ]*(?:ep|episode|e)[-._ ]?(\d{1,3})\b"
+    r"(?i)\b(?:se|season)[-._ ]?(\d{1,2})[-._ ]*(?:ep|episode|e)[-._ ]?(\d{1,4})\b"
 )
-_S_E_REGEX = re.compile(r"(?i)\bS(\d{1,2})[-._ ]?E(\d{1,2})\b")
-_X_E_REGEX = re.compile(r"(?i)\b(\d{1,2})x(\d{1,2})\b")
+# Episode numbers run to four digits (long-running anime: S01E1085).
+_S_E_REGEX = re.compile(r"(?i)\bS(\d{1,2})[-._ ]?E(\d{1,4})\b")
+_X_E_REGEX = re.compile(r"(?i)\b(\d{1,2})x(\d{1,3})\b")
 _SEASON_EP_REGEX = re.compile(r"(?i)\bSeason[-._ ]?(\d{1,2})[-._ ]?Episode[-._ ]?(\d{1,2})\b")
 _MULTI_EP_REGEX = re.compile(
-    r"(?i)\bS(\d{1,2})[-._ ]?E(\d{1,2})(?:[-–—]\d{1,2}|(?:[-._ ]?E\d{1,2})+)\b"
+    r"(?i)\bS(\d{1,2})[-._ ]?E(\d{1,4})(?:[-–—]\d{1,4}|(?:[-._ ]?E\d{1,4})+)\b"
 )
 _ORDINAL_SEASON_REGEX = re.compile(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)[-._ ]?season\b")
-_SEASON_ONLY_REGEX = re.compile(r"(?i)\b(?:se|season|s)[-._ ]?(\d{1,2})\b")
+# Not after an apostrophe: the possessive "s" in "Ocean's.11" is no season.
+_SEASON_ONLY_REGEX = re.compile(r"(?i)(?<!['’])\b(?:se|season|s)[-._ ]?(\d{1,2})\b")
 _EPISODE_ONLY_REGEX = re.compile(r"(?i)\b(?:ep|episode|e)[-._ ]?(\d{1,3})\b")
 _SEASON_MENTION_REGEX = re.compile(
     r"(?i)(?:"
@@ -704,6 +714,12 @@ def extract_metadata(filename: str) -> dict[str, Any]:
         # High-confidence standalone bare or bracketed episode (e.g. "02", "2", "[Animeiat] 02", "02 - Arabic", "2 - Arabic")
         bare = re.sub(r"^\s*\[[^\]]+\]\s*", "", anime_str).strip()
         m_bare = re.match(r"^([1-9]\d{0,3})\b", bare)
+        # A leading number followed later by the release year is a title
+        # ("300.2006", "21.Jump.Street.2012"), not an episode.
+        if m_bare and year and re.search(
+            rf"(?<!\d){re.escape(m_bare.group(1))}\D.*\b{year}\b", name
+        ):
+            m_bare = None
 
         m_dash = re.search(r"[-–—]\s*(?:e|ep|episode)?\s*(\d{1,4})\b", anime_str, re.IGNORECASE)
         m_tag = re.search(r"(?i)(?:^|[\s._\-\[#])(?:ep|episode|e)\s*0*(\d{1,4})\b", anime_str)
@@ -940,7 +956,7 @@ def extract_metadata(filename: str) -> dict[str, Any]:
                 group = last_tok
 
     if not group:
-        for kg in _CLEANED_KNOWN_GROUPS:
+        for kg in _CLEANED_KNOWN_GROUPS_SCAN_ORDER:
             if re.search(rf"\b{re.escape(kg)}\b", name, re.IGNORECASE):
                 group = kg
                 break
@@ -1655,8 +1671,9 @@ _DIALOGUE_MAX_GAP_MS = 20_000
 _NON_SPEECH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)(?:https?://|www\.|@[\w.]+|\.(?:com|net|org|info|tv|cc|me|link|club|xyz)\b)"),
     re.compile(
-        r"(?i)(?:ترجمة|مترجم|translation|translated\s+by|subtitle|encoded|"
-        r"sync(?:ed)?\s+by|credit|corrected\s+by|timed\s+by)"
+        # Latin words are bounded: "credit" must not match "incredible".
+        r"(?i)(?:ترجمة|مترجم|\btranslation\b|translated\s+by|\bsubtitles?\b|\bencoded\b|"
+        r"sync(?:ed)?\s+by|\bcredits?\b|corrected\s+by|timed\s+by)"
     ),
     re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b"),
     re.compile(r"♪|\[music\]|\(music\)"),

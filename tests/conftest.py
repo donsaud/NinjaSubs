@@ -103,17 +103,6 @@ def reset_request_context():
 
 
 @pytest.fixture(autouse=True)
-def disable_keyless_scraper_providers(monkeypatch):
-    """Disable keyless scraper providers (YIFYSubtitles/SubtitleCat) during tests
-    so the suite never makes real outbound HTTP requests to them."""
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "ENABLE_YIFYSUBTITLES", False, raising=False)
-    monkeypatch.setattr(settings, "ENABLE_SUBTITLECAT", False, raising=False)
-    yield
-
-
-@pytest.fixture(autouse=True)
 def default_sync_strict_mode(monkeypatch):
     """Pin the reference decision policy to strict for deterministic tests.
 
@@ -131,10 +120,13 @@ def reset_subdl_circuit_breaker():
     """Reset the process-wide SubDL breaker so a 429 in one test cannot
     fast-bypass SubDL in later tests."""
     from app.providers.subdl import SUBDL_BREAKER
+    from app.providers.subsource import SUBSOURCE_BREAKER
 
     SUBDL_BREAKER.reset()
+    SUBSOURCE_BREAKER.reset()
     yield
     SUBDL_BREAKER.reset()
+    SUBSOURCE_BREAKER.reset()
 
 
 @pytest.fixture(autouse=True)

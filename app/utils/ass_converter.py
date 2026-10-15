@@ -260,7 +260,7 @@ def convert_ass_result(ass_content: str, apply_rtl: bool = True) -> ConversionRe
     styles = _parse_style_colors(ass_content.lstrip("\ufeff"))
     in_events = False
     fields: list[str] | None = None
-    blocks: list[str] = []
+    events: list[tuple[int, int, str]] = []
     for raw_line in ass_content.lstrip("\ufeff").splitlines():
         line = raw_line.strip()
         lowered = line.lower()
@@ -298,8 +298,20 @@ def convert_ass_result(ass_content: str, apply_rtl: bool = True) -> ConversionRe
             continue
         if apply_rtl:
             html = _apply_rtl(html)
+        events.append((start, end, html.strip()))
+
+    # ASS events need not be in time order (typeset and layered scripts often
+    # are not), but SubRip cues must be. A stable sort keeps same-start events
+    # in script order. Layered duplicates (an outline/shadow copy of the same
+    # line) are emitted once.
+    blocks: list[str] = []
+    seen: set[tuple[int, int, str]] = set()
+    for start, end, html in sorted(events, key=lambda event: event[0]):
+        if (start, end, html) in seen:
+            continue
+        seen.add((start, end, html))
         timestamp = f"{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}"
-        blocks.append(f"{len(blocks) + 1}\n{timestamp}\n{html.strip()}")
+        blocks.append(f"{len(blocks) + 1}\n{timestamp}\n{html}")
     stats.cues_emitted = len(blocks)
     reason = "converted" if blocks else "no_readable_cues"
     logger.debug("[ass-conversion] format=ass status=%s stats=%s", reason, stats)

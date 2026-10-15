@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Security
+- **Configure page XSS**: prefilled API keys, host values and language options are HTML-escaped, and the inline preferences JSON can no longer close its `<script>` element.
+- **Archive limits**: new `MAX_SUBTITLE_BYTES` (10 MB) and `MAX_ARCHIVE_BYTES` (50 MB). ZIP members are size-checked before and during inflation (zip bombs), oversized downloads are refused, and symlink members in RAR/7z/tar archives are never followed.
+- **Access-log redaction** now also hides the config token on paths with no known route after it (`/<token>/`, `/<token>/favicon.ico`).
+- `/cache/clear` is `POST`-only.
+
+### Fixed
+- **Requests**: a non-string credential in a token no longer causes a 500; `exclude_hi: "false"` parses as false.
+- **Downloads**: HTML/JSON error pages are no longer accepted (or cached) as subtitles; ASS/SSA, MicroDVD, SAMI and UTF-16 downloads are; the OpenSubtitles proxy validates payloads before caching.
+- **Event loop**: archive extraction and reference decoding run off the event loop.
+- **Encoding**: legacy single-byte files use cp1256 only for Arabic/Persian/Urdu (or an unknown language) and cp1252 otherwise, so Latin-script subtitles are no longer garbled.
+- **Rate limits**: SubDL no longer retries a season-pack query after a 429/401/403; SubSource searches honour their circuit breaker; a short `Retry-After` can no longer shorten an open breaker.
+- **Matching**: `-2HD` release groups and `2005 - 05` years are not read as episodes; `S01E100`/`S01E1085` keep their season; movie titles such as `300.2006`, `21.Jump.Street.2012` and `Ocean's.11` are no longer parsed as episodes or seasons; release-group detection is deterministic and ignores title words (`Lost`, `Max`).
+- **Languages**: SubSource results are labelled with the language they matched (Persian is no longer reported as Arabic) and matched on whole words (Malay ≠ Malayalam). Malformed provider items are skipped individually.
+- **Text processing**: the ad cleaner no longer deletes ordinary Arabic dialogue containing "قناة", "تويتر" or a bare credit noun; text after a blank line inside a cue is kept; BOM-prefixed WebVTT stays WebVTT; ASS→SRT output is time-ordered with layered duplicates removed; the RTL fix recognises extended Arabic letters and presentation forms; HI stripping matches "باب" as a word and keeps dialogue dashes.
+- **Sync**: each reference candidate starts from the subtitle as requested (a rejected candidate's pre-shift could make the next one serve the unshifted original as verified); NUL bytes are stripped before alass again; candidates deferred by the alass budget no longer trigger the 5-minute negative cache; source exclusions accumulate across reference tiers; per-request stream tokens no longer split the payload cache or coalescing; explicit sync requests do not join non-explicit flights; cues shifted entirely before zero are dropped instead of becoming zero-length; the listing "synced" badge requires a verified outcome; the rejected-candidate memo is bounded; a second cancellation no longer releases the alass slot early.
+- **Deployment**: a fresh clone starts with the default compose file; placeholder `YOUR_..._HERE` keys are treated as unset.
+
+### Removed
+- Kitsu is no longer advertised in `idPrefixes`: Kitsu IDs were never resolved to IMDb, so every provider returned nothing for them.
+- Dead SubtitleCat and YIFYSubtitles provider modules, their settings and cache-key dimensions (legacy token flags still parse), the unused `OPENSUBTITLES_USERNAME`/`OPENSUBTITLES_PASSWORD` variables, and a pre-delivery gate call that could never block.
+
+---
+
 ## [1.1.0] - 2026-09-28
 
 ### Added

@@ -5,6 +5,7 @@ import time
 
 import httpx
 
+from app import USER_AGENT
 from app.config import settings
 from app.models import SubtitleRelease
 from app.providers.base import BaseSubtitleProvider
@@ -29,7 +30,8 @@ class SubdlCircuitBreaker:
         self._open_until = 0.0
 
     def trip(self) -> None:
-        self._open_until = time.monotonic() + self.cooldown
+        # Never shorten an already-open window.
+        self._open_until = max(self._open_until, time.monotonic() + self.cooldown)
         logger.warning(
             "Subdl circuit breaker tripped (HTTP 429); skipping SubDL for %.0fs",
             self.cooldown,
@@ -115,11 +117,12 @@ class SubdlProvider(BaseSubtitleProvider):
 
         headers = {
             "Accept": "application/json",
-            "User-Agent": "StremioArabicSubs/1.0.0",
+            "User-Agent": USER_AGENT,
         }
 
         all_subtitles_raw: list[dict] = []
         seen_urls = set()
+        upstream_refused = False
         page = 1
         max_pages = 5
 
@@ -141,11 +144,13 @@ class SubdlProvider(BaseSubtitleProvider):
                         f"Subdl API authentication failed (HTTP {resp.status_code}). "
                         f"Please verify your SUBDL_API_KEY: {resp.text[:200]}"
                     )
+                    upstream_refused = True
                     break
 
                 if resp.status_code == 429:
                     logger.warning("Subdl API rate limit reached (HTTP 429).")
                     SUBDL_BREAKER.trip()
+                    upstream_refused = True
                     break
 
                 if resp.status_code != 200:
@@ -202,8 +207,16 @@ class SubdlProvider(BaseSubtitleProvider):
                 logger.warning(f"Error querying Subdl page {page} for {imdb_id}: {e}")
                 break
 
-        # Fallback to season pack if episode-specific query returned 0 items
-        if is_series and episode is not None and not all_subtitles_raw:
+        # Fallback to season pack if episode-specific query returned 0 items.
+        # Not after a rate limit or an auth failure: the second request would
+        # be refused for the same reason and only deepens the rate limit.
+        if (
+            is_series
+            and episode is not None
+            and not all_subtitles_raw
+            and not upstream_refused
+            and not SUBDL_BREAKER.is_open()
+        ):
             logger.info(
                 f"No episode-specific subtitles on Subdl for {imdb_id} S{season}E{episode}. Trying season pack fallback..."
             )
@@ -216,7 +229,9 @@ class SubdlProvider(BaseSubtitleProvider):
                     headers=headers,
                     timeout=settings.UPSTREAM_TIMEOUT,
                 )
-                if resp.status_code == 200:
+                if resp.status_code == 429:
+                    SUBDL_BREAKER.trip()
+                elif resp.status_code == 200:
                     data = resp.json()
                     for item in data.get("subtitles") or []:
                         if isinstance(item, dict):
@@ -241,10 +256,13 @@ class SubdlProvider(BaseSubtitleProvider):
                 dropped_by_hi += 1
                 continue
 
-            raw_name = item.get("release_name") or item.get("name") or f"{imdb_id}.srt"
+            raw_name = item.get("release_name") or item.get("name")
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raw_name = f"{imdb_id}.srt"
             raw_url = item.get("url") or item.get("download_link") or ""
 
-            if not raw_url:
+            # One malformed item must not abort the whole result list.
+            if not isinstance(raw_url, str) or not raw_url:
                 continue
 
             if raw_url.startswith("http://") or raw_url.startswith("https://"):
@@ -314,7 +332,7 @@ class SubdlProvider(BaseSubtitleProvider):
 
         effective_key = (api_key or settings.SUBDL_API_KEY or "").strip()
         headers = {
-            "User-Agent": "StremioArabicSubs/1.0.0",
+            "User-Agent": USER_AGENT,
         }
         params = {}
         if effective_key:

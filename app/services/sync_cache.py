@@ -200,12 +200,29 @@ class SyncCache:
                 logger.debug("[sync-cache] redis clear_failed failed: %s", exc)
         self._local_fail.pop(fail_key, None)
 
+    async def _payload_is_verified(self, key: str) -> bool:
+        """True when the payload's recorded outcome is verified and measured.
+
+        Payloads are also written for outcomes that must never be presented
+        as synchronized -- a rejected alass attempt, a reused rejection, the
+        original kept as "already aligned" -- so the bytes alone prove nothing.
+        """
+        from app.services.sync.alignment import is_reusable_verified
+
+        try:
+            meta = await self.get_meta(key)
+        except Exception:  # pragma: no cover - cache must not break listing
+            return False
+        meta = meta or {}
+        return is_reusable_verified(meta.get("sync_state"), meta.get("verification"))
+
     async def find_synced_for(self, imdb_id: str, sub_id: str) -> bytes | None:
-        """Return a synced artifact for this subtitle, if one was cached.
+        """Return a verified synced artifact for this subtitle, if one was cached.
 
         Matches ``final_sub:{imdb}:...:{sub_id}:...`` keys so the listing path
-        can surface previously-synced subtitles. Best-effort: scans the
-        in-process cache and, when connected, Redis.
+        can surface previously-synced subtitles, and only returns one whose
+        recorded outcome is verified (see :meth:`_payload_is_verified`).
+        Best-effort: scans the in-process cache and, when connected, Redis.
         """
         imdb = (imdb_id or "").strip()
         sid = (sub_id or "").strip()
@@ -216,7 +233,7 @@ class SyncCache:
         for key in list(self._local.keys()):
             if key.startswith(prefix) and needle in key and not {"timing-v2", "timing-v3"}.intersection(key.split(":")):
                 value = self._local.get(key)
-                if value:
+                if value and await self._payload_is_verified(key):
                     return value
         if self._redis is not None:
             try:
@@ -226,8 +243,10 @@ class SyncCache:
                     for key in keys:
                         text = key.decode() if isinstance(key, bytes) else str(key)
                         if needle in text and not {"timing-v2", "timing-v3"}.intersection(text.split(":")):
+                            if text.endswith(":meta"):
+                                continue
                             value = await self._redis.get(text)
-                            if value:
+                            if value and await self._payload_is_verified(text):
                                 return value if isinstance(value, bytes) else str(value).encode()
                     if not cursor:
                         break

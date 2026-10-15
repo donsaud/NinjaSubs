@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 
+from app import USER_AGENT
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ class CinemetaClient:
             resp = await self.client.get(
                 url,
                 timeout=settings.UPSTREAM_TIMEOUT,
-                headers={"User-Agent": "StremioArabicSubs/1.0.0"},
+                headers={"User-Agent": USER_AGENT},
             )
             if resp.status_code != 200:
                 return None

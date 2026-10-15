@@ -345,5 +345,8 @@ async def test_legacy_broad_scans_cannot_find_unified_artifacts():
     assert await cache.find_synced_for("tt1", "sub") is None
     assert await cache.find_synced_for_target("tt1", "movie", "video", "sub") is None
     await cache.set(legacy_key, b"legacy")
+    # The listing badge counts only payloads whose recorded outcome verified.
+    assert await cache.find_synced_for("tt1", "sub") is None
+    await cache.set_meta(legacy_key, {"sync_state": "verified_resynced", "verification": "verified"})
     assert await cache.find_synced_for("tt1", "sub") == b"legacy"
     assert await cache.find_synced_for_target("tt1", "movie", "video", "sub") == b"legacy"

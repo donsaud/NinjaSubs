@@ -142,10 +142,6 @@ def format_informative_badge(
         source_provider = "SubSource"
     elif prov in ("opensubtitles", "opensubtitlesv3", "os"):
         source_provider = "OpenSubtitles"
-    elif prov == "yifysubtitles":
-        source_provider = "YIFY"
-    elif prov == "subtitlecat":
-        source_provider = "SubtitleCat"
     else:
         source_provider = "SubDL"
 
@@ -268,8 +264,6 @@ async def aggregate_subtitles(
         enable_subdl=bool(getattr(prefs, "enable_subdl", True)),
         enable_subsource=bool(getattr(prefs, "enable_subsource", True)),
         enable_opensubtitles=bool(getattr(prefs, "enable_opensubtitles", True)),
-        enable_yifysubtitles=bool(getattr(prefs, "enable_yifysubtitles", False)),
-        enable_subtitlecat=bool(getattr(prefs, "enable_subtitlecat", False)),
         enable_rtl_fix=bool(getattr(prefs, "enable_rtl_fix", True)),
         enable_ad_removal=bool(getattr(prefs, "enable_ad_removal", True)),
         keep_translator_credits=bool(getattr(prefs, "keep_translator_credits", True)),

@@ -95,12 +95,25 @@ _LEADING_TAGS_REGEX = re.compile(r"^(?:\{[^{}]*\})+")
 _ASS_TAG_REGEX = re.compile(r"\{[^{}]*\}")
 _ASS_DIALOGUE_REGEX = re.compile(r"^(?:Dialogue|Comment):", re.IGNORECASE)
 
+# Arabic script as it appears in real subtitle files: the base block plus the
+# Supplement / Extended-A blocks and both presentation-form blocks, which legacy
+# "visual order" files use heavily. U+FEFF (the BOM) is excluded on purpose.
+_ARABIC_SCRIPT_CLASS = r"\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFC"
+# Letters only: the base letters plus extended letters such as Farsi yeh
+# (U+06CC) and keheh (U+06A9), which Arabic subtitles routinely contain.
+_ARABIC_LETTER_CLASS = (
+    r"\u0621-\u064A\u066E\u066F\u0671-\u06D3\u06D5\u06EE\u06EF\u06FA-\u06FC"
+    r"\u0750-\u077F\u08A0-\u08C9\uFB50-\uFDFB\uFE70-\uFEFC"
+)
+# Combining marks (harakat, superscript alef, Quranic marks).
+_ARABIC_MARKS = "\u064b\u064c\u064d\u064e\u064f\u0650\u0651\u0652\u0653\u0654\u0655\u0656\u0657\u0658\u0659\u065a\u065b\u065c\u065d\u065e\u065f\u0670"
+
 # Inverted leading quote + terminal punctuation (editor glitches), e.g. `".نص`, `."نص`.
 _INVERTED_LEADING_REGEX = re.compile(
     r'^(?:'
     r'(?P<quote1>["\u201c\u201d\u00ab\u00bb])(?P<punct1>[.!?\u2026])'
     r"|(?P<punct2>[.!?\u2026])(?P<quote2>[\"\u201c\u201d\u00ab\u00bb])"
-    r")(?=[\u0600-\u06FF])"
+    rf")(?=[{_ARABIC_SCRIPT_CLASS}])"
 )
 # HTML/`<font>` and ASS `{...}` tags that may wrap a dialogue line.
 _ANY_TAG_PART = r"(?:\{[^{}]*\}|<[^<>]*>)"
@@ -109,7 +122,7 @@ _ANY_TAG_REGEX = re.compile(_ANY_TAG_PART)
 _FORMATTING_TAG_REGEX = re.compile(r"<[^<>]*>|\{\\[^{}]*\}")
 # A line qualified for the inverted-leading-quote fix must end on an Arabic letter
 # (so properly quoted lines ending in a quote/ellipsis keep their existing handling).
-_ENDS_WITH_ARABIC_LETTER_REGEX = re.compile(r"[\u0621-\u064a][\u064b-\u0652]*$")
+_ENDS_WITH_ARABIC_LETTER_REGEX = re.compile(rf"[{_ARABIC_LETTER_CLASS}][{_ARABIC_MARKS}]*$")
 
 
 def _bidi_class(char: str) -> str:
@@ -158,7 +171,7 @@ def _legacy_punctuation_body(text: str) -> bool:
     visible = _FORMATTING_TAG_REGEX.sub("", text).strip().strip(RLM).strip()
     visible = visible.lstrip("([{\"'«“ ").rstrip(")]}\"'»” ")
     visible = visible.rstrip(RLM).rstrip()
-    visible = visible.rstrip("\u064b\u064c\u064d\u064e\u064f\u0650\u0651\u0652")
+    visible = visible.rstrip(_ARABIC_MARKS)
     return bool(visible) and all(
         unicodedata.category(char).startswith("L") and "ARABIC" in unicodedata.name(char, "")
         for char in (visible[0], visible[-1])

@@ -3,7 +3,7 @@
 SAMI (Synchronized Accessible Media Interchange) stores cues as
 ``<SYNC Start={milliseconds}>`` blocks with HTML-ish ``<P>`` text, often
 carrying several language classes and ``&nbsp;`` filler cues. This converter
-extracts the English track when labelled, drops empty cues, and emits strict
+extracts the requested (else English) track when labelled, drops empty cues, and emits strict
 SRT so downstream sync/validation can consume the payload.
 """
 
@@ -54,8 +54,21 @@ def _paragraph_texts(sync_body: str) -> list[tuple[str, str]]:
     return paragraphs
 
 
-def convert_sami_to_srt(content: str) -> str:
-    """Convert SAMI subtitle text to SubRip; returns ``""`` when no cues survive."""
+def _class_matches(cls: str, lang_prefix: str) -> bool:
+    """True when a SAMI class (``ENCC``, ``ENUSCC``, ``ARCC``) names ``lang_prefix``.
+
+    Compared as a prefix, not a substring: "en" occurs inside unrelated class
+    names such as ``KRCC_GENERIC``.
+    """
+    return cls.lower().startswith(lang_prefix)
+
+
+def convert_sami_to_srt(content: str, lang: str | None = None) -> str:
+    """Convert SAMI subtitle text to SubRip; returns ``""`` when no cues survive.
+
+    ``lang`` (ISO 639-1 or 639-2) picks the track when several languages are
+    present; without it, an English track is preferred, then everything.
+    """
     if not content or "<sync" not in content.lower():
         return ""
     text = content.replace("\r\n", "\n").replace("\r", "\n")
@@ -68,6 +81,9 @@ def convert_sami_to_srt(content: str) -> str:
     if not boundaries:
         return ""
 
+    requested = (lang or "").strip().lower()[:2]
+    _preferred_prefixes = [p for p in (requested, "en") if p]
+
     cues: list[str] = []
     for index, (tag_start, start_ms) in enumerate(boundaries):
         body_end = boundaries[index + 1][0] if index + 1 < len(boundaries) else len(text)
@@ -75,10 +91,15 @@ def convert_sami_to_srt(content: str) -> str:
         paragraphs = _paragraph_texts(text[tag_start:body_end])
         if not paragraphs:
             continue
-        # Prefer English-labelled paragraphs when the track carries several
-        # languages; otherwise keep everything that survived cleaning.
-        english_classes = [text for cls, text in paragraphs if "en" in cls.lower()]
-        cue_lines = english_classes or [text for _, text in paragraphs]
+        # Prefer the requested language's paragraphs, else English-labelled
+        # ones, when the track carries several languages; otherwise keep
+        # everything that survived cleaning.
+        cue_lines = []
+        for prefix in _preferred_prefixes:
+            cue_lines = [t for cls, t in paragraphs if _class_matches(cls, prefix)]
+            if cue_lines:
+                break
+        cue_lines = cue_lines or [t for _, t in paragraphs]
         end_ms = next_start if next_start is not None else start_ms + _LAST_CUE_MS
         if end_ms <= start_ms:
             continue

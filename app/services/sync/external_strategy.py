@@ -24,6 +24,8 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from cachetools import TTLCache
+
 from app.services import release_scoring_integration as release_scoring
 from app.services.subtitle_matcher import extract_metadata
 from app.services.sync.cache import ReferenceDiskCache
@@ -64,6 +66,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 _REFERENCE_DOWNLOAD_MIN_INTERVAL_SECONDS = 0.6
 
 logger = logging.getLogger(__name__)
+
+#: Bounds for the per-process memo of candidates rejected for a target.
+_REJECTED_MEMO_MAX_STEMS = 4096
+_REJECTED_MEMO_TTL_SECONDS = 6 * 3600
 
 # Below the request budget (SYNC_TOTAL_REQUEST_BUDGET, default 7.5s) so
 # reference resolution finishes inline and still leaves room for alass.
@@ -278,8 +284,13 @@ class ExternalExactStrategy:
         self.cache = cache if cache is not None else ReferenceDiskCache(min_bytes=min_bytes)
         # Candidate releases already proven unusable for a target-scoped query.
         # Keyed by the full cache stem so one subtitle's rejections never leak
-        # into another subtitle with a different cue layout.
-        self._rejected: dict[str, set[str]] = {}
+        # into another subtitle with a different cue layout. Bounded and
+        # expiring: the strategy lives for the whole process, so a plain dict
+        # grew with every subtitle ever synced, and one transient bad
+        # validation excluded a candidate until restart.
+        self._rejected: TTLCache[str, set[str]] = TTLCache(
+            maxsize=_REJECTED_MEMO_MAX_STEMS, ttl=_REJECTED_MEMO_TTL_SECONDS
+        )
 
     @staticmethod
     def _candidate_key(candidate) -> str:
@@ -1602,7 +1613,10 @@ class ExternalExactStrategy:
             )
 
         with release_scoring.extracting_member() as selected_members:
-            decoded = self._decode_payload(
+            # Inflate/bsdtar are blocking; run them off the event loop. The
+            # member list is shared by reference, so selections still record.
+            decoded = await asyncio.to_thread(
+                self._decode_payload,
                 raw, best_name, season=query.season if query else None,
                 episode=query.episode if query else None,
             )

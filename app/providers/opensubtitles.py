@@ -139,15 +139,11 @@ def looks_like_subtitle_payload(content: bytes) -> bool:
     body would otherwise be handed to the sync pipeline as if it were a
     subtitle, so it is rejected here at the provider boundary.
     """
-    if not content or not content.strip():
-        return False
-    head = content[:512].lstrip().lower()
-    if head.startswith((b"<", b"<!doctype", b"<?xml", b"<html")):
-        return False
-    if b"--> " in content[:4096] or b"-->" in content[:4096]:
-        return True
-    # A bare SRT cue index plus a timestamp is the minimum viable subtitle.
-    return bool(re.search(rb"\d{2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->", content[:4096]))
+    # One shared definition with the serve path, so ASS/SSA, MicroDVD and
+    # UTF-16 downloads are accepted here exactly as they are everywhere else.
+    from app.extractor import looks_like_subtitle
+
+    return looks_like_subtitle(content)
 
 
 class OpenSubtitlesCircuitBreaker:
@@ -160,7 +156,9 @@ class OpenSubtitlesCircuitBreaker:
 
     def trip(self, cooldown: float | None = None, reason: str = "") -> None:
         duration = cooldown if cooldown is not None else self.default_cooldown
-        self._open_until = time.monotonic() + duration
+        # Never shorten an already-open window (e.g. a short Retry-After on
+        # top of a long quota trip).
+        self._open_until = max(self._open_until, time.monotonic() + duration)
         self._reason = reason
         logger.warning(
             "[OpenSubtitles] Circuit breaker tripped (%s); skipping OpenSubtitles downloads for %.0fs",
@@ -343,11 +341,15 @@ class OpenSubtitlesProvider(BaseSubtitleProvider):
                 for item in raw_items:
                     if not isinstance(item, dict):
                         continue
-                    attributes = item.get("attributes", {})
-                    files = attributes.get("files", [])
+                    # A malformed item (null attributes, a non-object file
+                    # entry) is skipped; it must not discard the whole list.
+                    attributes = item.get("attributes")
+                    if not isinstance(attributes, dict):
+                        continue
+                    files = attributes.get("files")
                     file_id = None
                     file_name = None
-                    if isinstance(files, list) and files:
+                    if isinstance(files, list) and files and isinstance(files[0], dict):
                         file_id = files[0].get("file_id")
                         file_name = files[0].get("file_name")
 
