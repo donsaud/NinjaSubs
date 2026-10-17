@@ -522,7 +522,7 @@ async def test_configure_page_rendering(client):
     assert "Install to Stremio" in resp.text
     assert "Ninja" in resp.text and "Subs" in resp.text
     assert "https://subdl.com/panel/api" in resp.text
-    assert "https://subsource.net/dashboard/profile" in resp.text
+    assert "https://subsource.net/dashboard/api" in resp.text
     # Searchable Multi-Select Dropdown components
     assert "tom-select.css" in resp.text
     assert "tom-select.complete.min.js" in resp.text
