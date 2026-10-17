@@ -667,6 +667,8 @@ class SubtitleSyncService:
                 if timing is not None:
                     timing.alass_processes_launched += 1
             elapsed = time.monotonic() - started
+            if timing is not None:
+                timing.alass_total_ms += elapsed * 1000
             logger.info(
                 "[sync] alass finished in %.2fs with exit code %s",
                 elapsed,

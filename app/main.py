@@ -792,6 +792,41 @@ async def _fetch_subtitles_handler(
         use_cache=not bypass_cache,
     )
 
+    # Display discovery is a candidate source for Reference, but never a trust
+    # source. Store only snapshots for the same video + credential context; the
+    # reference path re-downloads, extracts, re-scores and verifies anything it
+    # reuses. Best-effort: a hint-cache failure must not affect the listing.
+    try:
+        from app.services.sync import discovery_hints
+
+        stored_hints = discovery_hints.register(
+            discovery_hints.video_scope_key(
+                imdb_id=parsed.imdb_id,
+                media_type=media_type,
+                season=season,
+                episode=episode,
+                target_filename=target_filename,
+                video_hash=video_hash,
+                video_size=video_size,
+            ),
+            discovery_hints.authorization_digest(
+                subdl_key=prefs.subdl_key,
+                subsource_key=prefs.subsource_key,
+                opensubtitles_key=prefs.opensubtitles_key,
+            ),
+            ranked_releases,
+        )
+        if stored_hints:
+            logger.info(
+                "[reference-hints] registered %d candidate(s) for %s S%sE%s",
+                stored_hints,
+                parsed.imdb_id,
+                season,
+                episode,
+            )
+    except Exception:  # noqa: BLE001 - hints are optional
+        logger.debug("[reference-hints] registration failed", exc_info=True)
+
     # Surface previously-synced artifacts: any release that already has a synced
     # payload cached for this stream is marked `status="synced"`. The mark is
     # purely informational (it drives the "⚡ Synced" badge); ordering is left to

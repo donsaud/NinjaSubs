@@ -48,6 +48,39 @@ class SyncTiming:
     references_downloaded: int = 0
     references_deduplicated: int = 0
     alass_processes_launched: int = 0
+    #: Wall-clock cost of actual reference payload transfer (excluding pacing
+    #: and archive extraction) and of decoding/extracting the payload.
+    reference_network_ms: float = 0.0
+    reference_decode_ms: float = 0.0
+    #: Bounded progressive-preparation counters. ``prefetch_started`` counts
+    #: speculative downloads begun, ``prefetch_reused`` those already ready
+    #: when the loop reached them, ``prefetch_wasted`` those completed but
+    #: never consumed because an earlier candidate verified, and
+    #: ``prefetch_cancelled`` those cancelled at the same point.
+    prefetch_started: int = 0
+    prefetch_reused: int = 0
+    prefetch_wasted: int = 0
+    prefetch_cancelled: int = 0
+    #: Lightweight preflight (existing cue/anchor evidence). It may reorder
+    #: same-release-family candidates but never accepts or excludes one.
+    preflight_runs: int = 0
+    preflight_reorders: int = 0
+    preflight_ms: float = 0.0
+    #: Per-algorithm wall clock, for latencies that used to be invisible in
+    #: the aggregate: affine search, anchor pre-shift, ALASS processes, and
+    #: the verifier itself.
+    timeline_affine_ms: float = 0.0
+    anchor_preshift_ms: float = 0.0
+    alass_total_ms: float = 0.0
+    verification_total_ms: float = 0.0
+    #: Bounded quality-aware fallback counters. A weak-binding guarded result
+    #: is held provisionally and the loop may try extra independent references.
+    quality_fallback_triggered: bool = False
+    quality_fallback_attempts: int = 0
+    quality_fallback_served: bool = False
+    quality_fallback_exhausted: bool = False
+    quality_fallback_first_p95_ms: float | None = None
+    quality_fallback_first_binding: str | None = None
     winning_candidate_index: int | None = None
     pal_reference_kind: str | None = None
     pal_reference_index: int | None = None
@@ -105,6 +138,14 @@ class SyncTiming:
             "metadata_gate_decision=%s metadata_gate_reason=%s metadata_gate_ms=%s "
             "candidate_count_planned=%d candidates_considered=%d references_downloaded=%d "
             "references_deduplicated=%d ALASS_processes_launched=%d "
+            "reference_network_ms=%.1f reference_decode_ms=%.1f "
+            "prefetch_started=%d prefetch_reused=%d prefetch_wasted=%d "
+            "prefetch_cancelled=%d preflight_runs=%d preflight_reorders=%d "
+            "preflight_ms=%.1f timeline_affine_ms=%.1f anchor_preshift_ms=%.1f "
+            "alass_total_ms=%.1f verification_total_ms=%.1f "
+            "quality_fallback_triggered=%s quality_fallback_attempts=%d "
+            "quality_fallback_served=%s quality_fallback_exhausted=%s "
+            "quality_fallback_first_p95_ms=%s quality_fallback_first_binding=%s "
             "planned_definition=%s considered_definition=%s "
             "winning_candidate_index=%s winning_reference_kind=%s winning_sync_strategy=%s "
             "total_ms=%.3f result=%s | reference_outcomes: %s",
@@ -115,6 +156,14 @@ class SyncTiming:
             self.metadata_gate_decision, self.metadata_gate_reason, self.metadata_gate_ms,
             self.candidate_count_planned, self.candidates_considered, self.references_downloaded,
             self.references_deduplicated, self.alass_processes_launched,
+            self.reference_network_ms, self.reference_decode_ms,
+            self.prefetch_started, self.prefetch_reused, self.prefetch_wasted,
+            self.prefetch_cancelled, self.preflight_runs, self.preflight_reorders,
+            self.preflight_ms, self.timeline_affine_ms, self.anchor_preshift_ms,
+            self.alass_total_ms, self.verification_total_ms,
+            self.quality_fallback_triggered, self.quality_fallback_attempts,
+            self.quality_fallback_served, self.quality_fallback_exhausted,
+            self.quality_fallback_first_p95_ms, self.quality_fallback_first_binding,
             self.planned_definition, self.considered_definition,
             self.winning_candidate_index, kind if self.winning_sync_strategy is not None else None,
             self.winning_sync_strategy, total_ms, result, outcomes,

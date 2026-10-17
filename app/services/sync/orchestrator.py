@@ -20,6 +20,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, cast
 
 from app.config import settings
@@ -85,11 +86,13 @@ from app.services.sync.matching import (
 )
 from app.services.sync.metadata_gate import MetadataGateAction, decide_metadata_gate
 from app.services.sync.outcomes import (
+    LARGE_OFFSET_SERVED,
     REJECTED,
     SYNC_OUTCOMES,
     VERIFIED,
     classify_outcome,
 )
+from app.services.sync.quality_fallback import assess_quality_fallback
 from app.services.sync.query import ReferenceQuery, ResolvedReference, fingerprint_target_cues
 from app.services.sync.reference import is_dialogue_cue
 from app.services.sync.release_knowledge import compatible_source
@@ -125,6 +128,17 @@ TWO_POINT_MODEL_VERSION = "two-point-v1"
 #: never changes a verdict: detection either completes identically or its
 #: result is discarded unused.
 TWO_POINT_DETECTION_TIMEOUT_SECONDS = 8.0
+
+#: Version of the guarded Large-Offset delivery authorization that may be
+#: reused from the result cache. Stored beside every corrected artifact.
+#: Bumping it invalidates old entries after any change to the guard logic;
+#: an unmarked entry simply re-runs the normal pipeline once.
+LARGE_OFFSET_CACHE_AUTHORIZATION_VERSION = "los-serve-v1"
+
+#: Decision segment for the content-addressed guarded artifact. It is constant
+#: across subtitle IDs, so a byte-identical original for the same video and
+#: language can find the already-authorized correction without discovery.
+CONTENT_ARTIFACT_DECISION = "large_offset_content_v1"
 
 
 def _add_known_source(query: Any, digest: str) -> tuple[str, ...]:
@@ -219,6 +233,303 @@ class _LazyCandidate:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("[sync] lazy candidate download failed: %s -> next", type(exc).__name__)
             return ResolvedReference(None)
+
+
+class _PlannedPrefetcher:
+    """Bounded, demand-driven preparation of planned reference downloads.
+
+    The verification loop used to download candidate *N+1* only after candidate
+    *N* had been fully evaluated. That serialised network latency behind
+    ALASS/affine/verification: a real request spent ~2.4s waiting for downloads
+    that could have been prepared while the previous candidate was being
+    judged.
+
+    This helper starts a bounded number of the planner's already-ranked
+    candidates while the loop evaluates the current one. It never changes the
+    plan: the same releases, provider guards, cue-sanity validator and pacing
+    apply, and a prepared-but-unused download is cancelled. When a prefetched
+    candidate turns out to be deterministically unusable (duplicate content,
+    download failure, cue-sanity rejection -- the same cases the loop skips),
+    the next candidate is prepared so that skip is instant too.
+    """
+
+    def __init__(
+        self,
+        *,
+        strategy: Any,
+        planned: list[tuple[Any, Any]],
+        query: Any,
+        shared: dict[str, Any],
+        validate: Any | None,
+        concurrency: int,
+        lookahead: int,
+    ) -> None:
+        self._strategy = strategy
+        self._planned = planned
+        self._query = query
+        self._shared = shared
+        self._validate = validate
+        self._lookahead = max(0, int(lookahead))
+        self._tasks: dict[int, asyncio.Task] = {}
+        self._consumed = -1
+        self._closed = False
+        # Speculative lookahead stays OFF until the orchestrator observes a
+        # candidate that is both a large-offset candidate and has a
+        # same-release-family sibling in the plan. A normal candidate that
+        # verifies immediately must still cost exactly one download.
+        self._armed = False
+        self._ahead: list[int] = []
+        self._evidence: dict[int, Any] = {}
+        self._concurrency = max(1, int(concurrency))
+        self._semaphore = asyncio.Semaphore(self._concurrency)
+        self._families = [self._family_of(release) for release, _ in planned]
+        self._identities = [
+            self._identity_of(release) for release, _ in planned
+        ]
+        self._accepts_plan_index = True
+        download = getattr(strategy, "download_planned_candidate", None)
+        if callable(download):
+            try:
+                parameters = inspect.signature(download).parameters.values()
+                self._accepts_plan_index = any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    or parameter.name == "plan_index"
+                    for parameter in parameters
+                )
+            except (TypeError, ValueError):  # pragma: no cover - best effort
+                self._accepts_plan_index = True
+
+    @staticmethod
+    def _family_of(release: Any) -> str:
+        try:
+            from app.services.sync.reference_v2 import release_family_key
+
+            return release_family_key(str(getattr(release, "release_name", "") or ""))
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _identity_of(release: Any) -> tuple[str, str]:
+        """Provider-metadata identity: normalized release name + language.
+
+        Used only to avoid *speculative* downloads of what two providers
+        advertise as the same release. It never removes a candidate from the
+        plan: if the preferred candidates fail, the deferred sibling is still
+        downloaded and evaluated on demand.
+        """
+        name = str(getattr(release, "release_name", "") or "").strip().lower()
+        for suffix in (".srt", ".ass", ".ssa", ".vtt", ".zip"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+        name = " ".join(name.replace("_", " ").replace(".", " ").split())
+        lang = str(getattr(release, "lang", "") or "").strip().lower()
+        return name, lang
+
+    def family(self, index: int) -> str:
+        if 0 <= index < len(self._families):
+            return self._families[index]
+        return ""
+
+    def identity(self, index: int) -> tuple[str, str]:
+        if 0 <= index < len(self._identities):
+            return self._identities[index]
+        return ("", "")
+
+    @property
+    def lookahead(self) -> int:
+        """Maximum number of unconsumed candidates this helper may prepare."""
+        return self._lookahead
+
+    @property
+    def armed(self) -> bool:
+        return self._armed
+
+    def arm(self) -> None:
+        """Allow one-ahead preparation after a large-offset preflight trigger."""
+        if not self._armed:
+            self._armed = True
+            logger.info(
+                "[sync] progressive reference preparation armed: "
+                "lookahead=%d concurrency=%d",
+                self._lookahead,
+                self._concurrency,
+            )
+
+    def arm_ahead(self, index: int, ahead: list[int] | None = None) -> None:
+        """Arm and immediately start the bounded window behind ``index``.
+
+        ``ahead`` is the pre-computed set of speculative indices. It excludes
+        siblings whose provider metadata is identical to the current release,
+        so the same file mirrored by another provider is not downloaded twice
+        speculatively. Those siblings stay in the plan and are fetched on
+        demand if the preferred candidates fail.
+        """
+        self.arm()
+        if ahead is not None:
+            self._ahead = sorted({int(item) for item in ahead})
+        self._schedule(index)
+        for item in self._ahead:
+            if item > index:
+                self._schedule(item)
+
+    def _next_ahead(self, index: int) -> int | None:
+        for item in self._ahead:
+            if item > index:
+                return item
+        return None
+
+    def set_evidence(self, index: int, evidence: Any) -> None:
+        self._evidence[index] = evidence
+
+    def get_evidence(self, index: int) -> Any:
+        return self._evidence.get(index)
+
+    def has_task(self, index: int) -> bool:
+        return index in self._tasks
+
+    def peek(self, index: int) -> tuple[bool, Any]:
+        """Return ``(finished, result)`` without awaiting or cancelling."""
+        task = self._tasks.get(index)
+        if task is None:
+            return False, None
+        if not task.done():
+            return False, None
+        if task.cancelled():
+            return True, None
+        try:
+            return True, task.result()
+        except Exception:
+            return True, None
+
+    def _schedule(self, index: int) -> None:
+        if self._closed or index < 0 or index >= len(self._planned):
+            return
+        if index in self._tasks:
+            return
+        # Never prepare more than ``lookahead`` candidates beyond the one the
+        # loop has reached. This is what keeps the pool from being downloaded
+        # indiscriminately while one candidate is evaluated.
+        if index > self._consumed + self._lookahead:
+            return
+        task = asyncio.create_task(self._download(index))
+        self._tasks[index] = task
+        task.add_done_callback(partial(self._after_done, index))
+        timing = current_sync_timing.get()
+        if timing is not None:
+            timing.prefetch_started += 1
+
+    async def _download(self, index: int) -> Any:
+        async with self._semaphore:
+            release, provider = self._planned[index]
+            extra = {"plan_index": index + 1} if self._accepts_plan_index else {}
+            try:
+                return await self._strategy.download_planned_candidate(
+                    release,
+                    provider,
+                    self._query,
+                    self._validate,
+                    self._shared,
+                    **extra,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "[sync] prefetched candidate failed: %s -> next",
+                    type(exc).__name__,
+                )
+                return ResolvedReference(None)
+
+    def _after_done(self, index: int, task: asyncio.Task) -> None:
+        """Keep the pipe warm after a deterministically skipped candidate.
+
+        A result with text is NOT advanced past: only the verifier may decide
+        that it is unusable. An empty result is exactly what the loop's
+        ``if not resolved.text: continue`` will skip, so preparing the next
+        candidate changes no decision and merely removes the next wait.
+        Only armed (large-offset) requests advance speculatively.
+        """
+        if self._closed or not self._armed or task.cancelled():
+            return
+        try:
+            result = task.result()
+        except Exception:
+            return
+        if not getattr(result, "text", None):
+            next_index = self._next_ahead(index)
+            if next_index is not None:
+                self._schedule(next_index)
+
+    def _schedule_window(self, index: int) -> None:
+        self._schedule(index)
+        if not self._armed:
+            return
+        for item in self._ahead:
+            if item > index:
+                self._schedule(item)
+
+    async def prepare(self, index: int) -> Any:
+        """Await one planned candidate, scheduling the bounded window first."""
+        self._schedule_window(index)
+        task = self._tasks.get(index)
+        if task is None:
+            return ResolvedReference(None)
+        timing = current_sync_timing.get()
+        if task.done() and not task.cancelled() and timing is not None:
+            # Already decoded before the loop reached it.
+            timing.prefetch_reused += 1
+        try:
+            result = await task
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[sync] prefetched candidate failed: %s -> next", type(exc).__name__)
+            result = ResolvedReference(None)
+        self._consumed = max(self._consumed, index)
+        if self._armed:
+            next_index = self._next_ahead(index)
+            if next_index is not None:
+                self._schedule(next_index)
+        return result
+
+    async def try_prepare(self, index: int, timeout: float) -> Any:
+        """Prepare a candidate within ``timeout``; never cancels the download."""
+        self._schedule_window(index)
+        task = self._tasks.get(index)
+        if task is None:
+            return None
+        if not task.done():
+            done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+            if not done:
+                return None
+        try:
+            return task.result()
+        except Exception:
+            return None
+
+    async def close(self) -> None:
+        """Cancel speculative work and account for it truthfully."""
+        if self._closed:
+            return
+        self._closed = True
+        pending = [(index, task) for index, task in self._tasks.items() if not task.done()]
+        for _, task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*(task for _, task in pending), return_exceptions=True)
+        timing = current_sync_timing.get()
+        if timing is None:
+            return
+        for index, task in self._tasks.items():
+            if index <= self._consumed:
+                continue
+            if task.cancelled():
+                timing.prefetch_cancelled += 1
+                continue
+            try:
+                result = task.result()
+            except Exception:
+                continue
+            if getattr(result, "text", None):
+                timing.prefetch_wasted += 1
 
 
 def _lookup_video_reference(strategy_obj: Any, query: Any, timing: Any) -> Any:
@@ -471,6 +782,8 @@ class SyncOrchestrator:
             "alass_runs": 0,
             "candidates_considered": 0,
             "candidates_verified": 0,
+            "large_offset_cache_hits": 0,
+            "large_offset_content_cache_hits": 0,
         }
 
     def _strategies(self) -> list[tuple[str, Any]]:
@@ -685,6 +998,7 @@ class SyncOrchestrator:
     def _promote_sticky_reference(
         self, *, meta: dict, target_id: str | None, pristine_text: str | None,
         resolved: Any | None, evaluation: Any | None,
+        serving_state: str | None = None,
     ) -> None:
         """Record a verified, deliverable reference as this video's sticky first choice.
 
@@ -694,18 +1008,41 @@ class SyncOrchestrator:
         (replacement); failures never reach this method, so one bad request
         can neither erase nor oscillate the preference. Every later reuse
         still re-verifies, re-checks binding, and re-checks HTTP integrity.
+
+        Two promotion regimes are recorded separately:
+
+        * Unified authority promotes only a ``verified*`` evaluation.
+        * The legacy pipeline promotes only a reference whose bytes were
+          actually delivered under the guarded Large-Offset decision
+          (``serving_state=alass_corrected_large_offset``). A plain
+          UNVERIFIED/REJECTED candidate never reaches this branch. The sticky
+          pointer only makes that reference the first *attempt*; the verifier
+          still decides every later request, and the pointer is never a
+          VERIFIED claim.
+
         Never raises and never affects the serve in progress.
         """
         try:
             if evaluation is None or resolved is None:
                 return
-            if not unified_authority_enabled(meta):
-                # Legacy measurement regimes have their own cache contracts;
-                # sticky promotion is strictly a timing-v3 construct.
-                return
             state = str(getattr(getattr(evaluation, "sync_state", ""), "value", "") or "")
-            if not state.startswith("verified"):
-                return
+            if unified_authority_enabled(meta):
+                # Legacy measurement regimes have their own cache contracts;
+                # sticky promotion is strictly a timing-v3 construct there.
+                if not state.startswith("verified"):
+                    return
+                methodology = ("unified", "timing-v3")
+            else:
+                # Guarded Large-Offset serving is the only legacy path that may
+                # promote a reference. It is still UNVERIFIED as a result; the
+                # pointer is a reference hint, never a trust upgrade.
+                if serving_state != LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET.value:
+                    return
+                if state != SyncState.UNVERIFIED.value:
+                    return
+                if getattr(evaluation, "target_binding", None) not in {"exact", "strong"}:
+                    return
+                methodology = ("legacy", "large-offset-v1")
             text = getattr(resolved, "text", None)
             if not text:
                 return
@@ -727,6 +1064,11 @@ class SyncOrchestrator:
                 return
             evidence = {
                 "sync_state": state,
+                "serving_state": serving_state,
+                "verification": str(
+                    getattr(getattr(evaluation, "verification", ""), "value", "")
+                    or ""
+                ),
                 "median_offset_ms": getattr(evaluation, "median_offset_ms", None),
                 "p95_offset_ms": getattr(evaluation, "p95_offset_ms", None),
             }
@@ -744,9 +1086,137 @@ class SyncOrchestrator:
                 bluray_match=bool(getattr(resolved, "bluray_match", False)),
                 partial=bool(getattr(resolved, "partial", False)),
                 evidence=evidence,
+                methodology=methodology,
             )
         except Exception as exc:
             logger.debug("[reference-sticky] promotion skipped: %s", type(exc).__name__)
+
+    @staticmethod
+    def _guarded_large_offset_meta_authorized(
+        meta_record: dict[str, Any] | None, cached: bytes
+    ) -> bool:
+        """Validate the authorization/provenance fields of a corrected artifact."""
+        record = meta_record or {}
+        if record.get("serving_state") != (
+            LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET.value
+        ):
+            return False
+        if record.get("large_offset_authorization") != (
+            LARGE_OFFSET_CACHE_AUTHORIZATION_VERSION
+        ):
+            return False
+        if record.get("sync_state") != SyncState.UNVERIFIED.value:
+            return False
+        if record.get("verification") not in {
+            VerificationAvailability.UNKNOWN.value,
+            VerificationAvailability.CACHED.value,
+        }:
+            return False
+        if record.get("target_binding") not in {"exact", "strong"}:
+            return False
+        if not re.fullmatch(r"[a-f0-9]{64}", str(record.get("reference_sha") or "")):
+            return False
+        if record.get("artifact_sha256") != hashlib.sha256(cached).hexdigest():
+            return False
+        return True
+
+    @staticmethod
+    def _guarded_large_offset_cached_serving(
+        meta_record: dict[str, Any] | None, cached: bytes, *, meta: dict
+    ) -> bool:
+        """Whether stored bytes may be replayed under the Large-Offset guard.
+
+        This is deliberately separate from ``is_reusable_verified``. The
+        corrected artifact stays ``UNVERIFIED``: a cache hit must never turn it
+        into a verified claim. It may only be served again because the *same
+        guarded delivery decision* was already made for this exact request
+        identity, and every input that decision depended on is still recorded:
+
+        * the recorded serving state is ``alass_corrected_large_offset``
+          (the only state the guard authorises);
+        * the stored verdict is still unverified/unknown, so replay cannot
+          upgrade it;
+        * target binding is exact/strong and a full reference digest exists;
+        * the cached bytes are exactly the approved artifact;
+        * a guard-generation marker matches this code.
+
+        Unified authority is excluded because the Large-Offset override is
+        fenced off there; its verified-result reuse path is unchanged.
+        """
+        if unified_authority_enabled(meta):
+            return False
+        return SyncOrchestrator._guarded_large_offset_meta_authorized(
+            meta_record, cached
+        )
+
+    @staticmethod
+    def _content_artifact_key(meta: dict, content_hash: str) -> str:
+        """Content-addressed key for a guarded Large-Offset artifact.
+
+        The subtitle ID is replaced by a language-scoped constant, so two
+        subtitle IDs with byte-identical original content share one entry. The
+        video fingerprint and content hash still isolate video, release,
+        language and payload.
+        """
+        credentials = tuple(str(meta.get(name) or "") for name in (
+            "subdl_key", "subsource_key", "opensubtitles_key"
+        ))
+        auth_digest = hashlib.sha256(repr(credentials).encode()).hexdigest()[:12]
+        strict = "strict" if getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True) else "loose"
+        size = re.sub(r"[^0-9]", "", str(meta.get("video_size") or "")) or "x"
+        return build_synced_cache_key(
+            meta,
+            (
+                f"content-{str(meta.get('lang') or 'und')}-{size}-"
+                f"{auth_digest}-{strict}"
+            ),
+            content_hash=content_hash,
+            decision=CONTENT_ARTIFACT_DECISION,
+        )
+
+    async def _load_guarded_content_artifact(
+        self, meta: dict, content_hash: str
+    ) -> tuple[bytes, dict[str, Any], str] | None:
+        """Load a guarded corrected artifact for this video + original content.
+
+        Every authorization field is re-checked exactly as for the same-subtitle
+        payload path. The result remains UNVERIFIED/UNKNOWN; this never promotes
+        trust or bypasses the verifier (the artifact was already authorized by
+        the Large-Offset guard for this exact video and byte-identical content).
+        """
+        if self._sync_cache is None or unified_authority_enabled(meta):
+            return None
+        key = self._content_artifact_key(meta, content_hash)
+        try:
+            artifact = await self._sync_cache.get(key)
+            if not artifact:
+                return None
+            record = await self._sync_cache.get_meta(key)
+        except Exception:  # pragma: no cover - cache must not break sync
+            return None
+        if not self._guarded_large_offset_meta_authorized(record, artifact):
+            return None
+        if (record or {}).get("original_content_hash") not in (None, content_hash):
+            return None
+        return artifact, record or {}, key
+
+    @staticmethod
+    def _guarded_replay_meta(verdict: dict[str, Any]) -> dict[str, Any]:
+        """Publication-safe metadata for a reused corrected artifact."""
+        return {
+            "sync_state": verdict.get("sync_state"),
+            "verification": verdict.get("verification"),
+            "sync_confidence": verdict.get("sync_confidence"),
+            "serving_state": verdict.get("serving_state"),
+            "large_offset_authorization": verdict.get("large_offset_authorization"),
+            "target_binding": verdict.get("target_binding"),
+            "target_binding_reasons": list(verdict.get("target_binding_reasons") or []),
+            "artifact_sha256": verdict.get("artifact_sha256"),
+            "reference_sha": verdict.get("reference_sha"),
+            "original_content_hash": verdict.get("original_content_hash"),
+            "verification_method": verdict.get("verification_method"),
+            "verification_version": verdict.get("verification_version"),
+        }
 
     @staticmethod
     def _evaluation_from_verdict(verdict: dict) -> SubtitleEvaluation:
@@ -912,6 +1382,7 @@ class SyncOrchestrator:
         artifact_key: str | None = None,
         artifact_bytes: bytes | None = None,
         reference_sha: str | None = None,
+        serving_state: str | None = None,
     ) -> None:
         """Persist a measured verdict for reuse, if it is safe to key.
 
@@ -939,27 +1410,27 @@ class SyncOrchestrator:
                     methodology="timing-v3" if unified_authority_enabled(meta) else None,
                 )
         payload = evaluation.model_dump(mode="json")
+        # Content/provenance fields, not Unified-only claims. They are required
+        # to validate a guarded Large-Offset artifact reused by a different
+        # subtitle ID carrying byte-identical original content.
+        if reference_sha:
+            payload["reference_sha"] = reference_sha
+        if artifact_bytes is not None:
+            payload["artifact_sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
+        if serving_state:
+            payload["serving_state"] = serving_state
+            if serving_state == LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET.value:
+                payload["large_offset_authorization"] = (
+                    LARGE_OFFSET_CACHE_AUTHORIZATION_VERSION
+                )
         if meta and unified_authority_enabled(meta):
             payload.update(verification_method="unified", verification_version="timing-v3")
-            payload["reference_sha"] = reference_sha
-            # Candidate-provenance generation: v2 = timing-only reconstruction
-            # boundary (original dialogue + ALASS timings). Pre-v2 Unified
-            # negatives carrying dialogue-integrity reasons were measured on
-            # sanitized-based bytes and must not suppress the corrected
-            # artifact; the negative-reuse path treats unmarked integrity
-            # rejections as stale exactly once, then this marker re-enables
-            # normal reuse. Positives are unaffected (artifacts unchanged).
+            # Candidate-provenance generation and verification-input boundary:
+            # both markers let stale Unified negatives re-evaluate exactly once
+            # instead of suppressing the corrected artifact forever. Positives
+            # are unaffected.
             payload["unified_pipeline"] = "v2"
-            # Verification-input generation: lenient-v1 = textless-cue
-            # exclusion with per-block accounting, ambiguous-block abstention,
-            # and dense cue renumbering. Earlier Unified negatives were
-            # measured under strict whole-document parsing, so reusing one
-            # would suppress a now-measurable request; unmarked negatives
-            # re-evaluate exactly once, then this marker re-enables normal
-            # reuse. Positives are unaffected.
             payload["verification_input"] = "lenient-v1"
-            if artifact_bytes is not None:
-                payload["artifact_sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
         if artifact_key:
             payload["artifact_key"] = artifact_key
         await self._sync_cache.set_verdict(
@@ -974,10 +1445,14 @@ class SyncOrchestrator:
         """Select correctness before authorization or caching; never rewrite Legacy."""
         if not unified_authority_enabled(meta):
             return legacy
+        started = time.monotonic()
         evaluation, telemetry = await unified_review_async(
             target_text=target_text, reference_text=reference_text,
             synced_text=candidate_text, candidate_algorithm=algorithm,
         )
+        _timing = current_sync_timing.get()
+        if _timing is not None:
+            _timing.verification_total_ms += (time.monotonic() - started) * 1000
         logger.info("[verification] algorithm=%s evidence=%s", algorithm, telemetry)
         # Keep the existing withhold-only ReferencePolicy ceiling.
         trust = resolved.reference_trust if resolved else legacy.reference_trust
@@ -997,14 +1472,206 @@ class SyncOrchestrator:
         if unified_authority_enabled(meta):
             return SubtitleEvaluation()
         try:
-            return self._analyzer.analyze(*args, **kwargs)
+            started = time.monotonic()
+            evaluation = self._analyzer.analyze(*args, **kwargs)
+            timing = current_sync_timing.get()
+            if timing is not None:
+                timing.verification_total_ms += (time.monotonic() - started) * 1000
+            return evaluation
         except Exception as exc:
             logger.info("[unified] legacy_diagnostic_error=%s", type(exc).__name__)
             return SubtitleEvaluation(reasons=[f"legacy_diagnostic_error:{type(exc).__name__}"])
 
+    def _maybe_arm_prefetch(
+        self,
+        *,
+        current_index: int,
+        current_text: str,
+        pending: list[int],
+        prefetcher: _PlannedPrefetcher,
+        query: ReferenceQuery,
+        timing: SyncTiming,
+    ) -> None:
+        """Start lookahead only when it has evidence and a useful target.
+
+        A normal candidate that verifies immediately must still cost exactly one
+        download. Speculation is armed only when all of the following hold:
+
+        * the current reference is a large-offset candidate under the existing
+          Large Offset Evidence Gate (measured on the sanitized text ALASS
+          actually receives);
+        * the plan contains a same-release-family sibling within the bounded
+          lookahead.
+
+        The gate is cheap (~50-70 ms) relative to the ALASS/affine evaluation it
+        precedes, and it is skipped entirely when no sibling exists.
+        """
+        if prefetcher.armed or not pending:
+            return
+        family = prefetcher.family(current_index)
+        if not family:
+            return
+        window = pending[: max(1, prefetcher.lookahead)]
+        if not any(prefetcher.family(index) == family for index in window):
+            return
+        # A sibling advertised under the same normalized release name and
+        # language is not worth downloading speculatively: it is very likely
+        # the same mirrored file. Keep it in the plan for fallback, but spend
+        # the speculative slot on a genuinely distinct release.
+        current_identity = prefetcher.identity(current_index)
+        ahead = [
+            index
+            for index in window
+            if prefetcher.family(index) == family
+            and prefetcher.identity(index) != current_identity
+        ]
+        if not ahead:
+            return
+        started = time.monotonic()
+        try:
+            from app.services.sync.reference_preflight import measure_reference_timing
+
+            evidence = measure_reference_timing(
+                query.target_text, current_text, family=family
+            )
+            timing.preflight_runs += 1
+            prefetcher.set_evidence(current_index, evidence)
+            if evidence is not None and evidence.large_offset and evidence.accepted:
+                prefetcher.arm_ahead(current_index, ahead)
+                logger.info(
+                    "[sync] large-offset preflight armed bounded reference "
+                    "preparation for candidate %d (offset %.2fs, dispersion %.0fms)",
+                    current_index + 1,
+                    (evidence.offset_ms or 0) / 1000.0,
+                    evidence.dispersion_ms or 0.0,
+                )
+        except Exception as exc:  # pragma: no cover - preflight is best effort
+            logger.debug("[sync-preflight] trigger unavailable: %s", type(exc).__name__)
+        finally:
+            timing.preflight_ms += (time.monotonic() - started) * 1000
+
+    async def _preferred_sibling(
+        self,
+        *,
+        current_index: int,
+        current_text: str,
+        pending: list[int],
+        prefetcher: _PlannedPrefetcher,
+        query: ReferenceQuery,
+        timing: SyncTiming,
+    ) -> int | None:
+        """Return a same-family sibling that should be tried first, or ``None``.
+
+        This is a prioritisation only. It requires the existing Large Offset
+        Evidence Gate to accept BOTH references on the sanitized text ALASS
+        receives, their independently estimated offsets to agree, and the
+        sibling's anchor dispersion to be materially tighter. It never accepts,
+        excludes, or transforms anything; the sibling is moved in front of the
+        current candidate, which remains immediately behind it.
+        """
+        family = prefetcher.family(current_index)
+        if not prefetcher.armed or not family or not pending:
+            return None
+        window = pending[: max(1, prefetcher.lookahead)]
+        current_identity = prefetcher.identity(current_index)
+        siblings = [
+            index
+            for index in window
+            if index > current_index
+            and prefetcher.family(index) == family
+            and prefetcher.identity(index) != current_identity
+        ]
+        if not siblings:
+            return None
+        try:
+            from app.services.sync.reference_preflight import (
+                measure_reference_timing,
+                sibling_is_materially_tighter,
+            )
+        except Exception:  # pragma: no cover - preflight must not break sync
+            return None
+
+        started = time.monotonic()
+        current = prefetcher.get_evidence(current_index)
+        if current is None:
+            current = measure_reference_timing(
+                query.target_text, current_text, family=family
+            )
+            prefetcher.set_evidence(current_index, current)
+            timing.preflight_runs += 1
+        try:
+            if current is None or not current.accepted:
+                return None
+            agreement = int(
+                getattr(settings, "REFERENCE_PREFLIGHT_OFFSET_AGREEMENT_MS", 750) or 750
+            )
+            wait_seconds = float(
+                getattr(settings, "REFERENCE_PREFLIGHT_WAIT_SECONDS", 2.5) or 2.5
+            )
+            deadline = started + max(0.0, wait_seconds)
+            best: tuple[int, float, Any] | None = None
+            for index in siblings:
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    break
+                resolved = await prefetcher.try_prepare(index, budget)
+                if resolved is None or not getattr(resolved, "text", None):
+                    continue
+                # Never jump over an intervening candidate that is itself a
+                # valid, different-family reference. That would be a genuine
+                # ordering change beyond same-release prioritisation.
+                blocked = False
+                for between in range(current_index + 1, index):
+                    if prefetcher.identity(between) == current_identity:
+                        # A mirrored copy of the current release. It stays in
+                        # the plan for fallback, but it is not independent
+                        # evidence and must not block a distinct sibling.
+                        continue
+                    _done, _result = prefetcher.peek(between)
+                    if not _done:
+                        blocked = True
+                        break
+                    if getattr(_result, "text", None):
+                        blocked = True
+                        break
+                if blocked:
+                    continue
+                sibling = measure_reference_timing(
+                    query.target_text, resolved.text, family=prefetcher.family(index)
+                )
+                timing.preflight_runs += 1
+                if sibling is None or not sibling_is_materially_tighter(
+                    current, sibling, agreement_ms=agreement
+                ):
+                    continue
+                dispersion = float(sibling.dispersion_ms or float("inf"))
+                if best is None or dispersion < best[1]:
+                    best = (index, dispersion, sibling)
+            if best is None:
+                return None
+            logger.info(
+                "[sync-preflight] preferring same-family candidate %d over %d "
+                "(offset %.2fs/%.2fs agree within %dms; dispersion %.0fms -> %.0fms); "
+                "deferred candidate stays next",
+                best[0] + 1,
+                current_index + 1,
+                (current.offset_ms or 0) / 1000.0,
+                (best[2].offset_ms or 0) / 1000.0,
+                agreement,
+                current.dispersion_ms or 0.0,
+                best[1],
+            )
+            return best[0]
+        except Exception as exc:  # pragma: no cover - preflight is best effort
+            logger.debug("[sync-preflight] unavailable: %s", type(exc).__name__)
+            return None
+        finally:
+            timing.preflight_ms += (time.monotonic() - started) * 1000
+
     async def _reference_attempts(
         self, attempts: list[tuple[str, Any]], query: ReferenceQuery,
         _passes_cue_sanity: Any, timing: SyncTiming,
+        meta: dict | None = None,
     ) -> AsyncIterator[tuple[str, Any]]:
         """Expand each strategy only when execution reaches it; cache precedes planning."""
         # Baseline read these cache entries before executing MovieHash. Keep that
@@ -1038,8 +1705,15 @@ class SyncOrchestrator:
         _sticky_cache = self._reference_cache()
         _sticky_hit = None
         if _sticky_cache is not None:
+            _sticky_methodology = (
+                ("unified", "timing-v3")
+                if meta is None or unified_authority_enabled(meta)
+                else ("legacy", "large-offset-v1")
+            )
             try:
-                _sticky_hit = _sticky_cache.get_sticky_reference(query)
+                _sticky_hit = _sticky_cache.get_sticky_reference(
+                    query, methodology=_sticky_methodology
+                )
             except Exception:  # lookup must never break sync
                 _sticky_hit = None
         if _sticky_hit is not None and getattr(_sticky_hit, "text", None):
@@ -1210,11 +1884,84 @@ class SyncOrchestrator:
                 "and is verified independently",
                 _name, len(_planned),
             )
-            for _i, (_rel, _prov) in enumerate(_planned):
-                yield (
-                    f"{_name}#candidate{_i + 1}",
-                    _LazyCandidate(_obj, _rel, _prov, query, _shared, _passes_cue_sanity, plan_index=_i + 1),
-                )
+            _prefetch_enabled = bool(
+                getattr(settings, "REFERENCE_PREFETCH_ENABLED", True)
+            )
+            _preflight_enabled = bool(
+                getattr(settings, "REFERENCE_PREFLIGHT_ENABLED", True)
+            )
+            _prefetcher: _PlannedPrefetcher | None = None
+            if _prefetch_enabled and len(_planned) > 1:
+                try:
+                    _prefetcher = _PlannedPrefetcher(
+                        strategy=_obj,
+                        planned=_planned,
+                        query=query,
+                        shared=_shared,
+                        validate=_passes_cue_sanity,
+                        concurrency=max(
+                            1,
+                            int(getattr(settings, "REFERENCE_PREFETCH_CONCURRENCY", 2) or 2),
+                        ),
+                        lookahead=max(
+                            0,
+                            int(getattr(settings, "REFERENCE_PREFETCH_LOOKAHEAD", 2) or 2),
+                        ),
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("[sync] prefetch unavailable: %s", type(exc).__name__)
+                    _prefetcher = None
+            if _prefetcher is None:
+                for _i, (_rel, _prov) in enumerate(_planned):
+                    yield (
+                        f"{_name}#candidate{_i + 1}",
+                        _LazyCandidate(
+                            _obj, _rel, _prov, query, _shared, _passes_cue_sanity,
+                            plan_index=_i + 1,
+                        ),
+                    )
+                continue
+            # Prepared candidates are yielded in plan order unless the bounded
+            # preflight prefers an already-downloaded same-family sibling. The
+            # deferred candidate is re-inserted immediately behind the
+            # preferred one, so fallback is preserved exactly.
+            try:
+                _pending = list(range(len(_planned)))
+                while _pending:
+                    _i = _pending.pop(0)
+                    _resolved = await _prefetcher.prepare(_i)
+                    if getattr(_resolved, "text", None) and _preflight_enabled:
+                        self._maybe_arm_prefetch(
+                            current_index=_i,
+                            current_text=_resolved.text,
+                            pending=_pending,
+                            prefetcher=_prefetcher,
+                            query=query,
+                            timing=timing,
+                        )
+                        _sibling = await self._preferred_sibling(
+                            current_index=_i,
+                            current_text=_resolved.text,
+                            pending=_pending,
+                            prefetcher=_prefetcher,
+                            query=query,
+                            timing=timing,
+                        )
+                        if _sibling is not None and _sibling in _pending:
+                            _pending.remove(_sibling)
+                            _pending.insert(0, _i)
+                            _pending.insert(0, _sibling)
+                            timing.preflight_reorders += 1
+                            continue
+                    # Empty results are yielded too: the orchestrator records
+                    # the failure and advances exactly as it did with lazy
+                    # adapters, while the prefetcher has already kept the next
+                    # candidate warm.
+                    yield f"{_name}#candidate{_i + 1}", _PreResolvedReference(_resolved)
+            finally:
+                # Cancel speculative downloads as soon as the request no
+                # longer needs them (success, failure, or client disconnect).
+                await _prefetcher.close()
 
     async def _execute_job(
         self, sub_bytes: bytes, meta: dict, target_id: str, auto_sync: bool
@@ -1242,6 +1989,13 @@ class SyncOrchestrator:
             result = "cancelled"
             raise
         finally:
+            attempt_iterator = getattr(timing, "active_attempt_iterator", None)
+            if attempt_iterator is not None:
+                try:
+                    await attempt_iterator.aclose()
+                except Exception:  # pragma: no cover - cleanup must not mask result
+                    pass
+                timing.active_attempt_iterator = None  # type: ignore[attr-defined]
             timing.log(result, (time.monotonic() - started) * 1000)
             current_sync_timing.reset(token)
 
@@ -1291,6 +2045,55 @@ class SyncOrchestrator:
                     logger.debug("[sync-cache] meta read failed: %s", exc)
                 stored_state = (meta_record or {}).get("sync_state")
                 stored_verification = (meta_record or {}).get("verification")
+                # Guarded Large-Offset replay. The artifact deliberately stays
+                # UNVERIFIED, so it cannot use the verified fast path above --
+                # and the unverified verdict below would otherwise serve the
+                # *original* on a retry, losing a correction the user already
+                # confirmed. Replay is allowed only for the exact guarded
+                # delivery decision recorded for this request identity.
+                if self._guarded_large_offset_cached_serving(
+                    meta_record, cached, meta=meta
+                ):
+                    evaluation = self._evaluation_from_verdict(meta_record or {})
+                    self._last_evaluation = evaluation
+                    self._metrics["verification_cache_hits"] += 1
+                    self._metrics["large_offset_cache_hits"] += 1
+                    timing.cache_hit = True
+                    timing.winning_sync_strategy = "large_offset_cache"
+                    logger.info(
+                        "[sync-cache] layer=payload result=hit_guarded_large_offset "
+                        "sub_id=%s process=%s content_hash=%s key_digest=%s "
+                        "sync_state=%s verification=%s serving_state=%s "
+                        "large_offset_authorization=%s",
+                        target_id,
+                        _PROCESS_INSTANCE_ID,
+                        content_hash,
+                        digest,
+                        stored_state,
+                        stored_verification,
+                        (meta_record or {}).get("serving_state"),
+                        LARGE_OFFSET_CACHE_AUTHORIZATION_VERSION,
+                    )
+                    self._audit_serve(
+                        evaluation, meta, target_id, from_cache=True, resolved=None
+                    )
+                    # Publish the same content-addressed twin from a same-subtitle
+                    # replay too, so a later different subtitle ID with identical
+                    # bytes can reuse it even if this process never executed the
+                    # original ALASS run.
+                    if self._sync_cache is not None:
+                        content_key = self._content_artifact_key(meta, content_hash)
+                        replay_meta = {
+                            **self._guarded_replay_meta(meta_record or {}),
+                            "original_content_hash": content_hash,
+                        }
+                        await self._sync_cache.set(content_key, cached)
+                        await self._sync_cache.set_meta(content_key, replay_meta)
+                    self._record_outcome(meta, LARGE_OFFSET_SERVED)
+                    return self._delivery_payload(
+                        cached, sub_bytes, evaluation, meta, target_id,
+                        (meta_record or {}).get("reference_sha"),
+                    )
                 if (is_reusable_verified(stored_state, stored_verification)
                         and (meta_record or {}).get("target_binding") in {"exact", "strong"}
                         and (not unified_authority_enabled(meta) or (
@@ -1366,6 +2169,72 @@ class SyncOrchestrator:
         target_text = decode_subtitle_bytes(sub_bytes, lang=meta.get("lang"))
         pristine_shadow_target = target_text
         query = self._build_query(meta, target_id=target_id, target_text=target_text)
+
+        # Cross-subtitle reuse of a guarded Large-Offset correction. The
+        # content-addressed entry excludes the subtitle ID and binds the video
+        # fingerprint, byte-identical original payload, language and decision,
+        # so a newly selected subtitle cannot inherit a correction measured for
+        # different original content. This is a delivered-artifact cache, not a
+        # verified verdict: the replay stays UNVERIFIED/UNKNOWN.
+        content_hit = await self._load_guarded_content_artifact(meta, content_hash)
+        if content_hit is not None:
+            # A cache hit must not bypass the Metadata Gate. The artifact was
+            # authorized for this video and byte-identical content, but the
+            # current request still has to be one the gate would investigate.
+            # FAST_ORIGINAL and IDENTITY_CONFLICT retain their normal behavior
+            # (serve the original without synchronization).
+            pre_gate = decide_metadata_gate(
+                meta.get("target_filename"),
+                meta.get("release_name"),
+                explicit_sync_request=bool(
+                    meta.get("force_sync") or meta.get("explicit_sync_request")
+                ),
+            )
+            timing.metadata_gate_decision = pre_gate.action.value
+            timing.metadata_gate_reason = pre_gate.reasons[0] if pre_gate.reasons else None
+            if pre_gate.action is not MetadataGateAction.INVESTIGATE:
+                logger.info(
+                    "[sync-cache] layer=content result=suppressed_by_metadata_gate "
+                    "sub_id=%s decision=%s reason=%s",
+                    target_id,
+                    pre_gate.action.value,
+                    pre_gate.reasons[0] if pre_gate.reasons else "none",
+                )
+                content_hit = None
+        if content_hit is not None:
+            artifact, content_meta, content_key = content_hit
+            evaluation = self._evaluation_from_verdict(content_meta)
+            self._last_evaluation = evaluation
+            self._metrics["verification_cache_hits"] += 1
+            self._metrics["large_offset_content_cache_hits"] += 1
+            timing.cache_hit = True
+            timing.winning_sync_strategy = "large_offset_content_cache"
+            logger.info(
+                "[sync-cache] layer=content result=hit_guarded_large_offset "
+                "sub_id=%s content_hash=%s artifact_sha=%s key_digest=%s "
+                "sync_state=%s verification=%s serving_state=%s; reuse across "
+                "subtitle identity (no discovery, no alass)",
+                target_id,
+                content_hash,
+                str(content_meta.get("artifact_sha256") or "")[:12],
+                hashlib.sha256(content_key.encode()).hexdigest()[:12],
+                content_meta.get("sync_state"),
+                content_meta.get("verification"),
+                content_meta.get("serving_state"),
+            )
+            if self._sync_cache is not None:
+                await self._sync_cache.set(resolution_key, artifact)
+                await self._sync_cache.set_meta(
+                    resolution_key, self._guarded_replay_meta(content_meta)
+                )
+            self._audit_serve(
+                evaluation, meta, target_id, from_cache=True, resolved=None
+            )
+            self._record_outcome(meta, LARGE_OFFSET_SERVED)
+            return self._delivery_payload(
+                artifact, sub_bytes, evaluation, meta, target_id,
+                content_meta.get("reference_sha"),
+            )
 
         # Measured-verdict cache: reuse a previous *verified* result for this
         # exact video + subtitle + language + engine. Keyed on the video
@@ -1672,6 +2541,13 @@ class SyncOrchestrator:
         alass_completed = 0
         alass_deferred = 0
         candidates_rejected = 0
+        # Quality-aware fallback state. The first weak-binding guarded result
+        # is provisional; later independent candidates may still win. The
+        # extra attempt/time budget is separate from, and normally smaller
+        # than, the existing per-request ALASS candidate limit.
+        quality_fallback_seen = False
+        quality_fallback_started = 0.0
+        quality_fallback_alass_base = 0
         # Shadow-evaluation wall clock consumed so far this request. The shadow
         # path must never starve the response: once the budget is spent, later
         # rejected candidates skip shadow measurement (serving is unaffected;
@@ -1703,9 +2579,33 @@ class SyncOrchestrator:
 
         _pristine_identity = PristineTargetIdentity.precompute(pal_target_snapshot)
 
-        async for strategy_name, strategy_obj in self._reference_attempts(
-            attempts, query, _passes_cue_sanity, timing
-        ):
+        _attempt_iterator = self._reference_attempts(
+            attempts, query, _passes_cue_sanity, timing, meta
+        )
+        # The job runner closes this on every exit path, including an early
+        # verified return. That is what cancels speculative prefetches instead
+        # of leaving them downloading after the response is already served.
+        timing.active_attempt_iterator = _attempt_iterator  # type: ignore[attr-defined]
+        async for strategy_name, strategy_obj in _attempt_iterator:
+            # Wall-clock bound for the quality fallback: stop before paying for
+            # another candidate download/evaluation once the window is spent.
+            if quality_fallback_seen:
+                try:
+                    _quality_max_seconds = float(
+                        getattr(settings, "QUALITY_FALLBACK_MAX_SECONDS", 8.0) or 0.0
+                    )
+                except (TypeError, ValueError):
+                    _quality_max_seconds = 8.0
+                _quality_elapsed = time.monotonic() - quality_fallback_started
+                if _quality_elapsed > _quality_max_seconds:
+                    timing.quality_fallback_exhausted = True
+                    logger.warning(
+                        "[sync-quality] fallback time budget exceeded (%.1fs > %.1fs); "
+                        "not trying another candidate",
+                        _quality_elapsed,
+                        _quality_max_seconds,
+                    )
+                    break
             # Every candidate starts from the subtitle as requested. Intro
             # stripping and the anchor pre-shift below are prepared against
             # *one* reference; carried into the next iteration, a pre-shift
@@ -2175,7 +3075,9 @@ class SyncOrchestrator:
             # correspondence; a wrong-but-self-consistent hypothesis is rejected
             # on the second test. Nothing downstream changes: alass still runs,
             # and the verifier still decides whether anything is served.
+            preshift_started = time.monotonic()
             preshift_decision = decide_anchor_preshift(target_text, reference)
+            timing.anchor_preshift_ms += (time.monotonic() - preshift_started) * 1000
             if preshift_decision.accepted and preshift_decision.preshift is not None:
                 preshifted_text = preshift_text(
                     target_text, preshift_decision.preshift.shift_ms
@@ -2195,6 +3097,32 @@ class SyncOrchestrator:
                     "[sync] anchor pre-shift not applied: %s",
                     preshift_decision.reason,
                 )
+
+            if quality_fallback_seen:
+                try:
+                    max_extra = max(
+                        0, int(getattr(settings, "QUALITY_FALLBACK_MAX_ATTEMPTS", 2) or 0)
+                    )
+                    max_seconds = max(
+                        0.0,
+                        float(getattr(settings, "QUALITY_FALLBACK_MAX_SECONDS", 8.0) or 0.0),
+                    )
+                except (TypeError, ValueError):
+                    max_extra, max_seconds = 2, 8.0
+                elapsed = time.monotonic() - quality_fallback_started
+                if (
+                    alass_attempted - quality_fallback_alass_base >= max_extra
+                    or elapsed > max_seconds
+                ):
+                    timing.quality_fallback_exhausted = True
+                    logger.warning(
+                        "[sync-quality] fallback budget exhausted after %d extra attempt(s) "
+                        "and %.1fs; not serving the provisional weak-binding correction",
+                        max(0, alass_attempted - quality_fallback_alass_base),
+                        elapsed,
+                    )
+                    break
+                timing.quality_fallback_attempts += 1
 
             alass_attempted += 1
             alass_started += 1
@@ -2358,16 +3286,75 @@ class SyncOrchestrator:
                     constant_shift_state = ConstantShiftExemptionState.ORIGINAL
                 capture_verifier(reference, synced, evaluation)
                 self._metrics["candidates_verified"] += 1
+                # Decide whether this guarded correction may be served
+                # immediately or must remain provisional while the loop tries
+                # a better independent reference. Strong/exact binding keeps
+                # the confirmed Large-Offset behavior; weak/unknown/conflict
+                # binding does not get an immediate override.
+                serve_without_override = binding_allowed and may_serve_synchronized(
+                    evaluation.sync_state.value, evaluation.verification.value
+                )
+                rejection = getattr(evaluation, "rejection_reason", None)
+                quality = assess_quality_fallback(
+                    serving_state=serving_state.value,
+                    binding_state=binding.state.value,
+                    would_serve_without_override=serve_without_override,
+                    sync_state=str(evaluation.sync_state.value),
+                    verification=str(evaluation.verification.value),
+                    rejection_reason=(
+                        str(getattr(rejection, "value", rejection))
+                        if rejection is not None else None
+                    ),
+                    p95_ms=getattr(evaluation, "p95_offset_ms", None),
+                    mad_ms=getattr(evaluation, "mad_offset_ms", None),
+                    structural_similarity=getattr(
+                        evaluation, "structural_similarity", None
+                    ),
+                )
+                quality_defer = bool(
+                    getattr(settings, "QUALITY_FALLBACK_ENABLED", True)
+                    and quality.defer
+                )
+                if quality_defer:
+                    if not quality_fallback_seen:
+                        quality_fallback_seen = True
+                        quality_fallback_started = time.monotonic()
+                        quality_fallback_alass_base = alass_attempted
+                        timing.quality_fallback_triggered = True
+                        timing.quality_fallback_first_p95_ms = getattr(
+                            evaluation, "p95_offset_ms", None
+                        )
+                        timing.quality_fallback_first_binding = binding.state.value
+                    rejected_candidates_seen = True
+                    logger.warning(
+                        "[sync-quality] provisional weak-binding guarded result "
+                        "deferred for sub=%s candidate=%s: %s; trying the next "
+                        "independent reference within the fallback budget",
+                        target_id,
+                        strategy_name,
+                        quality.summary,
+                    )
                 # Computed before the verdict is stored: a resync verdict records
                 # where its transformed artifact lives, so a later reuse can
                 # serve the synchronized bytes instead of the original.
                 key = build_synced_cache_key(
                     meta, target_id, content_hash=content_hash, decision=decision_kind
                 )
+                # Content-addressed twin for cross-subtitle reuse. It deliberately
+                # excludes the subtitle ID and includes the video fingerprint,
+                # original content hash and language, so only a byte-identical
+                # original for the same video/language can read it.
+                content_key = self._content_artifact_key(meta, content_hash)
+                corrected_serving = (
+                    serving_state
+                    is LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET
+                )
                 await self._store_verdict(
-                    verdict_key, evaluation, content_hash, meta, target_id, artifact_key=key,
+                    verdict_key, evaluation, content_hash, meta, target_id,
+                    artifact_key=content_key if corrected_serving else key,
                     artifact_bytes=synced.encode("utf-8"),
                     reference_sha=hashlib.sha256(reference.encode("utf-8")).hexdigest(),
+                    serving_state=serving_state.value,
                 )
                 self._audit_serve(
                     evaluation, meta, target_id, from_cache=False, resolved=resolved
@@ -2389,10 +3376,20 @@ class SyncOrchestrator:
                         "sync_state": evaluation.sync_state.value,
                         "verification": evaluation.verification.value,
                         "sync_confidence": evaluation.sync_confidence,
+                        "original_content_hash": content_hash,
                         # Distinct from ``sync_state`` on purpose: this records
                         # which Large Offset decision delivered the bytes and
                         # never asserts a verification the analyzer refused.
                         "serving_state": serving_state.value,
+                        # Generation marker for the guarded replay path. Only a
+                        # corrected artifact written under the current guard may
+                        # be replayed without re-running the pipeline.
+                        "large_offset_authorization": (
+                            LARGE_OFFSET_CACHE_AUTHORIZATION_VERSION
+                            if serving_state
+                            is LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET
+                            else None
+                        ),
                         **self._binding_metadata(binding),
                         **self._methodology_metadata(meta),
                     }
@@ -2408,14 +3405,26 @@ class SyncOrchestrator:
                         "timestamp": datetime.now(UTC).isoformat(),
                     }})
                     await self._sync_cache.set_meta(resolution_key, outcome_meta)
+                    if corrected_serving and not quality_defer:
+                        # Cross-subtitle twin for the guarded Large-Offset
+                        # artifact. The verdict record points at this key; a
+                        # different subtitle ID with byte-identical original
+                        # content can validate and serve it without discovery or
+                        # another ALASS run. The verdict itself remains
+                        # UNVERIFIED/UNKNOWN.
+                        await self._sync_cache.set(content_key, synced.encode("utf-8"))
+                        await self._sync_cache.set_meta(content_key, {
+                            **outcome_meta,
+                            "status": "synced",
+                            "decision": decision_kind,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        })
                 # Serving contract: the analyzer is the authority on whether
                 # these bytes may replace the original. An attempt it does not
                 # trust is kept for diagnostics/cache but never returned to the
                 # user, who gets the original provider subtitle instead -- the
                 # unsynchronized original is far more usable than a mangled one.
-                serve_synchronized = binding_allowed and may_serve_synchronized(
-                    evaluation.sync_state.value, evaluation.verification.value
-                )
+                serve_synchronized = serve_without_override
                 # Scoped exception to "an attempt the verifier does not trust
                 # must never replace the original".
                 #
@@ -2440,6 +3449,7 @@ class SyncOrchestrator:
                     serving_state
                     is LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET
                     and not unified_authority_enabled(meta)
+                    and not quality_defer
                 ):
                     if not serve_synchronized:
                         logger.info(
@@ -2524,6 +3534,20 @@ class SyncOrchestrator:
                     evaluation.verification.value,
                 )
                 if serve_synchronized:
+                    if quality_fallback_seen:
+                        timing.quality_fallback_served = True
+                        logger.info(
+                            "[sync-quality] selected a stronger independent candidate "
+                            "after deferring a weak provisional: sub=%s candidate=%s "
+                            "binding=%s p95=%s mad=%s struct=%s verification=%s",
+                            target_id,
+                            strategy_name,
+                            binding.state.value,
+                            evaluation.p95_offset_ms,
+                            evaluation.mad_offset_ms,
+                            evaluation.structural_similarity,
+                            evaluation.verification.value,
+                        )
                     capture_selected(reference, synced, "alass")
                     self._record_outcome(
                         meta,
@@ -2532,7 +3556,8 @@ class SyncOrchestrator:
                     self._promote_sticky_reference(
                         meta=meta, target_id=target_id,
                         pristine_text=pristine_shadow_target,
-                        resolved=resolved, evaluation=evaluation)
+                        resolved=resolved, evaluation=evaluation,
+                        serving_state=serving_state.value)
                     return self._delivery_payload(served, sub_bytes, evaluation, meta, target_id,
                         hashlib.sha256(reference.encode("utf-8")).hexdigest())
                 # A REJECTED candidate must NOT end the request.
@@ -2586,6 +3611,8 @@ class SyncOrchestrator:
                 resolved=pal_resolved,
             )
             if hybrid_served is not None:
+                if quality_fallback_seen:
+                    timing.quality_fallback_served = True
                 return hybrid_served
             # Two-point PAL-speedup fallback. Runs only here -- after Alass
             # and every verified path failed -- using the pristine request
@@ -2604,7 +3631,16 @@ class SyncOrchestrator:
                 resolved=pal_resolved,
             )
             if pal_served is not None:
+                if quality_fallback_seen:
+                    timing.quality_fallback_served = True
                 return pal_served
+        if quality_fallback_seen:
+            timing.quality_fallback_exhausted = True
+            logger.warning(
+                "[sync-quality] no candidate met the serving policy after deferring "
+                "a weak-binding guarded correction for sub=%s -> serving the original",
+                target_id,
+            )
         if (
             self._sync_cache is not None
             and not rejected_candidates_seen
@@ -2636,7 +3672,11 @@ class SyncOrchestrator:
         if not target_text or not resolved.text or resolved.partial:
             return None
         try:
+            affine_started = time.monotonic()
             result = await asyncio.to_thread(attempt_timeline_affine, target_text, resolved.text)
+            _timing = current_sync_timing.get()
+            if _timing is not None:
+                _timing.timeline_affine_ms += (time.monotonic() - affine_started) * 1000
         except Exception as exc:
             logger.info("[timeline-affine] accepted=false reason=exception:%s", type(exc).__name__)
             return None

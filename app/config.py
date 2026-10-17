@@ -79,6 +79,37 @@ class Settings(BaseSettings):
     # selector normally stops far earlier: it collapses duplicate release
     # families and short-circuits a known-incompatible timing family.
     REFERENCE_POOL_LIMIT: int = 6
+    # --- progressive reference preparation -------------------------------- #
+    # Planned references are downloaded one step ahead of the verification
+    # loop so a rejected candidate's successor is already decoded when the
+    # loop asks for it. The concurrency limit bounds how many provider
+    # downloads may run at once (the 0.6s start pacing still applies), and
+    # the lookahead bounds how many *unconsumed* candidates may be prepared
+    # speculatively. Neither setting changes eligibility, ordering, or the
+    # authoritative verifier; a prepared-but-unused candidate is cancelled.
+    REFERENCE_PREFETCH_ENABLED: bool = True
+    REFERENCE_PREFETCH_CONCURRENCY: int = 2
+    REFERENCE_PREFETCH_LOOKAHEAD: int = 2
+    # Lightweight preflight (existing cue/anchor evidence only, ~50 ms per
+    # candidate). When two already-downloaded references from the SAME
+    # release family independently propose the same large offset, try the
+    # one with materially tighter anchor dispersion first. The other stays
+    # in the plan, immediately behind it, and the real verifier still
+    # decides acceptance.
+    REFERENCE_PREFLIGHT_ENABLED: bool = True
+    REFERENCE_PREFLIGHT_WAIT_SECONDS: float = 2.5
+    REFERENCE_PREFLIGHT_OFFSET_AGREEMENT_MS: int = 750
+    # --- quality-aware Large-Offset fallback -------------------------------- #
+    # A guarded Large-Offset result with weak binding is not immediately
+    # served. It is held provisionally and the loop may try up to this many
+    # additional eligible references (and at most this many wall-clock
+    # seconds) looking for a strong-binding or normally verified result.
+    # If none is found, the original subtitle is served rather than a known
+    # low-confidence correction. Strong-binding guarded results (the confirmed
+    # Into the Wild/Dexter shape) are unaffected.
+    QUALITY_FALLBACK_ENABLED: bool = True
+    QUALITY_FALLBACK_MAX_ATTEMPTS: int = 2
+    QUALITY_FALLBACK_MAX_SECONDS: float = 8.0
     REDIS_URL: str | None = None
 
     # --- adaptive audio activity detection (measurement only) -------------- #

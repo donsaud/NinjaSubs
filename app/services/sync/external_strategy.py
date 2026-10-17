@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import time
@@ -28,6 +29,7 @@ from cachetools import TTLCache
 
 from app.services import release_scoring_integration as release_scoring
 from app.services.subtitle_matcher import extract_metadata
+from app.services.sync import discovery_hints
 from app.services.sync.cache import ReferenceDiskCache
 from app.services.sync.case_capture import capture_provider
 from app.services.sync.decode import (
@@ -40,6 +42,7 @@ from app.services.sync.matching import (
     _source_kind,
     is_informative_release_name,
     is_retail_disc_source,
+    normalize_release_group,
     parse_release_identity,
 )
 from app.services.sync.query import ResolvedReference
@@ -75,6 +78,15 @@ _REJECTED_MEMO_TTL_SECONDS = 6 * 3600
 # reference resolution finishes inline and still leaves room for alass.
 _DEFAULT_TIMEOUT = 5.0
 _MIN_REFERENCE_BYTES = 5120
+# Leave enough room for a completed Tier 1 result to be returned before the
+# provider deadline. Tier 2 is opportunistic enrichment, never a precondition
+# for keeping candidates that are already in hand.
+_TIER2_RETURN_MARGIN_SECONDS = 0.05
+_TIER2_MIN_SECONDS = 0.05
+# Final cancellation guard for a provider coroutine that ignores its own
+# per-tier deadline. Real provider searches return or raise before the deadline;
+# the guard must never fire ahead of a completed Tier 1 return.
+_PROVIDER_HARD_TIMEOUT_GRACE_SECONDS = 0.25
 
 # Language codes searched/fetched for the *reference* track (independent of the
 # user's subtitle-language preference): English is the primary universal retail
@@ -256,8 +268,8 @@ class ExternalExactStrategy:
 
     All providers are queried concurrently; their candidates are pooled and
     scored globally, so the fastest provider no longer wins by default. Series
-    episode queries are enriched with a season-wide query only when the episode
-    query returned nothing.
+    episode queries are enriched with a season-wide query only when Tier 1 has
+    no ready source-compatible episode or exact-release candidate.
     """
 
     name = "external"
@@ -946,16 +958,33 @@ class ExternalExactStrategy:
     async def _gather_candidates(self, providers, query: ReferenceQuery) -> list[tuple]:
         """Pool ``(release, provider)`` candidates from every provider.
 
-        Each provider is bounded by the resolver timeout; a slow/failing provider
-        simply contributes nothing.
+        Each provider owns a single total deadline. Tier 2 is opportunistic:
+        once Tier 1 has completed, a slow or failed season catalog must not
+        discard it. Display-discovered candidates for the same video and
+        authorization context are merged as hints, but they still go through
+        download, extraction, proof, binding and verification.
         """
 
         async def one(provider) -> list[tuple]:
             name = self._provider_label(provider)
+            deadline = time.monotonic() + self.timeout
+            search = self._search_provider
             try:
-                releases = await asyncio.wait_for(
-                    self._search_provider(provider, query), self.timeout
-                )
+                accepts_deadline = "deadline" in inspect.signature(search).parameters
+            except (TypeError, ValueError):  # pragma: no cover - exotic callable
+                accepts_deadline = False
+            try:
+                if accepts_deadline:
+                    # _search_tiers owns the provider deadline and guarantees
+                    # that a completed Tier 1 is returned before it expires.
+                    releases = await search(provider, query, deadline=deadline)
+                else:
+                    # Compatibility with test/legacy overrides that predate the
+                    # explicit deadline. The outer guard still bounds them.
+                    releases = await asyncio.wait_for(
+                        search(provider, query),
+                        self.timeout + _PROVIDER_HARD_TIMEOUT_GRACE_SECONDS,
+                    )
             except Exception as exc:  # noqa: BLE001 - one provider must not sink the rest
                 logger.warning("[reference] %s search failed: %s", name, type(exc).__name__)
                 return []
@@ -967,6 +996,39 @@ class ExternalExactStrategy:
         for batch in batches:
             if isinstance(batch, list):
                 merged.extend(batch)
+
+        # Display already paid for provider discovery on this video. Reuse those
+        # candidates only as hints for the same video + credential context; the
+        # normal planning/download/proof path decides whether any is usable.
+        api_keys = getattr(query, "api_keys", {}) or {}
+        hint_key = discovery_hints.video_scope_key(
+            imdb_id=getattr(query, "imdb_id", None),
+            media_type=getattr(query, "media_type", None),
+            season=getattr(query, "season", None),
+            episode=getattr(query, "episode", None),
+            target_filename=getattr(query, "target_filename", None),
+            video_hash=getattr(query, "video_hash", None),
+            video_size=getattr(query, "video_size", None),
+        )
+        hints = discovery_hints.lookup(
+            hint_key,
+            discovery_hints.authorization_digest(
+                subdl_key=api_keys.get("subdl"),
+                subsource_key=api_keys.get("subsource"),
+                opensubtitles_key=api_keys.get("opensubtitles"),
+            ),
+        )
+        if hints:
+            by_label = {self._provider_label(provider): provider for provider in providers}
+            reused = 0
+            for hint in hints:
+                provider = by_label.get(str(getattr(hint, "provider", "")).lower())
+                if provider is None:
+                    continue
+                merged.append((hint, provider))
+                reused += 1
+            if reused:
+                logger.info("[reference] reused %d Display candidate hint(s)", reused)
 
         # De-duplicate identical downloads returned by more than one provider.
         seen: set[str] = set()
@@ -980,14 +1042,14 @@ class ExternalExactStrategy:
             deduped.append((rel, provider))
         return deduped
 
-    async def _search_provider(self, provider, query: ReferenceQuery) -> list:
+    async def _search_provider(self, provider, query: ReferenceQuery, *, deadline: float | None = None) -> list:
         """Route a provider to its search implementation (Identity, not name)."""
         if provider is self._subdl:
-            return await self._search_subdl(query)
+            return await self._search_subdl(query, deadline=deadline)
         if provider is self._subsource:
-            return await self._search_subsource(query)
+            return await self._search_subsource(query, deadline=deadline)
         if provider is self._opensubtitles:
-            return await self._search_opensubtitles(query)
+            return await self._search_opensubtitles(query, deadline=deadline)
         raise ValueError(f"unknown provider {provider!r}")
 
     def _provider_api_key(self, provider, query: ReferenceQuery) -> str | None:
@@ -1433,11 +1495,27 @@ class ExternalExactStrategy:
         # Safe, bounded correlation of actual execution with weighted planning.
         release_scoring.log_attempt(cand, query)
 
-        # Pace consecutive downloads so one request cannot burst a provider
-        # into a 429 / circuit break. Skipped for the first download so the
-        # common single-candidate case pays no latency.
-        if shared.get("downloaded"):
-            await asyncio.sleep(_REFERENCE_DOWNLOAD_MIN_INTERVAL_SECONDS)
+        # Pace consecutive downloads from the SAME provider so one request
+        # cannot burst it into a 429 / circuit break. Providers are independent
+        # rate-limit domains, so the pacing state is per provider: two different
+        # providers may transfer concurrently (which is the latency win), while
+        # downloads from one provider still start at least 0.6s apart. The lock
+        # also makes the start-time accounting safe under bounded prefetch.
+        provider_key = self._provider_label(cand_provider) or "unknown"
+        pacing_locks = shared.setdefault("pacing_locks", {})
+        pacing_last = shared.setdefault("pacing_last", {})
+        pacing_lock = pacing_locks.get(provider_key)
+        if pacing_lock is None:
+            pacing_lock = asyncio.Lock()
+            pacing_locks[provider_key] = pacing_lock
+        async with pacing_lock:
+            now = time.monotonic()
+            previous = pacing_last.get(provider_key)
+            if previous is not None:
+                delay = _REFERENCE_DOWNLOAD_MIN_INTERVAL_SECONDS - (now - previous)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            pacing_last[provider_key] = time.monotonic()
         shared["downloaded"] = int(shared.get("downloaded") or 0) + 1
 
         result = await self._download_candidate(cand, cand_provider, query)
@@ -1589,7 +1667,12 @@ class ExternalExactStrategy:
             decision_kind,
         )
         try:
+            network_started = time.monotonic()
             raw = await provider.download_archive(best.download_url, api_key=api_key)
+            network_ms = (time.monotonic() - network_started) * 1000
+            timing = current_sync_timing.get()
+            if timing is not None:
+                timing.reference_network_ms += network_ms
         except TimeoutError:
             logger.warning("[reference] download timed out: candidate=%r provider=%s",
                            best_name, self._provider_label(provider))
@@ -1615,11 +1698,15 @@ class ExternalExactStrategy:
         with release_scoring.extracting_member() as selected_members:
             # Inflate/bsdtar are blocking; run them off the event loop. The
             # member list is shared by reference, so selections still record.
+            decode_started = time.monotonic()
             decoded = await asyncio.to_thread(
                 self._decode_payload,
                 raw, best_name, season=query.season if query else None,
                 episode=query.episode if query else None,
             )
+            timing = current_sync_timing.get()
+            if timing is not None:
+                timing.reference_decode_ms += (time.monotonic() - decode_started) * 1000
         selected_member = selected_members[-1] if selected_members else None
         # An unresolved pack cannot authorize a synchronization reference.
         proof = release_scoring.reference_proof(best, query, selected_member)
@@ -1727,8 +1814,49 @@ class ExternalExactStrategy:
         return None
 
     @staticmethod
+    def _has_match(result, field: str) -> bool:
+        from app.services.release_scoring.model import MatchState
+
+        return any(
+            evidence.field == field and evidence.state is MatchState.MATCH
+            for evidence in result.evidence
+        )
+
+    @staticmethod
+    def _exact_release_identity(result, query: ReferenceQuery) -> bool:
+        """True for a source-exact, same-group release for this video.
+
+        This is a discovery shortcut only. An unresolved season pack still has
+        to be downloaded and re-scored after member extraction; nothing here
+        makes it ready or trusted.
+        """
+        if not result.discovery_eligible or result.source_priority != 0:
+            return False
+        group = query.release_group
+        if not group:
+            group = parse_release_identity(query.target_filename).release_group
+        target_group = normalize_release_group(group)
+        fact = result.candidate.fact("release_group")
+        candidate_group = None if fact.conflict else normalize_release_group(fact.value)
+        if not target_group or candidate_group != target_group:
+            return False
+        # A season pack must at least prove the requested season; the episode
+        # member is resolved later. A single-episode file must prove the
+        # requested episode, otherwise skipping Tier 2 would strand the plan on
+        # an incompatible episode.
+        if query.season is not None and not ExternalExactStrategy._has_match(result, "season"):
+            return False
+        if (
+            query.episode is not None
+            and not result.candidate.unresolved_pack
+            and not ExternalExactStrategy._has_match(result, "episode")
+        ):
+            return False
+        return True
+
+    @staticmethod
     def _needs_season_enrichment(releases, query: ReferenceQuery, strict: bool = True) -> bool:
-        """Discover packs unless a ready source-compatible episode already exists."""
+        """Discover packs unless a ready or exact release candidate exists."""
         if query.season is None:
             return False
         if not releases:
@@ -1746,15 +1874,39 @@ class ExternalExactStrategy:
             if any(result.ready_reference_eligible and (result.verified_hash or result.state("source") is MatchState.MATCH)
                    for result in release_scoring.matches([candidate], query)):
                 return False
+        # A source-exact, same-release-group pack is already the best shape of
+        # candidate tier 2 could find. It remains unresolved until extraction,
+        # but that is a download-time proof, not a reason to spend another
+        # provider search (and risk losing Tier 1 to a shared timeout).
+        if any(ExternalExactStrategy._exact_release_identity(result, query) for result in results):
+            logger.info(
+                "[reference] Tier 1 already has an exact-release candidate; "
+                "skipping season %s catalog enrichment",
+                query.season,
+            )
+            return False
         return True
 
-    async def _search_tiers(self, search, query: ReferenceQuery, provider_name: str) -> list:
+    async def _search_tiers(
+        self,
+        search,
+        query: ReferenceQuery,
+        provider_name: str,
+        *,
+        deadline: float | None = None,
+    ) -> list:
         """Tier 1 episode query, enriched by a Tier 2 season query when needed.
 
         Tier 2 results are appended after Tier 1 (deduplicated by download URL)
-        before the combined pool is ranked against the target video.
+        before the combined pool is ranked against the target video. Tier 2 is
+        opportunistic: a timeout or provider failure returns the completed
+        Tier 1 batch instead of discarding it.
         """
-        tier1 = await search(episode=query.episode)
+        deadline = deadline if deadline is not None else time.monotonic() + self.timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"{provider_name} reference search budget exhausted")
+        tier1 = await asyncio.wait_for(search(episode=query.episode), remaining)
         if query.episode is None or not self._needs_season_enrichment(tier1, query):
             return list(tier1)
         logger.info(
@@ -1763,13 +1915,31 @@ class ExternalExactStrategy:
             _source_kind(query.target_filename),
             query.season,
         )
-        tier2 = await search(episode=None)
+        tier2_budget = deadline - time.monotonic() - _TIER2_RETURN_MARGIN_SECONDS
+        if tier2_budget < _TIER2_MIN_SECONDS:
+            logger.warning(
+                "[reference] %s Tier 2 skipped: %.2fs left; keeping %d Tier 1 candidate(s)",
+                provider_name,
+                max(0.0, tier2_budget),
+                len(tier1),
+            )
+            return list(tier1)
+        try:
+            tier2 = await asyncio.wait_for(search(episode=None), tier2_budget)
+        except Exception as exc:  # noqa: BLE001 - enrichment is optional
+            logger.warning(
+                "[reference] %s Tier 2 failed: %s; keeping %d Tier 1 candidate(s)",
+                provider_name,
+                type(exc).__name__,
+                len(tier1),
+            )
+            return list(tier1)
         seen = {getattr(rel, "download_url", None) for rel in tier1}
         return list(tier1) + [
             rel for rel in tier2 if getattr(rel, "download_url", None) not in seen
         ]
 
-    async def _search_subdl(self, query: ReferenceQuery) -> list:
+    async def _search_subdl(self, query: ReferenceQuery, *, deadline: float | None = None) -> list:
         api_key = query.api_keys.get("subdl")
 
         async def _search(episode: int | None):
@@ -1785,9 +1955,9 @@ class ExternalExactStrategy:
                 target_filename=self._match_filename(query),
             )
 
-        return await self._search_tiers(_search, query, "subdl")
+        return await self._search_tiers(_search, query, "subdl", deadline=deadline)
 
-    async def _search_subsource(self, query: ReferenceQuery) -> list:
+    async def _search_subsource(self, query: ReferenceQuery, *, deadline: float | None = None) -> list:
         api_key = query.api_keys.get("subsource")
 
         async def _search(episode: int | None):
@@ -1803,9 +1973,9 @@ class ExternalExactStrategy:
                 target_filename=self._match_filename(query),
             )
 
-        return await self._search_tiers(_search, query, "subsource")
+        return await self._search_tiers(_search, query, "subsource", deadline=deadline)
 
-    async def _search_opensubtitles(self, query: ReferenceQuery) -> list:
+    async def _search_opensubtitles(self, query: ReferenceQuery, *, deadline: float | None = None) -> list:
         api_key = query.api_keys.get("opensubtitles")
 
         async def _search(episode: int | None):
@@ -1823,5 +1993,5 @@ class ExternalExactStrategy:
                 moviebytesize=query.video_size,
             )
 
-        return await self._search_tiers(_search, query, "opensubtitles")
+        return await self._search_tiers(_search, query, "opensubtitles", deadline=deadline)
 

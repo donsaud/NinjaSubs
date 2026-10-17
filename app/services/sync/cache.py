@@ -67,6 +67,21 @@ def _cache_member_number(value: object) -> int | str | None:
     return value if isinstance(value, str | int) or value is None else str(value)
 
 
+def _member_matches(stored: object, requested: object, *, movie: bool) -> bool:
+    """Compare stored/requested episode members, tolerating movie ``0``.
+
+    Movie proofs historically recorded ``member_season=0``/``member_episode=0``
+    while the request carries ``None``. Those describe the same movie, so the
+    video/sticky tiers must treat them as equal. Series keep exact comparison:
+    season 0 (specials) is not season None.
+    """
+    stored_number = _cache_member_number(stored)
+    requested_number = _cache_member_number(requested)
+    if movie:
+        return stored_number in (None, 0) and requested_number in (None, 0)
+    return stored_number == requested_number
+
+
 def _video_artifact_sort_key(meta: dict, path_name: str) -> tuple[int, float, float, str]:
     """Order retained artifacts by established verdict strength, then score.
 
@@ -442,9 +457,10 @@ class ReferenceDiskCache:
                 continue
             # An artifact is only reusable when the member it actually proves is
             # the member that was requested. Never promote an unresolved pack.
+            movie = query.season is None and query.episode is None
             if (
-                _cache_member_number(meta.get("member_season")) != _cache_member_number(query.season)
-                or _cache_member_number(meta.get("member_episode")) != _cache_member_number(query.episode)
+                not _member_matches(meta.get("member_season"), query.season, movie=movie)
+                or not _member_matches(meta.get("member_episode"), query.episode, movie=movie)
             ):
                 continue
             resolved = ResolvedReference(
@@ -507,6 +523,13 @@ class ReferenceDiskCache:
             return False
         member_season = _cache_member_number(member_season)
         member_episode = _cache_member_number(member_episode)
+        # Movies carry no episode identity. Normalizing the historical 0 to
+        # None makes new writes match the request's None and keeps the legacy
+        # 0-valued entries readable through _member_matches().
+        if query.season is None:
+            member_season = None
+        if query.episode is None:
+            member_episode = None
         if query.season is not None and member_season != _cache_member_number(query.season):
             return False
         if query.episode is not None and member_episode != _cache_member_number(query.episode):
@@ -614,6 +637,7 @@ class ReferenceDiskCache:
         bluray_match: bool = False,
         partial: bool = False,
         evidence: dict | None = None,
+        methodology: tuple[str, str] | None = None,
     ) -> bool:
         """Promote a verified, deliverable reference as this video's sticky first choice.
 
@@ -633,6 +657,13 @@ class ReferenceDiskCache:
             return False
         member_season = _cache_member_number(member_season)
         member_episode = _cache_member_number(member_episode)
+        # Movies carry no episode identity. Normalizing the historical 0 to
+        # None makes new writes match the request's None and keeps the legacy
+        # 0-valued entries readable through _member_matches().
+        if query.season is None:
+            member_season = None
+        if query.episode is None:
+            member_episode = None
         if query.season is not None and member_season != _cache_member_number(query.season):
             return False
         if query.episode is not None and member_episode != _cache_member_number(query.episode):
@@ -640,7 +671,7 @@ class ReferenceDiskCache:
         if query.episode is not None and member_episode is None:
             return False
         kind = self._safe_kind(kind)
-        method, version = self._sticky_methodology()
+        method, version = methodology or self._sticky_methodology()
         try:
             evidence_json = json.dumps(evidence or {}, sort_keys=True)
         except (TypeError, ValueError):
@@ -707,7 +738,7 @@ class ReferenceDiskCache:
         return None
 
     def get_sticky_reference(
-        self, query: ReferenceQuery
+        self, query: ReferenceQuery, *, methodology: tuple[str, str] | None = None
     ) -> ResolvedReference | None:
         """Return this video's sticky verified reference artifact, or ``None``.
 
@@ -748,7 +779,7 @@ class ReferenceDiskCache:
             self._remove_sticky(pointer)
             logger.info("[reference-sticky] lookup=scope_mismatch video=%s", stem)
             return None
-        method, version = self._sticky_methodology()
+        method, version = methodology or self._sticky_methodology()
         if (record.get("verification_method") != method
                 or record.get("verification_version") != version):
             self._remove_sticky(pointer)
@@ -792,9 +823,10 @@ class ReferenceDiskCache:
             self._remove_sticky(pointer)
             logger.info("[reference-sticky] lookup=artifact_invalid video=%s reason=sidecar", stem)
             return None
+        movie = query.season is None and query.episode is None
         if (
-            _cache_member_number(meta.get("member_season")) != _cache_member_number(query.season)
-            or _cache_member_number(meta.get("member_episode")) != _cache_member_number(query.episode)
+            not _member_matches(meta.get("member_season"), query.season, movie=movie)
+            or not _member_matches(meta.get("member_episode"), query.episode, movie=movie)
         ):
             self._remove_sticky(pointer)
             logger.info("[reference-sticky] lookup=scope_mismatch video=%s reason=episode", stem)
