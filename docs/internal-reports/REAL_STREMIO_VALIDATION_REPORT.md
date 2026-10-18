@@ -56,7 +56,7 @@ The production flow was traced from the initial Stremio HTTP request to the fina
 
 ## 2. Test Cases & Validation Matrix
 
-Validated via [`tests/test_real_stremio_integration.py`](tests/test_real_stremio_integration.py) and [`tests/test_end_to_end_integration.py`](tests/test_end_to_end_integration.py):
+Validated via [`tests/test_real_stremio_integration.py`](../../tests/test_real_stremio_integration.py) and [`tests/test_end_to_end_integration.py`](../../tests/test_end_to_end_integration.py):
 
 ### Case A: Movie — Dune Part Two 2024
 - **Endpoint Tested**: `GET /subtitles/movie/tt15239678/filename=Dune.Part.Two.2024.2160p.UHD.Remux.DV.Atmos-FLUX.json?nocache=1`

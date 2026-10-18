@@ -31,6 +31,11 @@ env/
 .mypy_cache/
 .ruff_cache/
 
+# Pytest-owned working cache (created and removed by tests/conftest.py).
+# Normally transient, but an interrupted session would leave its JSON
+# metadata behind; never a source, fixture, or documentation path.
+tests/cache/
+
 # Local databases and temporary/build artifacts
 *.db
 *.sqlite
