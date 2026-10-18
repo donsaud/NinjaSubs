@@ -3,11 +3,11 @@
 #
 # This file is NEVER read by plain `docker compose up` / `docker compose
 # build`: it takes effect only when passed explicitly with
-# `-f docker-compose.hybrid-test.yml`. Deleting or omitting it restores
+# `-f tests/compose/hybrid-test.yml`. Deleting or omitting it restores
 # default-off production behavior with no code or Git changes.
 #
-# Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.hybrid-test.yml up -d
+# Usage (run from the repository root):
+#   docker compose -f docker-compose.yml -f tests/compose/hybrid-test.yml up -d
 # Rollback (also restores the pre-test image tagged before the rebuild):
 #   docker compose up -d
 #   (then, if the image itself must be restored:)

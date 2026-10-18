@@ -228,7 +228,7 @@ def test_activation_lives_only_in_the_temporary_override():
 
     repo = pathlib.Path(__file__).resolve().parent.parent
     plain = (repo / "docker-compose.yml").read_text(encoding="utf-8")
-    override = (repo / "docker-compose.hybrid-test.yml").read_text(encoding="utf-8")
+    override = (repo / "tests" / "compose" / "hybrid-test.yml").read_text(encoding="utf-8")
     assert "HYBRID_TEST_ENABLED=1" not in plain
     assert "HYBRID_TEST_SCOPE" not in plain
     assert "HYBRID_TEST_ENABLED=1" in override
@@ -293,7 +293,7 @@ def test_all_override_file_contents():
     import pathlib
 
     repo = pathlib.Path(__file__).resolve().parent.parent
-    override = (repo / "docker-compose.unified-all.yml").read_text(encoding="utf-8")
+    override = (repo / "tests" / "compose" / "unified-all.yml").read_text(encoding="utf-8")
     assert "HYBRID_TEST_ENABLED=1" in override
     assert "HYBRID_TEST_SCOPE=ALL" in override
     assert "ENABLE_AUTOSYNC_TEST_OVERRIDE=false" in override
