@@ -18,7 +18,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, cast
@@ -167,6 +167,26 @@ class _PreResolvedReference:
 
     async def resolve_with_provenance(self, query: Any, **kwargs: Any) -> Any:
         return self._resolved
+
+
+@dataclass(frozen=True)
+class TimingWitnessDecision:
+    """What a local timing witness proved about a metadata-compatible pairing.
+
+    ``reason`` is one of the gate module's bounded codes:
+
+    * ``timing_witness_aligned`` -- measured, no re-timing needed (fast original);
+    * ``timing_witness_insufficient`` -- unmeasurable or too little
+      correspondence; missing evidence is not a contradiction (fast original);
+    * ``timing_witness_unavailable`` -- no local reference for this video at all
+      (fast original, and no provider request is made to find one);
+    * ``timing_witness_conflict`` -- a measured displacement (investigate).
+    """
+
+    investigate: bool
+    reason: str
+    witness: str | None = None
+    median_offset_ms: float | None = None
 
 
 class _LazyCandidate:
@@ -995,6 +1015,117 @@ class SyncOrchestrator:
                 return cache
         return None
 
+    def _local_timing_witness(
+        self, query: Any, meta: dict
+    ) -> tuple[Any | None, str | None]:
+        """Best *local* reference for this exact video, or ``(None, None)``.
+
+        Cache-only on purpose: the Metadata Gate must not turn a metadata-based
+        decision into a provider request just to look for evidence. Tiers follow
+        the Phase 5 evidence order (sticky, then the subtitle/video artifact
+        tiers, then a retained season pack), and every lookup fails closed to
+        "unavailable".
+        """
+        cache = self._reference_cache()
+        if cache is not None:
+            getter = getattr(cache, "get_sticky_reference", None)
+            if callable(getter):
+                try:
+                    methodology = (
+                        ("unified", "timing-v3") if unified_authority_enabled(meta)
+                        else ("legacy", "large-offset-v1")
+                    )
+                    sticky = getter(query, methodology=methodology)
+                except Exception:  # pragma: no cover - cache must never break sync
+                    sticky = None
+                if sticky is not None and getattr(sticky, "text", None):
+                    return sticky, "sticky"
+            getter = getattr(cache, "get", None)
+            if callable(getter):
+                try:
+                    cached = getter(query)
+                except Exception:  # pragma: no cover - cache must never break sync
+                    cached = None
+                if cached is not None and getattr(cached, "text", None):
+                    return cached, "subtitle_cache"
+            getter = getattr(cache, "get_video_scoped", None)
+            if callable(getter):
+                try:
+                    found = getter(query)
+                except Exception:  # pragma: no cover - cache must never break sync
+                    found = None
+                if found:
+                    artifact = found[0]
+                    if getattr(artifact, "text", None):
+                        return artifact, "video_cache"
+        try:
+            from app.services.sync.season_pack import season_pack_reference
+
+            packed = season_pack_reference(query)
+        except Exception:  # pragma: no cover - cache must never break sync
+            packed = None
+        if packed is not None and getattr(packed, "text", None):
+            return packed, "season_pack"
+        return None, None
+
+    def _timing_witness_decision(
+        self, target_text: str | None, query: Any, meta: dict, target_id: str
+    ) -> TimingWitnessDecision:
+        """Measure a local reference to tell metadata compatibility from timing.
+
+        Bounded by construction: the witness is a reference already on disk and
+        the measurement is one pass over two local documents -- no provider
+        request, no download, no ALASS. The elapsed cost is reported as
+        ``metadata_gate_timing_ms``.
+
+        Only a *sufficient* measurement may contradict the metadata verdict:
+        the witness must pair at least half the target's dialogue across the
+        timeline before a disagreement is treated as evidence. Absence of
+        correspondence, too few matched cues, or an unreadable artifact keep the
+        original (item 6: unavailable evidence is never a contradiction).
+        """
+        if not target_text:
+            return TimingWitnessDecision(False, "timing_witness_insufficient")
+        witness, source = self._local_timing_witness(query, meta)
+        if witness is None:
+            return TimingWitnessDecision(False, "timing_witness_unavailable")
+        witness_text = getattr(witness, "text", None)
+        if not isinstance(witness_text, str) or not witness_text:
+            return TimingWitnessDecision(False, "timing_witness_insufficient", source)
+        try:
+            consistency = measure_alignment_consistency(
+                target_text, witness_text, is_dialogue=is_dialogue_cue)
+        except Exception as exc:  # pragma: no cover - measurement must not break sync
+            logger.info(
+                "[sync] timing witness measurement failed for sub=%s: %s",
+                target_id, type(exc).__name__,
+            )
+            return TimingWitnessDecision(False, "timing_witness_insufficient", source)
+        if consistency is None:
+            return TimingWitnessDecision(False, "timing_witness_insufficient", source)
+        # Evidence quality floor, reused rather than re-invented: the same
+        # coverage and section requirements the already-aligned claim uses.
+        from app.services.subtitle_matcher import (
+            ALIGNED_MIN_SECTIONS,
+            ALIGNED_SECTION_MIN_COVERAGE,
+        )
+
+        sufficient = (
+            consistency.coverage >= ALIGNED_SECTION_MIN_COVERAGE
+            and consistency.sections_measured >= ALIGNED_MIN_SECTIONS
+        )
+        if not sufficient:
+            return TimingWitnessDecision(
+                False, "timing_witness_insufficient", source,
+                (consistency.median_offset_s or 0.0) * 1000.0)
+        if consistency.aligned:
+            return TimingWitnessDecision(
+                False, "timing_witness_aligned", source,
+                (consistency.median_offset_s or 0.0) * 1000.0)
+        return TimingWitnessDecision(
+            True, "timing_witness_conflict", source,
+            (consistency.median_offset_s or 0.0) * 1000.0)
+
     def _promote_sticky_reference(
         self, *, meta: dict, target_id: str | None, pristine_text: str | None,
         resolved: Any | None, evaluation: Any | None,
@@ -1009,16 +1140,8 @@ class SyncOrchestrator:
         can neither erase nor oscillate the preference. Every later reuse
         still re-verifies, re-checks binding, and re-checks HTTP integrity.
 
-        Two promotion regimes are recorded separately:
-
-        * Unified authority promotes only a ``verified*`` evaluation.
-        * The legacy pipeline promotes only a reference whose bytes were
-          actually delivered under the guarded Large-Offset decision
-          (``serving_state=alass_corrected_large_offset``). A plain
-          UNVERIFIED/REJECTED candidate never reaches this branch. The sticky
-          pointer only makes that reference the first *attempt*; the verifier
-          still decides every later request, and the pointer is never a
-          VERIFIED claim.
+        Only independently verified, strongly/exactly bound results can
+        promote preference. Guarded unverified delivery remains non-promotable.
 
         Never raises and never affects the serve in progress.
         """
@@ -1026,23 +1149,13 @@ class SyncOrchestrator:
             if evaluation is None or resolved is None:
                 return
             state = str(getattr(getattr(evaluation, "sync_state", ""), "value", "") or "")
-            if unified_authority_enabled(meta):
-                # Legacy measurement regimes have their own cache contracts;
-                # sticky promotion is strictly a timing-v3 construct there.
-                if not state.startswith("verified"):
-                    return
-                methodology = ("unified", "timing-v3")
-            else:
-                # Guarded Large-Offset serving is the only legacy path that may
-                # promote a reference. It is still UNVERIFIED as a result; the
-                # pointer is a reference hint, never a trust upgrade.
-                if serving_state != LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET.value:
-                    return
-                if state != SyncState.UNVERIFIED.value:
-                    return
-                if getattr(evaluation, "target_binding", None) not in {"exact", "strong"}:
-                    return
-                methodology = ("legacy", "large-offset-v1")
+            if (not unified_authority_enabled(meta)
+                    or state not in {"verified_synced", "verified_resynced"}
+                    or getattr(evaluation, "target_binding", None) not in {"exact", "strong"}
+                    or getattr(evaluation, "verification", None) is not VerificationAvailability.VERIFIED
+                    or getattr(resolved, "partial", False)):
+                return
+            methodology = ("unified", "timing-v3")
             text = getattr(resolved, "text", None)
             if not text:
                 return
@@ -1064,6 +1177,7 @@ class SyncOrchestrator:
                 return
             evidence = {
                 "sync_state": state,
+                "target_binding": evaluation.target_binding,
                 "serving_state": serving_state,
                 "verification": str(
                     getattr(getattr(evaluation, "verification", ""), "value", "")
@@ -1764,12 +1878,31 @@ class SyncOrchestrator:
             # candidate); the planned releases then supply genuine alternatives,
             # each downloaded only if the loop actually reaches it.
             _shared: dict[str, Any] = {"downloaded": 0, "seen": set()}
+
+            def _seed_reference_bytes(shared: dict[str, Any], text: Any) -> str | None:
+                """Record an artifact already offered so planning cannot repeat it.
+
+                The digest must be registered in *prepared* form as well: a
+                provider copy of the same subtitle can differ only in packaging
+                (BOM, line endings, trailing spaces), and the planned stream
+                compares prepared identities.
+                """
+                if not text:
+                    return None
+                from app.services.sync.reference import prepared_reference_digest
+
+                raw_digest = hashlib.sha256(
+                    str(text).encode("utf-8", "replace")).hexdigest()
+                shared["seen"].add(raw_digest)
+                shared["seen"].add(prepared_reference_digest(str(text)))
+                return raw_digest
+
             if _pack_digest[0]:
-                _shared["seen"].add(_pack_digest[0])
+                _seed_reference_bytes(_shared, getattr(_pack_hit, "text", None))
             if _sticky_digest[0] is not None:
                 # Bytes already attempted first this request: planned
                 # releases must not re-offer them under another name.
-                _shared["seen"].add(_sticky_digest[0])
+                _seed_reference_bytes(_shared, getattr(_sticky_hit, "text", None))
             _planned: list[tuple[Any, Any]] = []
             has_plan = callable(_plan)
             cached_available = bool(_hit is not None and getattr(_hit, "text", None))
@@ -1780,7 +1913,7 @@ class SyncOrchestrator:
                     # identical bytes under a different release name.
                     _hit_digest = hashlib.sha256(
                         str(_hit.text).encode("utf-8", "replace")).hexdigest()
-                    _shared["seen"].add(_hit_digest)
+                    _seed_reference_bytes(_shared, _hit.text)
                     if _hit_digest in {_sticky_digest[0], _pack_digest[0]}:
                         # Identical bytes were already attempted first via the
                         # sticky tier this request; re-verifying them here can
@@ -1791,12 +1924,14 @@ class SyncOrchestrator:
                         timing.cached_reference_attempted = True
                         yield f"{_name}#cache", _PreResolvedReference(_hit)
             _video_hit = None
-            if has_plan and not cached_available:
-                # Video-scoped artifact tier. The subtitle-scoped miss above only
-                # says "no reference was proven for THIS subtitle"; it does not
-                # say the reference was never downloaded. Which file to use is a
-                # property of the video, so consult that tier before paying for
-                # provider discovery and another copy of the same archive.
+            if has_plan:
+                # Video-scoped artifact tier. The subtitle-scoped lookup above
+                # only says "a reference was proven for THIS subtitle's cue
+                # layout"; it can be a sampled/partial artifact. Which file to
+                # use is a property of the video, so this tier is consulted even
+                # when the subtitle tier hit: it may hold the complete artifact
+                # for the same video. Identical bytes are skipped by digest
+                # below, so the common case costs one local lookup.
                 _video_hit = _lookup_video_reference(_obj, query, timing)
             cached_available = cached_available or bool(
                 _video_hit is not None and getattr(_video_hit, "text", None)
@@ -1809,18 +1944,17 @@ class SyncOrchestrator:
                 # It is not an acceptance: the loop below still runs
                 # ALASS/affine/binding and the final verifier on it exactly as
                 # for a fresh download.
-                _shared["seen"].add(
-                    hashlib.sha256(str(_video_hit.text).encode("utf-8", "replace")).hexdigest()
-                )
-                _video_digest = hashlib.sha256(
-                    str(_video_hit.text).encode("utf-8", "replace")).hexdigest()
-                if _video_digest in {_sticky_digest[0], _pack_digest[0]}:
-                    # Same bytes the sticky tier already attempted first this
-                    # request; skip the re-verification but keep the source
-                    # exclusion so planning cannot re-fetch its archive.
+                from app.services.sync.reference import prepared_reference_digest
+
+                if prepared_reference_digest(str(_video_hit.text)) in _shared["seen"]:
+                    # Same bytes an earlier tier already offered this request
+                    # (sticky, season pack or the subtitle-scoped cache); a
+                    # second attempt can only repeat that verdict. The source
+                    # exclusion below still applies.
                     logger.info("[sync] %s video-cache reference skipped: identical "
-                                "bytes already attempted via sticky tier", _name)
+                                "bytes already offered", _name)
                 else:
+                    _seed_reference_bytes(_shared, _video_hit.text)
                     timing.cached_reference_attempted = True
                     yield f"{_name}#video_cache", _PreResolvedReference(_video_hit)
                 source_digest = getattr(_video_hit, "source_download_digest", None)
@@ -2408,14 +2542,53 @@ class SyncOrchestrator:
             # promoted, and no timing-v3 evidence is manufactured. The same
             # subtitle stays eligible for a later explicit sync request,
             # which bypasses this gate via force_sync/explicit_sync_request.
-            self._record_outcome(meta, classify_outcome(False, None, False))
+            fast_original = gate.action is MetadataGateAction.FAST_ORIGINAL
+            if fast_original:
+                # Release compatibility is not timing compatibility. When a
+                # reference for this exact video is already on disk, measuring
+                # it costs no provider request and turns the fast path into a
+                # *measured* claim. A witness that measurably contradicts the
+                # target means the metadata cannot be trusted, so the normal
+                # pipeline runs; anything less than a measurement keeps the
+                # original (missing evidence is not a contradiction).
+                witness_started = time.monotonic()
+                witness = self._timing_witness_decision(
+                    target_text, query, meta, target_id)
+                timing.metadata_gate_timing_ms = round(
+                    (time.monotonic() - witness_started) * 1000, 3)
+                timing.metadata_gate_timing_witness = witness.witness
+                timing.metadata_gate_timing_reason = witness.reason
+                if witness.investigate:
+                    logger.info(
+                        "[sync] metadata gate deferred for sub=%s: %s witness "
+                        "%s measurably contradicts the target (median offset %+.2fs); "
+                        "investigating",
+                        target_id,
+                        gate.reasons[0] if gate.reasons else "no_mismatch_evidence",
+                        witness.witness,
+                        (witness.median_offset_ms or 0.0) / 1000.0,
+                    )
+                    fast_original = False
+                else:
+                    logger.info(
+                        "[sync] metadata gate fast-original confirmed for sub=%s: "
+                        "reason=%s witness=%s",
+                        target_id, witness.reason, witness.witness or "none",
+                    )
+            if fast_original:
+                self._record_outcome(meta, classify_outcome(False, None, False))
+                return sub_bytes
             if gate.action is MetadataGateAction.IDENTITY_CONFLICT:
+                self._record_outcome(meta, classify_outcome(False, None, False))
                 logger.warning(
                     "[sync] metadata-gate identity conflict for sub=%s: %s -> "
                     "serving original without investigation",
                     target_id, ",".join(gate.reasons) or "none",
                 )
-            return sub_bytes
+                return sub_bytes
+            # A timing witness disproved fast delivery: fall through to the
+            # unchanged investigation pipeline. Self-references and weak
+            # evidence are still rejected there exactly as before.
 
         # Reference strategies in priority order (external-release-reference reference,
         # then OpenSubtitles MovieHash). The playing stream is never probed.

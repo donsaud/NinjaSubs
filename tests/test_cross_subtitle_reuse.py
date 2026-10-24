@@ -442,7 +442,7 @@ def test_movie_video_cache_accepts_legacy_member_zero(tmp_path):
     assert cache.get_video_scoped(query) is not None
 
 
-def test_legacy_large_offset_promotes_sticky_for_movie_and_reuses_across_ids(tmp_path):
+def test_legacy_large_offset_never_promotes_unverified_preference(tmp_path):
     cache = ReferenceDiskCache(root=tmp_path)
     orchestrator = om.SyncOrchestrator(
         external_strategy=SimpleNamespace(cache=cache),
@@ -467,28 +467,11 @@ def test_legacy_large_offset_promotes_sticky_for_movie_and_reuses_across_ids(tmp
         serving_state=LargeOffsetServingState.ALASS_CORRECTED_LARGE_OFFSET.value,
     )
     pointer = tmp_path / f"{_query().video_scope_stem}.sticky.json"
-    assert pointer.is_file()
-    record = json.loads(pointer.read_text("utf-8"))
-    assert record["verification_method"] == "legacy"
-    assert record["verification_version"] == "large-offset-v1"
-    assert record["evidence"]["serving_state"] == "alass_corrected_large_offset"
-
-    # A different subtitle ID for the same video hits the sticky pointer.
-    hit = cache.get_sticky_reference(
+    assert not pointer.is_file()
+    assert cache.get_sticky_reference(
         _query("92788b7594b7f497"), methodology=("legacy", "large-offset-v1")
-    )
-    assert hit is not None
-    assert hit.from_sticky_reference is True
-    assert hit.candidate.endswith(".ENG.srt")
-    # Unified lookup must not reinterpret the legacy pointer.
+    ) is None
     assert cache.get_sticky_reference(_query("92788b7594b7f497")) is None
-    # A different video must not hit.
-    other = ReferenceQuery(
-        imdb_id="tt0758758", media_type="movie",
-        target_filename="Into.The.Wild.2007.720p.BluRay.x264-OTHER",
-        video_size=999999, languages=("eng", "ara"),
-    )
-    assert cache.get_sticky_reference(other, methodology=("legacy", "large-offset-v1")) is None
 
 
 def test_legacy_unverified_without_corrected_serving_never_promotes(tmp_path):
@@ -509,8 +492,8 @@ def test_legacy_unverified_without_corrected_serving_never_promotes(tmp_path):
     assert list(tmp_path.glob("*.sticky.json")) == []
 
 
-def test_legacy_sticky_is_attempted_before_discovery_for_a_new_subtitle(tmp_path):
-    """A different subtitle ID for the same video reaches the promoted reference first."""
+def test_unverified_legacy_result_does_not_preempt_new_subtitle_discovery(tmp_path):
+    """Guarded delivery does not turn an unverified reference into preference."""
     cache = ReferenceDiskCache(root=tmp_path)
     orchestrator = om.SyncOrchestrator(
         external_strategy=SimpleNamespace(cache=cache),
@@ -561,15 +544,14 @@ def test_legacy_sticky_is_attempted_before_discovery_for_a_new_subtitle(tmp_path
             _meta("92788b7594b7f497"),
         )
         try:
-            name, adapter = await generator.__anext__()
-            await adapter.resolve_with_provenance(_query("92788b7594b7f497"))
-            return [name]
+            return [name async for name, _ in generator]
         finally:
             await generator.aclose()
 
     names = asyncio.run(collect())
-    assert names == ["retained-reference#sticky"], names
-    assert strategy.plan_calls == 0, "sticky reference must precede discovery"
+    assert names == []
+    assert strategy.plan_calls == 1, "unverified reference must not preempt discovery"
+
 
 
 @pytest.mark.asyncio

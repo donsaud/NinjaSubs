@@ -416,9 +416,8 @@ async def test_precheck_proceeds_on_mismatch_or_missing_group(monkeypatch):
     }
     orch = _orchestrator(hash_strategy=_FakeStrategy(BIG_REF.decode()))
     await orch.evaluate_and_sync(_arabic_bytes(), mismatched, "t", True)
-    # Same source family: a group difference alone is no mismatch evidence,
-    # so the metadata gate fast-delivers without consulting strategies.
-    assert orch._hash_strategy.calls == 0
+    # Same source family alone is not positive release-lineage evidence.
+    assert orch._hash_strategy.calls == 1
 
     # Identical filenames (listing fallback) must not trivially match.
     identical = dict(mismatched, target_filename="Show.1080p.WEB-DL.x264-GRP.srt",

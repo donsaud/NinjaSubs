@@ -2097,6 +2097,9 @@ def _merge_sync_meta(meta: dict | None, context: dict | None) -> dict:
 def _sync_meta_for_user(meta: dict | None, context: dict | None, prefs: UserPreferences | None) -> dict:
     """Use the current request's credentials even when the raw subtitle is cached."""
     merged = _merge_sync_meta(meta, context)
+    # The removed user preference cannot survive through cached request metadata.
+    for retired in ("force_sync", "forceSync"):
+        merged.pop(retired, None)
     if prefs is not None:
         for name in ("subdl_key", "subsource_key", "opensubtitles_key"):
             merged[name] = getattr(prefs, name) or ""

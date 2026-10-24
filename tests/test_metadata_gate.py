@@ -1,4 +1,4 @@
-"""Evidence-driven sync gate: fast delivery unless mismatch evidence exists.
+"""Evidence-driven sync gate: fast delivery requires positive release evidence.
 
 The gate decides only whether to ENTER the expensive pipeline (reference
 discovery, verification, ALASS). Tests assert actual execution behavior
@@ -12,6 +12,8 @@ import hashlib
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
 
 from app.services.sync import hybrid_router as router
 from app.services.sync import orchestrator as om
@@ -43,13 +45,35 @@ def test_same_release_fast_original():
     assert decision.reasons == ("same_release_lineage",)
 
 
-def test_compatible_family_without_group_fast_original():
-    assert decide(VIDEO_BLURAY_FM, "Movie.2024.1080p.BluRay.srt").action is FAST
+@pytest.mark.parametrize("video_group,subtitle_group", [("HDC", "CHD"), ("CHD", "HDC")])
+def test_into_the_wild_cross_group_requires_investigation(video_group, subtitle_group):
+    decision = decide(
+        f"Into.the.Wild.2007.1080p.BluRay.x264-{video_group}.mkv",
+        f"Into.the.Wild.2007.1080p.BluRay.x264-{subtitle_group}.srt",
+    )
+    assert decision.action is INVESTIGATE
+    assert decision.reasons == ("release_compatibility_unproven",)
 
 
-def test_group_difference_alone_never_investigates():
-    decision = decide(VIDEO_BLURAY_FM, "Movie.2024.1080p.BluRay.HDA.srt")
+@pytest.mark.parametrize("video,subtitle", [
+    ("Dexter.s8e02.Every.silver.lining1080p.BluRay.10Bit.Dts-HDMa5.1.HEVC-d3g.mkv",
+     "Dexter.s8e02.Every.silver.lining.BluRay.10Bit.1080p.DD5.1.H265-d3g.srt"),
+    ("Into.the.Wild.2007.1080p.BluRay.x264-HDC.mkv",
+     "Into.the.Wild.2007.720p.BluRay.x264-HDC.srt"),
+])
+def test_confirmed_release_lineage_keeps_fast_original(video, subtitle):
+    decision = decide(video, subtitle)
     assert decision.action is FAST
+    assert decision.reasons == ("same_release_lineage",)
+
+
+def test_compatible_family_without_group_investigates():
+    assert decide(VIDEO_BLURAY_FM, "Movie.2024.1080p.BluRay.srt").action is INVESTIGATE
+
+
+def test_group_difference_is_uncertain_not_a_source_conflict():
+    decision = decide(VIDEO_BLURAY_FM, "Movie.2024.1080p.BluRay.HDA.srt")
+    assert decision.action is INVESTIGATE
     assert "source_family_conflict" not in decision.reasons
 
 
@@ -61,17 +85,17 @@ def test_source_family_conflict_investigates_both_directions():
                   "Movie.2024.WEB-DL.AMZN.srt").reasons == ("source_family_conflict",)
 
 
-def test_same_source_family_fast_original():
+def test_matching_parsed_web_lineage_stays_fast():
     assert decide("Movie.2024.WEB-DL.AMZN.mkv", "Movie.2024.WEB-DL.AMZN.srt").action is FAST
 
 
-def test_unknown_service_alone_never_investigates():
-    assert decide("Movie.2024.WEB-DL.mkv", "Movie.2024.WEB-DL.srt").action is FAST
+def test_unknown_service_without_lineage_investigates():
+    assert decide("Movie.2024.WEB-DL.mkv", "Movie.2024.WEB-DL.srt").action is INVESTIGATE
 
 
 def test_bare_filename_invents_no_mismatch():
     decision = decide("Movie.2024.1080p.BluRay.x264-GROUP.mkv", "Arabic.srt")
-    assert decision.action is FAST
+    assert decision.action is INVESTIGATE
     assert decision.reasons == ("metadata_insufficient",)
 
 
@@ -82,9 +106,10 @@ def test_confirmed_incompatible_cut_investigates():
     assert decision.reasons == ("edition_or_cut_conflict",)
 
 
-def test_one_sided_edition_tag_is_not_a_conflict():
-    assert decide("Movie.2024.1080p.BluRay.srt",
-                  "Movie.2024.1080p.BluRay.srt").action is FAST
+def test_missing_lineage_is_not_an_edition_conflict():
+    decision = decide("Movie.2024.1080p.BluRay.srt", "Movie.2024.1080p.BluRay.srt")
+    assert decision.action is INVESTIGATE
+    assert decision.reasons == ("release_compatibility_unproven",)
 
 
 def test_resolution_codec_remux_alone_never_investigate():
@@ -199,18 +224,39 @@ def _meta(video=VIDEO_BLURAY_FM, release=None, **extra):
     return meta
 
 
-async def test_fast_path_avoids_discovery_download_and_alass(monkeypatch, caplog):
+@pytest.mark.parametrize("video,release", [
+    (VIDEO_BLURAY_FM, "Movie.2024.1080p.BluRay.REMUX-FraMeSToR.srt"),
+    ("Dexter.s8e02.Every.silver.lining1080p.BluRay.10Bit.Dts-HDMa5.1.HEVC-d3g.mkv",
+     "Dexter.s8e02.Every.silver.lining.BluRay.10Bit.1080p.DD5.1.H265-d3g.srt"),
+])
+async def test_fast_path_avoids_discovery_download_and_alass(monkeypatch, caplog, video, release):
     target, _ = _sentences(16)
     orch, strategy, service = _harness(monkeypatch, None)
     with caplog.at_level("INFO", logger="app.services.sync.orchestrator"):
         out = await orch.evaluate_and_sync(
             target.encode(),
-            _meta(release="Movie.2024.1080p.BluRay.REMUX-FraMeSToR.srt"),
+            _meta(video=video, release=release),
             "sub", auto_sync=True)
     assert out == target.encode()
     strategy.resolve_with_provenance.assert_not_called()
     service.sync_async.assert_not_called()
     assert any("metadata-gate decision=fast_original" in r.message for r in caplog.records)
+
+
+async def test_into_the_wild_without_timing_witness_reaches_discovery(monkeypatch):
+    target, _ = _sentences(16)
+    orch, strategy, _service = _harness(monkeypatch, ResolvedReference(None))
+    monkeypatch.setattr(orch, "_timing_witness_decision", lambda *a: om.TimingWitnessDecision(
+        False, "timing_witness_unavailable"))
+    out = await orch.evaluate_and_sync(
+        target.encode(),
+        _meta(video="Into.the.Wild.2007.1080p.BluRay.x264-HDC.mkv",
+              release="Into.the.Wild.2007.1080p.BluRay.x264-CHD.srt"),
+        "sub", auto_sync=True,
+    )
+    strategy.resolve_with_provenance.assert_awaited()
+    # Investigation alone cannot authorize a correction without a reference.
+    assert out == target.encode()
 
 
 async def test_investigate_path_reaches_reference_discovery(monkeypatch):
@@ -373,8 +419,14 @@ def test_gate_reasons_are_closed_allowlist():
 
     assert set(gate_module.REASONS) == {
         "same_release_lineage", "no_mismatch_evidence", "metadata_insufficient",
+        "release_compatibility_unproven",
         "insufficient_metadata_for_gate", "source_family_conflict",
         "edition_or_cut_conflict", "frame_rate_conflict",
         "episode_identity_conflict", "title_identity_conflict",
         "year_identity_conflict", "explicit_sync_request",
+        # Phase 6: the timing-witness vocabulary, reported beside the metadata
+        # verdict so "metadata compatible" and "timing compatible" stay
+        # distinguishable. Still a closed set; no provider-controlled string.
+        "timing_witness_aligned", "timing_witness_insufficient",
+        "timing_witness_unavailable", "timing_witness_conflict",
     }

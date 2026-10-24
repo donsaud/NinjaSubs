@@ -46,6 +46,7 @@ from app.services.sync.matching import (
     parse_release_identity,
 )
 from app.services.sync.query import ResolvedReference
+from app.services.sync.reference import prepared_reference_digest as _prepared_reference_digest
 from app.services.sync.reference_v2 import release_family_key as _release_family_key
 from app.services.sync.telemetry import current_sync_timing
 
@@ -1245,14 +1246,39 @@ class ExternalExactStrategy:
     ) -> tuple[list[tuple[Any, Any]], dict[str, Any]]:
         """Fill at most ``limit`` actual download slots in weighted order.
 
-        The global ReferencePolicy order is never re-sorted. The only
-        intentional departure is a single reserved exploration opportunity: when
+        ReferencePolicy eligibility and scores are unchanged. Without an exact
+        release candidate, distinct release/service families get a first attempt
+        before repeated listings of one family. This is scheduling, not evidence
+        of independence or stronger binding. A single reserved exploration opportunity: when
         ordinary candidates would otherwise saturate the budget, the lowest
         source-mismatching slot can be given to the highest-ranked unresolved
         pack that already shares the target's release medium. Extraction and
         readiness are still earned afterward; no points or rank are invented.
         """
         stem = query.cache_stem
+        if not any(reference_tier(query.target_filename, candidate) <= TIER_EXACT_GROUP
+                   for candidate, _ in ordered_pairs):
+            from app.services.sync.matching import normalize_release_group, parse_release_identity
+
+            families: set[tuple] = set()
+            distinct, repeated = [], []
+            for candidate, result in ordered_pairs:
+                identity = parse_release_identity(getattr(candidate, "release_name", None))
+                family = (
+                    identity.source_family, identity.service,
+                    normalize_release_group(identity.release_group),
+                    str(getattr(candidate, "lang", "") or ""),
+                    identity.cut_tags, identity.edition_tags,
+                )
+                # Unknown identity cannot justify merging or suppressing an upload.
+                known = bool(identity.source_family and (identity.service or identity.release_group))
+                if known and family in families:
+                    repeated.append((candidate, result))
+                else:
+                    distinct.append((candidate, result))
+                    if known:
+                        families.add(family)
+            ordered_pairs = distinct + repeated
         known_sources = {digest for digest in getattr(query, "known_source_digests", ()) or () if digest}
         ordinary: list[dict[str, Any]] = []
         excluded: list[dict[str, Any]] = []
@@ -1310,6 +1336,7 @@ class ExternalExactStrategy:
         base = ordinary[:normal_capacity]
         plan_entries = list(base)
         explorer: dict[str, Any] | None = None
+        explorer_planned = False
 
         if len(ordinary) >= limit and limit > 0:
             qualifying_normal = any(_exploration_candidate(entry["result"]) for entry in ordinary)
@@ -1345,6 +1372,7 @@ class ExternalExactStrategy:
                     seen_sources.add(source)
                 selected_ids.add(id(explorer["candidate"]))
                 plan_entries.append({**explorer, "exploration": True})
+                explorer_planned = True
                 excluded.append(self._plan_row(
                     result=ordinary[-1]["result"],
                     provider=ordinary[-1]["provider"],
@@ -1354,10 +1382,13 @@ class ExternalExactStrategy:
                 ))
             elif explorer is not None and bottom is None and not qualifying_normal:
                 plan_entries.append({**explorer, "exploration": True})
-        if explorer is None:
-            # No qualifying exploration candidate: retain the ordinary budget
-            # exactly as before. Reservation must not shrink a valid plan.
-            plan_entries = list(ordinary)
+                explorer_planned = True
+        if not explorer_planned:
+            # The budget was already filled by ordinary candidates. Returning
+            # ``base`` (one slot short) because the reserved exploration slot
+            # could not be used discarded a slot the planner had already paid to
+            # fill; the next-ranked eligible candidate must take it instead.
+            plan_entries = list(ordinary[:limit])
 
         plan = [(entry["candidate"], entry["provider"]) for entry in plan_entries]
         planned_ids = {id(candidate) for candidate, _ in plan}
@@ -1546,40 +1577,39 @@ class ExternalExactStrategy:
 
         seen: set[str] = shared.setdefault("seen", set())
         digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
-        if digest in seen:
+        # Two providers serving the same subtitle usually differ in *packaging*
+        # (line endings, BOM, trailing spaces, credits) while presenting the same
+        # prepared document. Aligning that a second time can only reproduce the
+        # synchronization just measured, at the cost of another ALASS run. The
+        # comparison happens on the prepared form, never on raw bytes, so a
+        # genuinely different translation or a different cue grid stays a
+        # genuinely independent alternative (the verifier's evidence depends on
+        # the reference's dialogue, so collapsing those would lose evidence).
+        prepared = _prepared_reference_digest(text)
+        if digest in seen or prepared in seen:
             if timing is not None:
                 timing.references_deduplicated += 1
             logger.info(
-                "[reference] resolve_all: candidate %r has duplicate content (%s); skipping",
+                "[reference] resolve_all: candidate %r duplicates an earlier "
+                "artifact after preparation (%s); skipping",
                 getattr(cand, "release_name", "?"),
-                digest[:12],
+                (digest[:12] if digest in seen else prepared[:12]),
             )
             return ResolvedReference(None)
         seen.add(digest)
+        seen.add(prepared)
         self._remember_video_reference(query, result)
         return result
 
     def _remember_video_reference(self, query: ReferenceQuery, result: ResolvedReference) -> None:
-        """Persist a request-validated reference artifact against the target VIDEO.
+        """Retain an untrusted candidate for reuse, never a trusted preference.
 
-        Callers invoke this only after the candidate has passed both weighted
-        extraction/readiness and request-specific cue validation, so a wrong-cut
-        download is not promoted merely because it decoded successfully.
-
-        Which file was downloaded is a property of the video, not of the
-        subtitle the user picked. Storing it here is what lets the next
-        subtitle for the same episode reuse the artifact instead of
-        re-downloading the same archive from a rate-limited provider.
-
-        The cache refuses the write unless a specific episode member was proven
-        (see ``set_video_scoped``), so an unresolved season pack is never
-        promoted to a validated episode reference. An artifact that is identical
-        to the current target is still retained: identity makes it unusable for
-        this request, but it may be legitimate independent evidence for a
-        different subtitle. Every later use still applies the independent-content
-        check before verification.
+        Every reuse still needs independent verification and target binding.
+        Identical target bytes cannot supply independent reference evidence.
         """
-        if not result.text or query is None:
+        from app.services.sync.reference_content_identity import identical_content
+
+        if not result.text or query is None or identical_content(query.target_text, result.text):
             return
         try:
             from app.services.sync_service import sanitize_subtitle
@@ -1594,6 +1624,7 @@ class ExternalExactStrategy:
                 kind=result.kind,
                 bluray_match=result.bluray_match,
                 candidate=result.candidate,
+                partial=result.partial,
                 member_season=result.member_season,
                 member_episode=result.member_episode,
                 score=result.weighted_score,

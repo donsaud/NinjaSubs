@@ -95,6 +95,16 @@ class SyncTiming:
     metadata_gate_reason: str | None = None
     #: Wall-clock cost of the local metadata comparison (no I/O inside).
     metadata_gate_ms: float | None = None
+    #: Metadata Gate timing witness: which local artifact (sticky /
+    #: subtitle_cache / video_cache / season_pack) was measured to distinguish
+    #: metadata compatibility from timing compatibility, what it concluded, and
+    #: how long the measurement took. ``None`` when no local witness existed.
+    #: ``metadata_gate_reason`` keeps reporting the *metadata* verdict; these
+    #: fields report the timing evidence beside it, so the two claims are never
+    #: conflated.
+    metadata_gate_timing_witness: str | None = None
+    metadata_gate_timing_reason: str | None = None
+    metadata_gate_timing_ms: float | None = None
     #: Bounded counts of why reference attempts ended, keyed by REFERENCE_OUTCOMES.
     reference_outcomes: dict = field(default_factory=dict)
     #: Fixed telemetry definitions. A planned candidate is an attempt slot
@@ -136,6 +146,8 @@ class SyncTiming:
             "sticky_reference_attempted=%s "
             "season_pack_reference_attempted=%s "
             "metadata_gate_decision=%s metadata_gate_reason=%s metadata_gate_ms=%s "
+            "metadata_gate_timing_witness=%s metadata_gate_timing_reason=%s "
+            "metadata_gate_timing_ms=%s "
             "candidate_count_planned=%d candidates_considered=%d references_downloaded=%d "
             "references_deduplicated=%d ALASS_processes_launched=%d "
             "reference_network_ms=%.1f reference_decode_ms=%.1f "
@@ -154,6 +166,8 @@ class SyncTiming:
             self.sticky_reference_attempted,
             self.season_pack_reference_attempted,
             self.metadata_gate_decision, self.metadata_gate_reason, self.metadata_gate_ms,
+            self.metadata_gate_timing_witness, self.metadata_gate_timing_reason,
+            self.metadata_gate_timing_ms,
             self.candidate_count_planned, self.candidates_considered, self.references_downloaded,
             self.references_deduplicated, self.alass_processes_launched,
             self.reference_network_ms, self.reference_decode_ms,

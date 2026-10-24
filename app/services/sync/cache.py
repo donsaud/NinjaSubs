@@ -37,6 +37,16 @@ _VIDEO_SCOPE_MARKER = "video"
 #: exact video stem, so the namespace can never collide with artifact files.
 _STICKY_MARKER = "sticky"
 
+
+def _trusted_preference(evidence: dict | None) -> bool:
+    """Candidate retention is not verified, video-bound preference."""
+    return bool(
+        isinstance(evidence, dict)
+        and evidence.get("sync_state") in {"verified_synced", "verified_resynced"}
+        and evidence.get("verification") == "verified"
+        and evidence.get("target_binding") in {"exact", "strong"}
+    )
+
 #: Sticky pointers are tiny metadata; the bound only stops unbounded growth
 #: across videos. Artifacts themselves stay under the video-tier lifecycle.
 MAX_STICKY_ENTRIES = 128
@@ -653,7 +663,10 @@ class ReferenceDiskCache:
         The pointer records methodology, so a methodology change can never
         reinterpret an old promotion.
         """
-        if not text:
+        from app.services.sync.reference_content_identity import identical_content
+
+        if (not text or partial or not _trusted_preference(evidence)
+                or identical_content(query.target_text, text)):
             return False
         member_season = _cache_member_number(member_season)
         member_episode = _cache_member_number(member_episode)
@@ -672,6 +685,8 @@ class ReferenceDiskCache:
             return False
         kind = self._safe_kind(kind)
         method, version = methodology or self._sticky_methodology()
+        if (method, version) != ("unified", "timing-v3"):
+            return False
         try:
             evidence_json = json.dumps(evidence or {}, sort_keys=True)
         except (TypeError, ValueError):
@@ -780,6 +795,9 @@ class ReferenceDiskCache:
             logger.info("[reference-sticky] lookup=scope_mismatch video=%s", stem)
             return None
         method, version = methodology or self._sticky_methodology()
+        if (not _trusted_preference(record.get("evidence"))
+                or (method, version) != ("unified", "timing-v3")):
+            return None
         if (record.get("verification_method") != method
                 or record.get("verification_version") != version):
             self._remove_sticky(pointer)
@@ -805,6 +823,10 @@ class ReferenceDiskCache:
             self._remove_sticky(pointer)
             logger.info("[reference-sticky] lookup=artifact_invalid video=%s reason=unusable", stem)
             return None
+        from app.services.sync.reference_content_identity import identical_content
+
+        if identical_content(query.target_text, text):
+            return None
         content_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if content_sha != record.get("content_sha"):
             self._remove_sticky(pointer)
@@ -816,7 +838,8 @@ class ReferenceDiskCache:
             meta = {}
         if not isinstance(meta, dict):
             meta = {}
-        if (meta.get("content_sha") != content_sha
+        if (meta.get("partial") is True
+                or meta.get("content_sha") != content_sha
                 or int(meta.get("engine_version", 0)) < ENGINE_VERSION
                 or (getattr(settings, "SYNC_REQUIRE_EXACT_MATCH", True)
                     and meta.get("strict") is not True)):

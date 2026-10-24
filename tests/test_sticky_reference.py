@@ -79,6 +79,11 @@ def _resolved(text: str, candidate: str = AOS_NAME,
                              provider=provider, member_season=1, member_episode=1)
 
 
+def _trusted_evidence():
+    return {"sync_state": "verified_resynced", "verification": "verified",
+            "target_binding": "strong"}
+
+
 def _evaluation(verified: bool = True):
     from app.services.sync.alignment import SubtitleEvaluation
 
@@ -86,6 +91,7 @@ def _evaluation(verified: bool = True):
     if verified:
         evaluation.set_verdict(SyncState.VERIFIED_RESYNCED,
                                VerificationAvailability.VERIFIED)
+    evaluation.target_binding = "strong"
     return evaluation
 
 
@@ -115,7 +121,7 @@ def test_promote_and_lookup_round_trip(tmp_path: pathlib.Path) -> None:
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
         text=_aos(), member_season=1, member_episode=1,
-        evidence={"sync_state": "verified_resynced", "groups": 80}) is True
+        evidence={**_trusted_evidence(), "groups": 80}) is True
     resolved = cache.get_sticky_reference(query)
     assert resolved is not None
     assert resolved.from_sticky_reference is True
@@ -130,10 +136,10 @@ def test_promotion_replaces_previous_winner(tmp_path: pathlib.Path) -> None:
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subdl", candidate="old.srt", kind="edition",
-        text=_rovers_en(), member_season=1, member_episode=1, evidence={}) is True
+        text=_rovers_en(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     resolved = cache.get_sticky_reference(query)
     assert resolved is not None and resolved.candidate == AOS_NAME
 
@@ -143,7 +149,7 @@ def test_methodology_mismatch_invalidates(tmp_path: pathlib.Path) -> None:
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     pointer = tmp_path / f"{query.video_scope_stem}.sticky.json"
     record = json.loads(pointer.read_text(encoding="utf-8"))
     record["verification_version"] = "unified-v1"
@@ -157,7 +163,7 @@ def test_tampered_artifact_invalidates(tmp_path: pathlib.Path) -> None:
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     pointer = tmp_path / f"{query.video_scope_stem}.sticky.json"
     record = json.loads(pointer.read_text(encoding="utf-8"))
     artifact = tmp_path / record["artifact"]
@@ -171,7 +177,7 @@ def test_missing_artifact_invalidates(tmp_path: pathlib.Path) -> None:
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     pointer = tmp_path / f"{query.video_scope_stem}.sticky.json"
     record = json.loads(pointer.read_text(encoding="utf-8"))
     (tmp_path / record["artifact"]).unlink()
@@ -184,7 +190,7 @@ def test_expired_pointer_invalidates(tmp_path: pathlib.Path) -> None:
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     pointer = tmp_path / f"{query.video_scope_stem}.sticky.json"
     old = 60 * 24 * 3600 * 31
     os.utime(pointer, (pointer.stat().st_mtime - old,) * 2)
@@ -196,7 +202,7 @@ def test_scope_mismatch_across_video_and_episode(tmp_path: pathlib.Path) -> None
     cache = ReferenceDiskCache(root=tmp_path)
     assert cache.set_sticky_reference(
         _query(), provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     assert cache.get_sticky_reference(_query(video="Other.Show.S01E01.mkv")) is None
     assert cache.get_sticky_reference(_query(episode=2)) is None
 
@@ -206,10 +212,10 @@ def test_unproven_member_never_promotes(tmp_path: pathlib.Path) -> None:
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), evidence={}) is False
+        text=_aos(), evidence=_trusted_evidence()) is False
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=2, evidence={}) is False
+        text=_aos(), member_season=1, member_episode=2, evidence=_trusted_evidence()) is False
     assert list(tmp_path.iterdir()) == []
 
 
@@ -218,7 +224,7 @@ def test_persistence_across_instances(tmp_path: pathlib.Path) -> None:
     writer = ReferenceDiskCache(root=tmp_path)
     assert writer.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     reader = ReferenceDiskCache(root=tmp_path)
     resolved = reader.get_sticky_reference(query)
     assert resolved is not None and resolved.text == _aos()
@@ -318,7 +324,7 @@ async def test_sticky_attempted_before_video_cache(monkeypatch, tmp_path: pathli
         member_season=1, member_episode=1) is True
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     orch = om.SyncOrchestrator(sync_cache=SyncCache(), external_strategy=strategy,
                               sync_service=None)
     names, timing = await _attempt_names(orch, strategy, query)
@@ -338,7 +344,7 @@ async def test_identical_video_bytes_not_reattempted(monkeypatch, tmp_path: path
         member_season=1, member_episode=1) is True
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     orch = om.SyncOrchestrator(sync_cache=SyncCache(), external_strategy=strategy,
                               sync_service=None)
     names, timing = await _attempt_names(orch, strategy, query)
@@ -353,7 +359,7 @@ async def test_sticky_hit_skips_planning_and_download(monkeypatch, tmp_path: pat
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     service = SimpleNamespace(sync_async=AsyncMock(return_value=None))
     orch = om.SyncOrchestrator(sync_cache=SyncCache(), external_strategy=strategy,
                               sync_service=service)
@@ -371,7 +377,7 @@ async def test_self_identical_sticky_skipped(monkeypatch, tmp_path: pathlib.Path
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate="same.srt", kind="edition",
-        text=_hdtv(), member_season=1, member_episode=1, evidence={}) is True
+        text=_hdtv(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     service = SimpleNamespace(sync_async=AsyncMock(return_value=None))
     orch = om.SyncOrchestrator(sync_cache=SyncCache(), external_strategy=strategy,
                               sync_service=service)
@@ -387,7 +393,7 @@ async def test_target_failure_keeps_valid_sticky(monkeypatch, tmp_path: pathlib.
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     service = SimpleNamespace(sync_async=AsyncMock(return_value=None))
     orch = om.SyncOrchestrator(sync_cache=SyncCache(), external_strategy=strategy,
                               sync_service=service)
@@ -416,7 +422,7 @@ async def test_new_winner_replaces_unsuitable_preference(monkeypatch, tmp_path: 
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subdl", candidate="Old-Stale.srt", kind="edition",
-        text=_rovers_en(), member_season=1, member_episode=1, evidence={}) is True
+        text=_rovers_en(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     service = SimpleNamespace(sync_async=AsyncMock(return_value=None))
     strategy = SimpleNamespace(
         plan_candidates=AsyncMock(return_value=[
@@ -505,7 +511,7 @@ async def test_compatible_bypass_ignores_sticky(monkeypatch, tmp_path: pathlib.P
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     from tests.test_unified_verification import _linear_pair
 
     target, _ = _linear_pair()
@@ -535,7 +541,7 @@ async def test_sticky_and_pack_cooperate(monkeypatch, tmp_path: pathlib.Path) ->
     query = _query()
     assert cache.set_sticky_reference(
         query, provider="subsource", candidate=AOS_NAME, kind="edition",
-        text=_aos(), member_season=1, member_episode=1, evidence={}) is True
+        text=_aos(), member_season=1, member_episode=1, evidence=_trusted_evidence()) is True
     pack_root = tmp_path / "packs"
     monkeypatch.setattr(pack_module, "pack_root", lambda root=None: pack_root)
     raw_pack = None

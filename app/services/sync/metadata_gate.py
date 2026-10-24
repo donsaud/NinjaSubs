@@ -1,8 +1,8 @@
-"""Evidence-driven sync gate: investigate only on mismatch evidence.
+"""Evidence-driven sync gate: fast delivery requires positive release evidence.
 
-Philosophy: assume the selected subtitle needs no modification unless
-release evidence gives a strong reason to suspect a timing mismatch.
-Synchronization is the last resort, never the default execution path.
+Compatible source families alone do not establish a shared release timeline.
+Uncertain matches enter investigation; investigation does not authorize a
+correction and leaves the existing verification and delivery policies intact.
 
 This module decides only whether to ENTER the expensive synchronization
 workflow (reference discovery, verification, ALASS). It performs no timing
@@ -14,18 +14,17 @@ integrity) behaves exactly as before.
 Evidence comes from the canonical release parser (GuessIt + TRaSH-rules
 vocabulary via :func:`parse_release_identity`); no second parser or
 scoring framework is introduced, and the user-facing ranking percentage
-is never consulted. UNKNOWN is never a mismatch: missing platform, group,
-resolution, codec, or service information cannot trigger investigation.
-A release-group difference alone never triggers either.
+is never consulted. UNKNOWN is never a mismatch, but absence of a mismatch
+is not positive compatibility evidence either.
 
 Outcomes:
 
-* ``FAST_ORIGINAL`` -- no mismatch evidence; serve the pristine original
+* ``FAST_ORIGINAL`` -- positive release-lineage evidence; serve the pristine original
   immediately with no reference discovery, download, or ALASS. This is
   metadata-based delivery, NOT verified synchronization: no verified
   cache entry is written and no Sticky Reference is promoted.
-* ``INVESTIGATE`` -- credible mismatch evidence (or an explicit request,
-  or too little metadata to judge); run the normal pipeline.
+* ``INVESTIGATE`` -- mismatch evidence, unproven compatibility, or an explicit
+  request; run the normal pipeline.
 * ``IDENTITY_CONFLICT`` -- the subtitle demonstrably belongs to different
   media (title/year/episode conflict); serve the original without
   investigation. Syncing across media would be wrong, not merely slow.
@@ -64,6 +63,7 @@ class MetadataGateAction(str, Enum):
 REASONS = (
     "same_release_lineage",
     "no_mismatch_evidence",
+    "release_compatibility_unproven",
     "metadata_insufficient",
     "insufficient_metadata_for_gate",
     "source_family_conflict",
@@ -73,6 +73,11 @@ REASONS = (
     "title_identity_conflict",
     "year_identity_conflict",
     "explicit_sync_request",
+    # Metadata Gate timing witness (Phase 6). Bounded codes only.
+    "timing_witness_aligned",
+    "timing_witness_insufficient",
+    "timing_witness_unavailable",
+    "timing_witness_conflict",
 )
 
 
@@ -111,10 +116,9 @@ def decide_metadata_gate(
         return MetadataGateDecision(
             MetadataGateAction.INVESTIGATE, _reason("insufficient_metadata_for_gate"))
     if not is_informative_release_name(subtitle_name):
-        # A bare label ("Arabic.srt") or debrid junk carries no contrary
-        # signal: unknown metadata is not evidence of incompatibility.
+        # A bare label cannot establish compatible release lineage.
         return MetadataGateDecision(
-            MetadataGateAction.FAST_ORIGINAL, _reason("metadata_insufficient"))
+            MetadataGateAction.INVESTIGATE, _reason("metadata_insufficient"))
     if not is_informative_release_name(video_name):
         # The video is the ground-truth timeline; without a readable video
         # lineage compatibility cannot be asserted, so abstain to legacy.
@@ -160,9 +164,9 @@ def decide_metadata_gate(
         return MetadataGateDecision(
             MetadataGateAction.INVESTIGATE, _reason("frame_rate_conflict"))
 
-    # Group, resolution, codec, remux, service, and missing fields never
-    # trigger: a different group alone is not a timing signal, and UNKNOWN
-    # is not evidence of incompatibility.
+    # Compatible source and a known matching group provide positive lineage
+    # evidence. Resolution/codec/remux differences alone do not invalidate it.
+    # A different or missing group is uncertainty, not a proven timing conflict.
     if (video.source_family and subtitle.source_family
             and compatible_source(video.source_family, subtitle.source_family)
             and normalize_release_group(video.release_group)
@@ -171,4 +175,4 @@ def decide_metadata_gate(
         return MetadataGateDecision(
             MetadataGateAction.FAST_ORIGINAL, _reason("same_release_lineage"))
     return MetadataGateDecision(
-        MetadataGateAction.FAST_ORIGINAL, _reason("no_mismatch_evidence"))
+        MetadataGateAction.INVESTIGATE, _reason("release_compatibility_unproven"))

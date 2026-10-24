@@ -207,6 +207,9 @@ def parse_user_config(
             decoded_bytes = base64.urlsafe_b64decode(padded.encode("utf-8"))
             data = json.loads(decoded_bytes.decode("utf-8"))
             if isinstance(data, dict):
+                # Retired UI preference: saved values must never force investigation.
+                for retired in ("force_sync", "forceSync"):
+                    data.pop(retired, None)
                 if not user_subdl:
                     user_subdl = _as_str(
                         data.get("subdl_key"), data.get("subdl"), data.get("subdlKey")
@@ -350,6 +353,8 @@ def parse_user_config(
         if not user_subdl or not user_subsource or not user_opensubtitles:
             try:
                 parsed_qs = urllib.parse.parse_qs(clean_config)
+                for retired in ("force_sync", "forceSync"):
+                    parsed_qs.pop(retired, None)
                 if not user_subdl:
                     for k in ("subdl", "subdl_key", "subdlKey"):
                         if k in parsed_qs:

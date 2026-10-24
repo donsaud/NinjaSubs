@@ -384,6 +384,24 @@ def reference_fingerprint(text: str | None) -> str | None:
     return hashlib.sha256(grid.encode("utf-8")).hexdigest()[:16]
 
 
+def prepared_reference_digest(text: str | None) -> str:
+    """Identity of a reference *after preparation*.
+
+    Formatting that a downstream step normalises away -- byte-order mark, line
+    endings, trailing whitespace -- must not make two copies of one subtitle look
+    like independent evidence. Dialogue, timing and ordering are preserved
+    exactly, so a different translation or a different cue grid stays distinct.
+    """
+    normalised = (
+        str(text or "")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .lstrip("\ufeff")
+    )
+    normalised = "\n".join(line.rstrip() for line in normalised.split("\n")).strip()
+    return hashlib.sha256(normalised.encode("utf-8", "replace")).hexdigest()
+
+
 def detect_duplicate_groups(
     references: list[tuple[str, str | None, str | None]],
 ) -> dict[str, list[tuple[str, str | None, str | None]]]:
